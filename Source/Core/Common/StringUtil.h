@@ -180,8 +180,6 @@ std::from_chars_result FromChars(std::string_view sv, std::floating_point auto& 
 }
 }  // namespace Common
 
-std::string TabsToSpaces(int tab_size, std::string str);
-
 std::vector<std::string> SplitString(const std::string& str, char delim);
 
 // "C:/Windows/winhelp.exe" to "C:/Windows/", "winhelp", ".exe"
@@ -209,13 +207,13 @@ std::u32string UTF8ToUTF32(const std::string& input);
 std::string UTF32toUTF8(const std::u32string& input);
 std::string TruncateLengthChar(const std::string& input, int length);
 std::string ConvertStringForGame(const std::string& input, int length);
-std::string CP1252ToUTF8(std::string_view str);
-std::string SHIFTJISToUTF8(std::string_view str);
-std::string UTF8ToSHIFTJIS(std::string_view str);
-std::string WStringToUTF8(std::wstring_view str);
+std::string CP1252ToUTF8(std::string_view input);
+std::string SHIFTJISToUTF8(std::string_view input);
+std::string UTF8ToSHIFTJIS(std::string_view input);
+std::string WStringToUTF8(std::wstring_view input);
 std::string UTF16BEToUTF8(const char16_t* str, size_t max_size);  // Stops at \0
-std::string UTF16ToUTF8(std::u16string_view str);
-std::u16string UTF8ToUTF16(std::string_view str);
+std::string UTF16ToUTF8(std::u16string_view input);
+std::u16string UTF8ToUTF16(std::string_view input);
 
 #ifdef __APPLE__
 /**
@@ -330,6 +328,7 @@ std::string GetEscapedHtml(std::string html);
 void ToLower(std::string* str);
 void ToUpper(std::string* str);
 bool CaseInsensitiveEquals(std::string_view a, std::string_view b);
+bool CaseInsensitiveContains(std::string_view haystack, std::string_view needle);
 
 // 'std::less'-like comparison function object type for case-insensitive strings.
 struct CaseInsensitiveLess
@@ -340,4 +339,3 @@ struct CaseInsensitiveLess
 
 std::string BytesToHexString(std::span<const u8> bytes);
 }  // namespace Common
-

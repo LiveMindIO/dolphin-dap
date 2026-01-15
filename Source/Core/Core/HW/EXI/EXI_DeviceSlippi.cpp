@@ -2766,11 +2766,11 @@ bool CEXISlippi::isSlippiChatEnabled()
   switch (last_search.mode)
   {
   case SlippiMatchmaking::DIRECT:
-    res =
-        chat_enabled_choice == Slippi::Chat::ON || chat_enabled_choice == Slippi::Chat::DIRECT_ONLY;
+    res = chat_enabled_choice == Slippi::Chat::CHAT_ON ||
+          chat_enabled_choice == Slippi::Chat::DIRECT_ONLY;
     break;
   default:
-    res = chat_enabled_choice == Slippi::Chat::ON;
+    res = chat_enabled_choice == Slippi::Chat::CHAT_ON;
     break;
   }
   return res;  // default is enabled

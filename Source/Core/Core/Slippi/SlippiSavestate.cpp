@@ -61,7 +61,7 @@ void SlippiSavestate::initBackupLocs()
 
       // Unknown Region Pt2, Heap [80bd5c40 - 811AD5A0)
       // These values get overwritten on init by heap boundaries read from the game directly.
-      // Look for HostRead_U32 below
+      // Look for HostRead<u32> below
       {0x80bd5c40, 0x811AD5A0, nullptr},
   };
 
@@ -123,8 +123,8 @@ void SlippiSavestate::initBackupLocs()
   ASSERT(Core::IsCPUThread());
   Core::CPUThreadGuard guard(Core::System::GetInstance());
   // Get Main Heap Boundaries
-  full_backup_regions[3].start_address = PowerPC::MMU::HostRead_U32(guard, 0x804d76b8);
-  full_backup_regions[3].end_address = PowerPC::MMU::HostRead_U32(guard, 0x804d76bc);
+  full_backup_regions[3].start_address = PowerPC::MMU::HostRead<u32>(guard, 0x804d76b8);
+  full_backup_regions[3].end_address = PowerPC::MMU::HostRead<u32>(guard, 0x804d76bc);
   WARN_LOG_FMT(SLIPPI_ONLINE, "Heap start is: {:#x}", full_backup_regions[3].start_address);
   WARN_LOG_FMT(SLIPPI_ONLINE, "Heap end is: {:#x}", full_backup_regions[3].end_address);
 

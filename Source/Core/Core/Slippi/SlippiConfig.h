@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 namespace Melee
 {
 enum class Version
@@ -16,9 +17,9 @@ namespace Slippi
 {
 enum class Chat
 {
-  ON,
+  CHAT_ON,
   DIRECT_ONLY,
-  OFF
+  CHAT_OFF
 };
 
 struct Config
