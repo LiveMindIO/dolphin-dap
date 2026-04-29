@@ -54,5 +54,7 @@
     <true/>
     <key>CSResourcesFileMapped</key>
     <true/>
+    <key>UIDesignRequiresCompatibility</key>
+    <true/>
 </dict>
 </plist>
