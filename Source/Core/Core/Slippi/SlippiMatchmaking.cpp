@@ -1,7 +1,6 @@
 #include "SlippiMatchmaking.h"
 #include <string>
 #include <vector>
-#include "SlippiRustExtensions.h"
 #include "Common/Common.h"
 #include "Common/ENet.h"
 #include "Common/Logging/Log.h"
@@ -9,6 +8,8 @@
 #include "Common/Version.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
+#include "SlippiRustExtensions.h"
+
 
 #if defined __linux__ && HAVE_ALSA
 #elif defined __APPLE__
@@ -93,7 +94,8 @@ std::unique_ptr<SlippiNetplayClient> SlippiMatchmaking::GetNetplayClient()
 bool SlippiMatchmaking::IsFixedRulesMode(SlippiMatchmaking::OnlinePlayMode mode)
 {
   return mode == SlippiMatchmaking::OnlinePlayMode::UNRANKED ||
-         mode == SlippiMatchmaking::OnlinePlayMode::RANKED;
+         mode == SlippiMatchmaking::OnlinePlayMode::RANKED ||
+         mode == SlippiMatchmaking::OnlinePlayMode::PARTY;
 }
 
 void SlippiMatchmaking::sendMessage(json msg)
