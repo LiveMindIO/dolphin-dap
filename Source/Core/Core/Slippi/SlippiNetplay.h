@@ -195,7 +195,6 @@ public:
   std::unordered_map<u8, bool> GetActivePlayerIndices();
   void ForceDisconnectPlayer(u8 playerIdx);
   SlippiMatchInfo* GetMatchInfo();
-  int32_t GetSlippiLatestRemoteFrame(int max_frame_count);
   SlippiPlayerSelections GetSlippiRemoteChatMessage(bool is_chat_enabled);
   u8 GetSlippiRemoteSentChatMessage(bool is_chat_enabled);
   s32 CalcTimeOffsetUs();

@@ -2319,11 +2319,11 @@ void CEXISlippi::prepareOnlineMatchState()
     INFO_LOG_FMT(SLIPPI_ONLINE, "Rng Offset: {:#x}", rng_offset);
 
     // Check if everyone is the same color
-    auto color = ordered_selections[0]->team_id;
+    auto first_team_id = ordered_selections[0]->team_id;
     bool are_all_same_team = true;
     for (const auto& s : ordered_selections)
     {
-      if (s->team_id != color)
+      if (s->team_id != first_team_id)
         are_all_same_team = false;
     }
 
@@ -2337,6 +2337,8 @@ void CEXISlippi::prepareOnlineMatchState()
     auto team_assignments =
         team_assignment_permutations[rng_offset % team_assignment_permutations.size()];
 
+    auto is_teams = last_search.mode == SlippiMatchmaking::OnlinePlayMode::TEAMS;
+
     // Overwrite player character choices
     for (auto& s : ordered_selections)
     {
@@ -2345,7 +2347,6 @@ void CEXISlippi::prepareOnlineMatchState()
         continue;
       }
 
-      auto is_teams = last_search.mode == SlippiMatchmaking::OnlinePlayMode::TEAMS;
       auto team_id = is_teams ? s->team_id : 0;
       if (is_teams && are_all_same_team)
       {
@@ -2364,14 +2365,20 @@ void CEXISlippi::prepareOnlineMatchState()
     // person selects Zelda and one person selects Sheik of the same color, the game wont
     // automatically force the color changes
     std::unordered_map<u16, u8> color_counts;
-    for (size_t i = 0; i < ordered_selections.size(); i++)
+    for (int i = 0; i < SLIPPI_PLAYER_COUNT_MAX; i++)
     {
-      const auto& s = ordered_selections[i];
+      if (online_match_block[0x61 + i * 0x24] != 0)
+        continue;
 
-      // Make key including char id and char color
-      u8 char_id =
-          s->character_id == 0x13 ? 0x12 : s->character_id;  // Force Sheik to count with Zelda
-      u16 key = static_cast<u16>(char_id) << 8 | static_cast<u16>(s->character_color);
+      // Use online_match_block for char_id and color because it may have just been overwritten by
+      // team assignment logic
+      u8 char_id = online_match_block[0x60 + i * 0x24];
+      u8 color = online_match_block[0x63 + i * 0x24];
+      u8 team_id = online_match_block[0x69 + i * 0x24];
+
+      // Make key including char id and char color (or teams id if teams)
+      char_id = char_id == 0x13 ? 0x12 : char_id;  // Force Sheik to count with Zelda
+      u16 key = static_cast<u16>(char_id) << 8 | static_cast<u16>(is_teams ? team_id : color);
 
       // Set the shade of the fighter and increment the count
       u8& count = color_counts[key];

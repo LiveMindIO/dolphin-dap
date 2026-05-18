@@ -252,7 +252,19 @@ unsigned int SlippiNetplayClient::OnData(sf::Packet& packet, ENetPeer* peer)
     // the lower port player will initiate the disconnect
     std::stringstream key_strm;
     key_strm << peer->address.host << "-" << peer->address.port;
-    if (m_active_connections[key_strm.str()].size() > 1 && m_player_idx <= p_idx)
+    int live_conn_count = 0;
+    bool is_current_active = false;
+    for (auto& c : m_active_connections[key_strm.str()])
+    {
+      if (c.second.is_disconnected)
+        continue;
+
+      if (c.first == peer)
+        is_current_active = true;
+
+      live_conn_count++;
+    }
+    if (is_current_active && live_conn_count > 1 && m_player_idx < packet_player_port)
     {
       m_server[conn_idx] = peer;
       INFO_LOG_FMT(
@@ -261,13 +273,17 @@ unsigned int SlippiNetplayClient::OnData(sf::Packet& packet, ENetPeer* peer)
           "connections. oppIdx: {}. p_idx: {}",
           peer->address.host, peer->address.port, p_idx, m_player_idx);
 
-      for (auto active_conn : m_active_connections[key_strm.str()])
+      for (auto& active_conn : m_active_connections[key_strm.str()])
       {
         if (active_conn.first == peer)
           continue;
+        if (active_conn.second.is_disconnected)
+          continue;
 
-        // Tell our peer to terminate this connection
+        // Tell our peer to terminate this connection. Mark it locally as disconnected
+        // immediately so we stop counting it before the ENET DISCONNECT event lands.
         enet_peer_disconnect(active_conn.first, 0);
+        active_conn.second.is_disconnected = true;
       }
     }
 
@@ -1589,31 +1605,6 @@ bool SlippiNetplayClient::AreAllConnectionsDisconnected()
 SlippiMatchInfo* SlippiNetplayClient::GetMatchInfo()
 {
   return &match_info;
-}
-
-int32_t SlippiNetplayClient::GetSlippiLatestRemoteFrame(int maxFrameCount)
-{
-  // Return the lowest frame among remote queues
-  int lowest_frame = 0;
-  bool is_frame_set = false;
-  for (int i = 0; i < m_remote_player_count; i++)
-  {
-    auto remote_player_idx = match_info.remote_player_selections[i].player_idx;
-    if (!player_active[remote_player_idx].load(std::memory_order_acquire))
-    {
-      continue;
-    }
-
-    auto rp = GetSlippiRemotePad(i, maxFrameCount);
-    int f = rp->latest_frame;
-    if (f < lowest_frame || !is_frame_set)
-    {
-      lowest_frame = f;
-      is_frame_set = true;
-    }
-  }
-
-  return lowest_frame;
 }
 
 // return the smallest time offset among all remote players
