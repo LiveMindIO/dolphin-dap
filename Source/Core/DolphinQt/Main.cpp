@@ -306,6 +306,9 @@ int main(int argc, char* argv[])
     }
 #endif
 
+    // slippi change: init the spectate server so we can connect without starting a game
+    SlippiSpectateServer::getInstance();
+
     if (!Settings::Instance().IsBatchModeEnabled())
     {
       auto* updater = new Updater(&win, Config::Get(Config::MAIN_AUTOUPDATE_UPDATE_TRACK),
