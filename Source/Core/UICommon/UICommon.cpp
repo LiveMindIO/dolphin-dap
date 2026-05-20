@@ -41,6 +41,7 @@
 #include "Core/HotkeyManager.h"
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/STM/STM.h"
+#include "Core/Slippi/SlippiSpectate.h"
 #include "Core/System.h"
 #include "Core/WiiRoot.h"
 
@@ -141,6 +142,9 @@ void Init()
   Discord::Init();
   Common::Log::LogManager::Init();
   VideoBackendBase::ActivateBackend(Config::Get(Config::MAIN_GFX_BACKEND));
+
+  // slippi change: init the spectate server so we can connect without starting a game
+  SlippiSpectateServer::getInstance();
 
   RefreshConfig();
 }

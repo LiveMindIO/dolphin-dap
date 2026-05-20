@@ -28,7 +28,6 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
-#include "Core/Slippi/SlippiSpectate.h"
 #include "Core/System.h"
 
 #include "DolphinQt/Host.h"
@@ -305,9 +304,6 @@ int main(int argc, char* argv[])
       DolphinAnalytics::Instance().ReloadConfig();
     }
 #endif
-
-    // slippi change: init the spectate server so we can connect without starting a game
-    SlippiSpectateServer::getInstance();
 
     if (!Settings::Instance().IsBatchModeEnabled())
     {
