@@ -1266,7 +1266,7 @@ void SlippiNetplayClient::SendSlippiPad(std::unique_ptr<SlippiPad> pad)
   if (!m_local_pad_queue.empty())
   {
     int current_frame = m_local_pad_queue.front()->frame;
-    int minimum_allowed = current_frame - (ROLLBACK_MAX_FRAMES * 2 + 2);
+    int minimum_allowed = current_frame - 128; // Large enough for any reasonable delay combinations
     min_ack_frame = std::max(min_ack_frame, minimum_allowed);
   }
 
