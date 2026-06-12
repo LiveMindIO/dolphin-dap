@@ -20,7 +20,7 @@ namespace Common
 #endif
 
 #ifndef IS_PLAYBACK
-#define SLIPPI_REV_STR "4.0.0-mainline-beta.18"  // netplay version
+#define SLIPPI_REV_STR "4.0.0-mainline-beta.19"  // netplay version
 #else
 #define SLIPPI_REV_STR "3.2.0"  // playback version
 #endif
