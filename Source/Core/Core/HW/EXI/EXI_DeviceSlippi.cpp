@@ -1259,6 +1259,9 @@ void CEXISlippi::handlePoorMatchPerformance(s32 frame)
   if (last_search.mode != SlippiMatchmaking::OnlinePlayMode::RANKED)
     return;
 
+  if (!slippi_netplay)
+    return;
+
   u64 interval_frames = 150;  // Check every 2.5 seconds
   u64 frame_time_us = 16683;
 
@@ -1266,12 +1269,19 @@ void CEXISlippi::handlePoorMatchPerformance(s32 frame)
   if ((frame + (interval_frames - 50)) % interval_frames != 0)
     return;
 
+  // The modifier increases if we've been in a game for a minute. At that point, make it a little
+  // harder for the debt to accumulate to failure
+  double modifier = frame > 3600 ? 1.15 : 1.0;
+
   auto cur_time_us = Common::Timer::NowUs();
 
   // Iniitalize the first instance
   if (last_interval_time_us == 0)
   {
     last_interval_time_us = cur_time_us;
+    // Discard ping samples collected before this point so the first processed interval's
+    // average covers exactly one interval instead of everything since connection start
+    slippi_netplay->GetAndResetAvgPingMs();
     return;  // We will start processing the next time
   }
 
@@ -1286,19 +1296,43 @@ void CEXISlippi::handlePoorMatchPerformance(s32 frame)
   // isn't. The decay keeps this independent of match length: scattered blips drain away before
   // they can accumulate to the termination threshold.
   s32 terminate_threshold = 30;
-  s32 debt;
-  if (ratio >= 1.75)
-    debt = 15;  // Severe
-  else if (ratio >= 1.50)
-    debt = 8;  // Bad
-  else if (ratio >= 1.10)
-    debt = 4;  // Mild
+  s32 speed_debt;
+  if (ratio >= 1.0 + 0.75 * modifier)
+    speed_debt = 15;  // Severe
+  else if (ratio >= 1.0 + 0.5 * modifier)
+    speed_debt = 8;  // Bad
+  else if (ratio >= 1.0 + 0.1 * modifier)
+    speed_debt = 4;  // Mild
   else
-    debt = -1;  // Healthy interval, pay down accumulated debt
+    speed_debt = -1;  // Healthy interval, pay down accumulated debt
+
+  // High ping feeds the same accumulator. Averaging over the interval (~150 samples) means a
+  // brief spike gets diluted while sustained high ping keeps every interval elevated. The mild
+  // tier starts just above the 90ms "playable" line; against the -1 decay, a connection
+  // oscillating around that line net-accumulates once it spends over a fifth of its time above
+  // it, and a constantly-mild connection terminates in 8 intervals (~20s). An average of 0 means
+  // no acks arrived this interval; the speed ratio handles that case.
+  double avg_ping_ms = slippi_netplay->GetAndResetAvgPingMs();
+  s32 ping_debt;
+  if (avg_ping_ms >= 200 * modifier)
+    ping_debt = 15;  // Severe
+  else if (avg_ping_ms >= 120 * modifier)
+    ping_debt = 8;  // Bad
+  else if (avg_ping_ms >= 90 * modifier)
+    ping_debt = 4;  // Mild
+  else
+    ping_debt = -1;  // Healthy interval, pay down accumulated debt
+
+  // Take the worse of the two signals rather than summing: a network problem often inflates both
+  // (waiting on remote inputs stretches the interval and delays acks), so summing would
+  // double-count a single underlying cause
+  s32 debt = std::max(speed_debt, ping_debt);
 
   perf_debt = std::max(0, perf_debt + debt);
-  INFO_LOG_FMT(SLIPPI_ONLINE, "Modifying performance debt by {}. Currently at: {}/{}", debt,
-               perf_debt, terminate_threshold);
+  INFO_LOG_FMT(SLIPPI_ONLINE,
+               "Modifying performance debt by {} (speed: {}, ping: {}, avg_ping_ms: {:.1f}). "
+               "Currently at: {}/{}",
+               debt, speed_debt, ping_debt, avg_ping_ms, perf_debt, terminate_threshold);
   if (perf_debt >= terminate_threshold)
   {
     // Tell the server about the poor performance, then drop all remote players with a
