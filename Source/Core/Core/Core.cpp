@@ -361,11 +361,10 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
   }
 
   {
-    const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
     bool debugger_attached = false;
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
-    if (!gdb_socket.empty() && !hardcore)
+    if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
       GDBStub::InitLocal(gdb_socket.data());
       debugger_attached = true;
@@ -374,14 +373,14 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
 #endif
     {
       int gdb_port = Config::Get(Config::MAIN_GDB_PORT);
-      if (gdb_port > 0 && !hardcore)
+      if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
       {
         GDBStub::Init(gdb_port);
         debugger_attached = true;
       }
     }
 
-    if (!debugger_attached && !hardcore)
+    if (!debugger_attached && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
 #ifndef _WIN32
       std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
