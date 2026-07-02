@@ -62,11 +62,23 @@ std::optional<std::string_view> ExtractStringField(const std::string_view json,
     return std::nullopt;
 
   ++index;
-  const size_t end = json.find('"', index);
-  if (end == std::string_view::npos)
-    return std::nullopt;
+  const size_t start = index;
+  // DESNOTE(jbarber, 2026-07-02): Scan for the closing quote while honoring
+  // backslash escapes so a value containing \" (e.g. a Windows path) is not
+  // truncated. The returned view still holds the raw, escaped content.
+  while (index < json.size())
+  {
+    if (json[index] == '\\')
+    {
+      index += 2;
+      continue;
+    }
+    if (json[index] == '"')
+      return json.substr(start, index - start);
+    ++index;
+  }
 
-  return json.substr(index, end - index);
+  return std::nullopt;
 }
 
 std::optional<u32> ParseHexAddress(const std::string_view text)
@@ -74,6 +86,9 @@ std::optional<u32> ParseHexAddress(const std::string_view text)
   std::string trimmed(text);
   if (trimmed.starts_with("0x") || trimmed.starts_with("0X"))
     trimmed.erase(0, 2);
+
+  if (trimmed.empty())
+    return std::nullopt;
 
   u32 value = 0;
   if (!TryParse(trimmed, &value, 16))

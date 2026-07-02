@@ -95,13 +95,12 @@ std::vector<u32> ParseBreakpointAddresses(std::string_view json)
       any = true;
     }
 
-    if (any)
-    {
-      if (base)
-        addresses.push_back(*base + line_value * 4);
-      else
-        addresses.push_back(line_value);
-    }
+    // DESNOTE(jbarber, 2026-07-02): A line number is only meaningful as an
+    // address relative to the source's base address; without a base we cannot
+    // resolve it, so skip rather than register a bogus breakpoint at the raw
+    // line number.
+    if (any && base)
+      addresses.push_back(*base + line_value * 4);
 
     line_pos = index;
   }
