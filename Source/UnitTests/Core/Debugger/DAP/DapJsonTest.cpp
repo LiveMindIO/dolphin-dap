@@ -4,7 +4,7 @@
 #include <array>
 #include <optional>
 #include <string>
-#include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -15,74 +15,34 @@ namespace
 {
 using namespace DAP;
 
-TEST(DapJson, ExtractIntFieldParsesValue)
+TEST(DapJson, ParseObjectAcceptsObject)
 {
-  EXPECT_EQ(Json::ExtractIntField(R"({"seq":42})", "seq"), 42);
+  const auto parsed = Json::ParseObject(R"({"command":"initialize","seq":3})");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->at("command").to_str(), "initialize");
+  EXPECT_EQ(parsed->at("seq").get<double>(), 3.0);
 }
 
-TEST(DapJson, ExtractIntFieldSkipsWhitespace)
+TEST(DapJson, ParseObjectRejectsNonObject)
 {
-  EXPECT_EQ(Json::ExtractIntField(R"({"seq":   7})", "seq"), 7);
+  EXPECT_FALSE(Json::ParseObject(R"([1,2,3])").has_value());
+  EXPECT_FALSE(Json::ParseObject(R"("string")").has_value());
 }
 
-TEST(DapJson, ExtractIntFieldParsesNegative)
+TEST(DapJson, ParseObjectRejectsMalformed)
 {
-  EXPECT_EQ(Json::ExtractIntField(R"({"offset":-16})", "offset"), -16);
+  EXPECT_FALSE(Json::ParseObject(R"({"unterminated":)").has_value());
+  EXPECT_FALSE(Json::ParseObject("").has_value());
 }
 
-TEST(DapJson, ExtractIntFieldMissingReturnsNullopt)
+TEST(DapJson, ParseObjectHandlesEscapedQuotesInValues)
 {
-  EXPECT_FALSE(Json::ExtractIntField(R"({"seq":1})", "count").has_value());
-}
-
-TEST(DapJson, ExtractIntFieldNonNumericReturnsNullopt)
-{
-  EXPECT_FALSE(Json::ExtractIntField(R"({"seq":"x"})", "seq").has_value());
-}
-
-TEST(DapJson, ExtractStringFieldParsesValue)
-{
-  const auto value = Json::ExtractStringField(R"({"command":"initialize"})", "command");
-  ASSERT_TRUE(value.has_value());
-  EXPECT_EQ(*value, "initialize");
-}
-
-TEST(DapJson, ExtractStringFieldEmptyValue)
-{
-  const auto value = Json::ExtractStringField(R"({"command":""})", "command");
-  ASSERT_TRUE(value.has_value());
-  EXPECT_TRUE(value->empty());
-}
-
-TEST(DapJson, ExtractStringFieldMissingReturnsNullopt)
-{
-  EXPECT_FALSE(Json::ExtractStringField(R"({"command":"x"})", "path").has_value());
-}
-
-TEST(DapJson, ExtractStringFieldNonStringReturnsNullopt)
-{
-  // A numeric value is not a quoted string.
-  EXPECT_FALSE(Json::ExtractStringField(R"({"seq":1})", "seq").has_value());
-}
-
-TEST(DapJson, ExtractStringFieldHonorsEscapedQuote)
-{
-  // The value contains an escaped quote; the boundary must be the unescaped one.
-  const auto value = Json::ExtractStringField(R"({"path":"a\"b","next":"z"})", "path");
-  ASSERT_TRUE(value.has_value());
-  EXPECT_EQ(*value, R"(a\"b)");
-}
-
-TEST(DapJson, ExtractStringFieldHonorsTrailingBackslash)
-{
-  const auto value = Json::ExtractStringField(R"({"path":"C:\\game.iso"})", "path");
-  ASSERT_TRUE(value.has_value());
-  EXPECT_EQ(*value, R"(C:\\game.iso)");
-}
-
-TEST(DapJson, ExtractStringFieldUnterminatedReturnsNullopt)
-{
-  EXPECT_FALSE(Json::ExtractStringField(R"({"path":"abc)", "path").has_value());
+  // A value containing an escaped quote must not confuse the parser (the whole
+  // motivation for moving off substring extraction).
+  const auto parsed = Json::ParseObject(R"({"path":"a\"b","next":"z"})");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->at("path").to_str(), R"(a"b)");
+  EXPECT_EQ(parsed->at("next").to_str(), "z");
 }
 
 TEST(DapJson, ParseHexAddressWithPrefix)
@@ -110,19 +70,16 @@ TEST(DapJson, ParseHexAddressRejectsEmpty)
   EXPECT_FALSE(Json::ParseHexAddress("").has_value());
 }
 
-TEST(DapJson, EscapeStringPassesThroughPlainText)
+TEST(DapJson, FormatAddressIsZeroPaddedHex)
 {
-  EXPECT_EQ(Json::EscapeString("addi r3, r4, 8"), "addi r3, r4, 8");
+  EXPECT_EQ(Json::FormatAddress(0x8000u), "0x00008000");
+  EXPECT_EQ(Json::FormatAddress(0xdeadbeefu), "0xdeadbeef");
 }
 
-TEST(DapJson, EscapeStringEscapesSpecialCharacters)
+TEST(DapJson, FormatAddressRoundTripsThroughParse)
 {
-  EXPECT_EQ(Json::EscapeString("a\"b\\c\n\t\r"), R"(a\"b\\c\n\t\r)");
-}
-
-TEST(DapJson, EscapeStringEmpty)
-{
-  EXPECT_TRUE(Json::EscapeString("").empty());
+  for (const u32 address : {0u, 0x80003100u, 0xffffffffu})
+    EXPECT_EQ(Json::ParseHexAddress(Json::FormatAddress(address)), address);
 }
 
 TEST(DapJson, Base64EncodeEmpty)
@@ -140,5 +97,33 @@ TEST(DapJson, Base64EncodeKnownVectors)
 
   const std::array<u8, 3> three{{'M', 'a', 'n'}};
   EXPECT_EQ(Json::Base64Encode(three), "TWFu");
+}
+
+TEST(DapJson, Base64DecodeEmpty)
+{
+  const auto decoded = Json::Base64Decode("");
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_TRUE(decoded->empty());
+}
+
+TEST(DapJson, Base64DecodeKnownVectors)
+{
+  EXPECT_EQ(Json::Base64Decode("TQ=="), (std::vector<u8>{'M'}));
+  EXPECT_EQ(Json::Base64Decode("TWE="), (std::vector<u8>{'M', 'a'}));
+  EXPECT_EQ(Json::Base64Decode("TWFu"), (std::vector<u8>{'M', 'a', 'n'}));
+}
+
+TEST(DapJson, Base64DecodeRejectsInvalid)
+{
+  EXPECT_FALSE(Json::Base64Decode("!!!!").has_value());
+}
+
+TEST(DapJson, Base64RoundTrip)
+{
+  const std::vector<u8> bytes{0x00, 0x01, 0x02, 0xfe, 0xff, 0x80, 0x7f};
+  const std::string encoded = Json::Base64Encode(bytes);
+  const auto decoded = Json::Base64Decode(encoded);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, bytes);
 }
 }  // namespace

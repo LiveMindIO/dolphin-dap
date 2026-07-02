@@ -41,7 +41,14 @@ Expect a JSON `response` with `"command":"initialize"` and `"success":true`.
 
 After `configurationDone`, the session emits a `stopped` event (`reason: entry`).
 Supported requests include `continue`, `pause`, `stepIn`, `setBreakpoints`,
-`scopes`, `variables`, `readMemory`, and `disassemble`. Breakpoint addresses
-are hex strings in `source.name` or `source.path` (optional `line` × 4 offset).
+`scopes`, `variables`, `readMemory`, `writeMemory`, and `disassemble`. Breakpoint
+addresses are hex strings in `source.name` or `source.path` (optional `line` × 4
+offset).
+
+Requests are parsed with picojson (the project's JSON library) into typed models
+in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
+`writeMemory` carry data as base64. `readMemory` reports `unreadableBytes` when a
+range runs past valid memory, and `writeMemory` fails unless `allowPartial` is set
+when only part of the range is writable.
 
 GDB and DAP are mutually exclusive — do not set `GDBPort`/`GDBSocket` at the same time.
