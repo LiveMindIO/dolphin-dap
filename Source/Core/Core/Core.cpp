@@ -361,13 +361,13 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
   }
 
 
-  bool debugger_enbaled = false;
+  bool debugger_enabled = false;
   {
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
     if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
-      debugger_enbaled = true;
+      debugger_enabled = true;
       GDBStub::InitLocal(gdb_socket.data());
     }
     else
@@ -376,7 +376,7 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
       int gdb_port = Config::Get(Config::MAIN_GDB_PORT);
       if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
       {
-        debugger_enbaled = true;
+        debugger_enabled = true;
         GDBStub::Init(gdb_port);
       }
       else
@@ -385,7 +385,7 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
         std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
         if (!dap_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
         {
-          debugger_enbaled = true;
+          debugger_enabled = true;
           DAP::InitLocal(dap_socket.data());
         }
         else
@@ -394,13 +394,13 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
           int dap_port = Config::Get(Config::MAIN_DAP_PORT);
           if (dap_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
           {
-            debugger_enbaled = true;
+            debugger_enabled = true;
             DAP::Init(dap_port);
           }
         }
       }
     }
-    CPUSetInitialExecutionState(system, debugger_enbaled);
+    CPUSetInitialExecutionState(system, debugger_enabled);
   }
 
   // Enter CPU run loop. When we leave it - we are done.
