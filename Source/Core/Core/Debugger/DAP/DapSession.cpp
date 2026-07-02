@@ -149,6 +149,13 @@ private:
     FlushEvents();
   }
 
+  // DESNOTE(jbarber, 2026-07-02): PollBreakpointStop reports a "breakpoint" stop
+  // whenever it observes a not-stepping -> stepping transition it didn't already
+  // account for. After we service an explicit pause/step/continue we must reseat
+  // that baseline to the current CPU state, otherwise the very next poll re-reports
+  // the stop we just emitted (e.g. a duplicate "stopped" right after "pause").
+  void SyncSteppingBaseline() { m_was_stepping = m_system.GetCPU().IsStepping(); }
+
   bool Respond(int request_seq, std::string_view command, picojson::object body)
   {
     return m_transport.WriteMessage(Protocol::Serialize(
@@ -240,7 +247,7 @@ private:
     if (command == "continue")
     {
       m_controller.Continue();
-      m_was_stepping = false;
+      SyncSteppingBaseline();
       picojson::object body;
       body.emplace("allThreadsContinued", true);
       Respond(request->seq, command, std::move(body));
@@ -252,6 +259,7 @@ private:
       m_controller.Pause();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("pause");
+      SyncSteppingBaseline();
       return;
     }
 
@@ -260,6 +268,7 @@ private:
       m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
+      SyncSteppingBaseline();
       return;
     }
 
@@ -305,6 +314,7 @@ private:
     {
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("attach");
+      SyncSteppingBaseline();
       return;
     }
 
@@ -481,7 +491,10 @@ private:
   Core::System& m_system;
   Common::EventHook m_state_hook;
   std::atomic<bool> m_running{true};
-  int m_next_seq = 1;
+  // Sequence numbers are handed out from both the session loop (responses) and
+  // the core state-changed callback (the "continued" event), which may run on
+  // the CPU thread; keep allocation race-free.
+  std::atomic<int> m_next_seq{1};
   bool m_was_stepping = false;
 
   std::mutex m_event_mutex;
