@@ -3,6 +3,8 @@ add_dolphin_test(PageFaultTest PageFaultTest.cpp)
 add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 
+add_dolphin_test(DapFramingTest Debugger/DAP/DapFramingTest.cpp)
+
 add_dolphin_test(DSPAcceleratorTest DSP/DSPAcceleratorTest.cpp)
 add_dolphin_test(DSPAssemblyTest
   DSP/DSPAssemblyTest.cpp
