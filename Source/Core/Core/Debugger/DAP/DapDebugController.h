@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,9 @@ public:
 
   RegisterSnapshot GetRegisters();
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
+  // Writes as many leading bytes of `data` as map to valid addresses and
+  // returns the number written; stops at the first invalid address.
+  std::size_t WriteMemory(u32 address, std::span<const u8> data);
   std::string Disassemble(u32 address, int instruction_count);
 
   u32 GetPC();

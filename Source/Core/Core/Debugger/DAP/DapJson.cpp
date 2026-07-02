@@ -3,7 +3,6 @@
 
 #include "Core/Debugger/DAP/DapJson.h"
 
-#include <array>
 #include <string>
 
 #include <fmt/format.h>
@@ -13,72 +12,15 @@
 
 namespace DAP::Json
 {
-std::optional<int> ExtractIntField(const std::string_view json, const std::string_view field)
+std::optional<picojson::object> ParseObject(const std::string_view text)
 {
-  const std::string needle = fmt::format("\"{}\":", field);
-  const size_t pos = json.find(needle);
-  if (pos == std::string_view::npos)
+  picojson::value root;
+  std::string error;
+  picojson::parse(root, text.data(), text.data() + text.size(), &error);
+  if (!error.empty() || !root.is<picojson::object>())
     return std::nullopt;
 
-  size_t index = pos + needle.size();
-  while (index < json.size() && (json[index] == ' ' || json[index] == '\t'))
-    ++index;
-
-  bool negative = false;
-  if (index < json.size() && json[index] == '-')
-  {
-    negative = true;
-    ++index;
-  }
-
-  int value = 0;
-  bool any = false;
-  while (index < json.size() && json[index] >= '0' && json[index] <= '9')
-  {
-    value = value * 10 + (json[index] - '0');
-    ++index;
-    any = true;
-  }
-
-  if (!any)
-    return std::nullopt;
-
-  return negative ? -value : value;
-}
-
-std::optional<std::string_view> ExtractStringField(const std::string_view json,
-                                                     const std::string_view field)
-{
-  const std::string needle = fmt::format("\"{}\":", field);
-  const size_t pos = json.find(needle);
-  if (pos == std::string_view::npos)
-    return std::nullopt;
-
-  size_t index = pos + needle.size();
-  while (index < json.size() && (json[index] == ' ' || json[index] == '\t'))
-    ++index;
-
-  if (index >= json.size() || json[index] != '"')
-    return std::nullopt;
-
-  ++index;
-  const size_t start = index;
-  // DESNOTE(jbarber, 2026-07-02): Scan for the closing quote while honoring
-  // backslash escapes so a value containing \" (e.g. a Windows path) is not
-  // truncated. The returned view still holds the raw, escaped content.
-  while (index < json.size())
-  {
-    if (json[index] == '\\')
-    {
-      index += 2;
-      continue;
-    }
-    if (json[index] == '"')
-      return json.substr(start, index - start);
-    ++index;
-  }
-
-  return std::nullopt;
+  return root.get<picojson::object>();
 }
 
 std::optional<u32> ParseHexAddress(const std::string_view text)
@@ -97,35 +39,9 @@ std::optional<u32> ParseHexAddress(const std::string_view text)
   return value;
 }
 
-std::string EscapeString(const std::string_view text)
+std::string FormatAddress(const u32 address)
 {
-  std::string escaped;
-  escaped.reserve(text.size());
-  for (const char ch : text)
-  {
-    switch (ch)
-    {
-    case '"':
-      escaped += "\\\"";
-      break;
-    case '\\':
-      escaped += "\\\\";
-      break;
-    case '\n':
-      escaped += "\\n";
-      break;
-    case '\r':
-      escaped += "\\r";
-      break;
-    case '\t':
-      escaped += "\\t";
-      break;
-    default:
-      escaped += ch;
-      break;
-    }
-  }
-  return escaped;
+  return fmt::format("0x{:08x}", address);
 }
 
 std::string Base64Encode(const std::span<const u8> bytes)
@@ -140,6 +56,26 @@ std::string Base64Encode(const std::span<const u8> bytes)
   {
     return {};
   }
+
+  output.resize(output_length);
+  return output;
+}
+
+std::optional<std::vector<u8>> Base64Decode(const std::string_view text)
+{
+  if (text.empty())
+    return std::vector<u8>{};
+
+  // DESNOTE(jbarber, 2026-07-02): mbedtls reports the required buffer size via
+  // MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL when called with a null/zero output, so
+  // size the buffer from the base64 length (3 bytes per 4 chars upper bound).
+  std::vector<u8> output(text.size() / 4 * 3 + 3);
+  size_t output_length = 0;
+  const int result =
+      mbedtls_base64_decode(output.data(), output.size(), &output_length,
+                            reinterpret_cast<const unsigned char*>(text.data()), text.size());
+  if (result != 0)
+    return std::nullopt;
 
   output.resize(output_length);
   return output;

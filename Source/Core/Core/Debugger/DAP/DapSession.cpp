@@ -17,13 +17,16 @@
 #endif
 
 #include <fmt/format.h>
+#include <picojson.h>
 
 #include "Common/HookableEvent.h"
+#include "Common/JsonUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/Version.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
 #include "Core/Debugger/DAP/DapJson.h"
+#include "Core/Debugger/DAP/DapProtocol.h"
 #include "Core/Debugger/DAP/DapTransport.h"
 #include "Core/HW/CPU.h"
 #include "Core/System.h"
@@ -48,86 +51,19 @@ bool WaitForReadable(int socket, int timeout_ms)
   return select(socket + 1, &readfds, nullptr, nullptr, &tv) > 0;
 }
 
-std::vector<u32> ParseBreakpointAddresses(std::string_view json)
+u32 ApplyOffset(u32 address, s64 offset)
 {
-  std::vector<u32> addresses;
-
-  std::optional<u32> base;
-  if (const size_t source_pos = json.find("\"source\"");
-      source_pos != std::string_view::npos)
-  {
-    const std::string_view source_json = json.substr(source_pos);
-    if (const std::optional<std::string_view> name = Json::ExtractStringField(source_json, "name"))
-      base = Json::ParseHexAddress(*name);
-    if (!base)
-    {
-      if (const std::optional<std::string_view> path =
-              Json::ExtractStringField(source_json, "path"))
-        base = Json::ParseHexAddress(*path);
-    }
-  }
-
-  size_t search_pos = json.find("\"breakpoints\"");
-  if (search_pos == std::string_view::npos)
-  {
-    if (base)
-      addresses.push_back(*base);
-    return addresses;
-  }
-
-  const std::string_view breakpoints_json = json.substr(search_pos);
-  size_t line_pos = 0;
-  while ((line_pos = breakpoints_json.find("\"line\":", line_pos)) != std::string_view::npos)
-  {
-    line_pos += 7;
-    size_t index = line_pos;
-    while (index < breakpoints_json.size() &&
-           (breakpoints_json[index] == ' ' || breakpoints_json[index] == '\t'))
-      ++index;
-
-    u32 line_value = 0;
-    bool any = false;
-    while (index < breakpoints_json.size() && breakpoints_json[index] >= '0' &&
-           breakpoints_json[index] <= '9')
-    {
-      line_value = line_value * 10 + (breakpoints_json[index] - '0');
-      ++index;
-      any = true;
-    }
-
-    // DESNOTE(jbarber, 2026-07-02): A line number is only meaningful as an
-    // address relative to the source's base address; without a base we cannot
-    // resolve it, so skip rather than register a bogus breakpoint at the raw
-    // line number.
-    if (any && base)
-      addresses.push_back(*base + line_value * 4);
-
-    line_pos = index;
-  }
-
-  if (addresses.empty() && base)
-    addresses.push_back(*base);
-
-  return addresses;
+  return static_cast<u32>(static_cast<s64>(address) + offset);
 }
 
-std::optional<u32> ParseMemoryReference(std::string_view json)
+picojson::object MakeVariable(std::string_view name, u32 value)
 {
-  if (const std::optional<std::string_view> memory_reference =
-          Json::ExtractStringField(json, "memoryReference"))
-  {
-    if (const std::optional<u32> address = Json::ParseHexAddress(*memory_reference))
-      return address;
-  }
-
-  if (const std::optional<std::string_view> source_name =
-          Json::ExtractStringField(json, "source"))
-  {
-    if (const std::optional<u32> address = Json::ParseHexAddress(*source_name))
-      return address;
-  }
-
-  return std::nullopt;
+  picojson::object variable;
+  variable.emplace("name", std::string(name));
+  variable.emplace("value", fmt::format("0x{:08x}", value));
+  variable.emplace("type", std::string("uint32"));
+  variable.emplace("variablesReference", 0.0);
+  return variable;
 }
 
 class Session
@@ -138,7 +74,12 @@ public:
   {
     m_state_hook = Core::AddOnStateChangedCallback([this](const Core::State state) {
       if (state == Core::State::Running)
-        QueueEvent("continued", R"("body":{"threadId":1})");
+      {
+        picojson::object body;
+        body.emplace("threadId", 1.0);
+        body.emplace("allThreadsContinued", true);
+        QueueEvent("continued", std::move(body));
+      }
     });
   }
 
@@ -171,11 +112,11 @@ public:
   }
 
 private:
-  void QueueEvent(std::string_view event, std::string_view body_json)
+  void QueueEvent(std::string_view event, picojson::object body)
   {
     std::lock_guard lock(m_event_mutex);
-    m_pending_events.push_back(fmt::format(R"({{"seq":{},"type":"event","event":"{}",{}}})",
-                                           m_next_seq++, event, body_json));
+    m_pending_events.push_back(
+        Protocol::Serialize(Protocol::MakeEvent(m_next_seq++, event, std::move(body))));
   }
 
   void FlushEvents()
@@ -192,7 +133,10 @@ private:
 
   void SendStoppedEvent(std::string_view reason)
   {
-    QueueEvent("stopped", fmt::format(R"("body":{{"reason":"{}","threadId":1}})", reason));
+    picojson::object body;
+    body.emplace("reason", std::string(reason));
+    body.emplace("threadId", 1.0);
+    QueueEvent("stopped", std::move(body));
     FlushEvents();
   }
 
@@ -205,11 +149,16 @@ private:
     FlushEvents();
   }
 
-  bool WriteResponse(int request_seq, std::string_view command, std::string_view body_json)
+  bool Respond(int request_seq, std::string_view command, picojson::object body)
   {
-    return m_transport.WriteMessage(fmt::format(
-        R"({{"seq":{},"type":"response","request_seq":{},"command":"{}","success":true,{}}})",
-        m_next_seq++, request_seq, command, body_json));
+    return m_transport.WriteMessage(Protocol::Serialize(
+        Protocol::MakeResponse(m_next_seq++, request_seq, command, true, std::move(body))));
+  }
+
+  bool RespondError(int request_seq, std::string_view command, std::string_view message)
+  {
+    return m_transport.WriteMessage(
+        Protocol::Serialize(Protocol::MakeErrorResponse(m_next_seq++, request_seq, command, message)));
   }
 
   bool RunHandshake()
@@ -221,197 +170,310 @@ private:
       if (message->empty())
         continue;
 
-      const std::string_view json = *message;
-      const std::optional<std::string_view> command = Json::ExtractStringField(json, "command");
-      const std::optional<int> request_seq = Json::ExtractIntField(json, "seq");
-
-      if (!command || !request_seq)
+      const std::optional<picojson::object> parsed = Json::ParseObject(*message);
+      if (!parsed)
         continue;
 
-      if (*command == "initialize")
+      const std::optional<Protocol::Request> request = Protocol::ParseRequest(*parsed);
+      if (!request)
+        continue;
+
+      if (request->command == "initialize")
       {
-        if (!WriteResponse(*request_seq, "initialize",
-                           fmt::format(
-                               R"("body":{{"capabilities":{{"supportsConfigurationDoneRequest":true,"supportsDisassembleRequest":true,"supportsReadMemoryRequest":true}},"serverInfo":{{"name":"Dolphin DAP","version":"{}"}}}})",
-                               Common::GetScmRevGitStr())))
+        if (!Respond(request->seq, "initialize", MakeCapabilities()))
           return false;
 
         initialize_done = true;
       }
-      else if (*command == "configurationDone")
+      else if (request->command == "configurationDone")
       {
         if (!initialize_done)
           return false;
 
-        if (!WriteResponse(*request_seq, "configurationDone", R"("body":{})"))
-          return false;
-
-        return true;
+        return Respond(request->seq, "configurationDone", picojson::object{});
       }
     }
 
     return false;
   }
 
+  picojson::object MakeCapabilities()
+  {
+    picojson::object capabilities;
+    capabilities.emplace("supportsConfigurationDoneRequest", true);
+    capabilities.emplace("supportsDisassembleRequest", true);
+    capabilities.emplace("supportsReadMemoryRequest", true);
+    capabilities.emplace("supportsWriteMemoryRequest", true);
+
+    picojson::object server_info;
+    server_info.emplace("name", std::string("Dolphin DAP"));
+    server_info.emplace("version", std::string(Common::GetScmRevGitStr()));
+
+    picojson::object body;
+    body.emplace("capabilities", std::move(capabilities));
+    body.emplace("serverInfo", std::move(server_info));
+    return body;
+  }
+
   void HandleMessage(const std::string& message)
   {
-    const std::string_view json = message;
-    const std::optional<std::string_view> command = Json::ExtractStringField(json, "command");
-    const std::optional<int> request_seq = Json::ExtractIntField(json, "seq");
-
-    if (!command || !request_seq)
-      return;
-
-    if (*command == "disconnect")
+    const std::optional<picojson::object> parsed = Json::ParseObject(message);
+    if (!parsed)
     {
-      m_running = false;
+      WARN_LOG_FMT(CONSOLE, "DAP: ignoring malformed message");
       return;
     }
 
-    if (*command == "continue")
+    const std::optional<Protocol::Request> request = Protocol::ParseRequest(*parsed);
+    if (!request)
+      return;
+
+    const std::string& command = request->command;
+
+    if (command == "disconnect")
+    {
+      m_running = false;
+      Respond(request->seq, command, picojson::object{});
+      return;
+    }
+
+    if (command == "continue")
     {
       m_controller.Continue();
       m_was_stepping = false;
-      WriteResponse(*request_seq, "continue", R"("body":{"allThreadsContinued":true})");
+      picojson::object body;
+      body.emplace("allThreadsContinued", true);
+      Respond(request->seq, command, std::move(body));
       return;
     }
 
-    if (*command == "pause")
+    if (command == "pause")
     {
       m_controller.Pause();
-      WriteResponse(*request_seq, "pause", R"("body":{})");
+      Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("pause");
       return;
     }
 
-    if (*command == "next" || *command == "stepIn")
+    if (command == "next" || command == "stepIn")
     {
       m_controller.StepInto();
-      WriteResponse(*request_seq, *command, R"("body":{})");
+      Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
       return;
     }
 
-    if (*command == "setBreakpoints")
+    if (command == "setBreakpoints")
     {
-      m_controller.SetCodeBreakpoints(ParseBreakpointAddresses(json));
-      WriteResponse(*request_seq, "setBreakpoints", R"("body":{"breakpoints":[]})");
+      HandleSetBreakpoints(*request);
       return;
     }
 
-    if (*command == "scopes")
+    if (command == "scopes")
     {
-      WriteResponse(*request_seq, "scopes",
-                      R"("body":{"scopes":[{"name":"Registers","variablesReference":1000,"expensive":false},{"name":"PC","variablesReference":1001,"expensive":false}]})");
+      Respond(request->seq, command, MakeScopes());
       return;
     }
 
-    if (*command == "variables")
+    if (command == "variables")
     {
-      const std::optional<int> variables_reference = Json::ExtractIntField(json, "variablesReference");
-      WriteResponse(*request_seq, "variables",
-                      MakeVariablesResponse(variables_reference.value_or(0)));
+      const std::optional<int> variables_reference =
+          ReadNumericFromJson<int>(request->arguments, "variablesReference");
+      Respond(request->seq, command, MakeVariables(variables_reference.value_or(0)));
       return;
     }
 
-    if (*command == "readMemory")
+    if (command == "readMemory")
     {
-      const std::optional<u32> address = ParseMemoryReference(json);
-      const int offset = Json::ExtractIntField(json, "offset").value_or(0);
-      const int count = Json::ExtractIntField(json, "count").value_or(0);
-      if (!address || count <= 0)
-      {
-        WriteResponse(*request_seq, "readMemory", R"("body":{})");
-        return;
-      }
-
-      const std::vector<u8> bytes =
-          m_controller.ReadMemory(*address + static_cast<u32>(offset), static_cast<size_t>(count));
-      WriteResponse(*request_seq, "readMemory",
-                      fmt::format(R"("body":{{"address":{},"data":"{}"}})", *address + offset,
-                                  Json::Base64Encode(bytes)));
+      HandleReadMemory(*request);
       return;
     }
 
-    if (*command == "disassemble")
+    if (command == "writeMemory")
     {
-      const std::optional<u32> address = ParseMemoryReference(json);
-      const int instruction_count = Json::ExtractIntField(json, "instructionCount").value_or(1);
-      if (!address)
-      {
-        WriteResponse(*request_seq, "disassemble", R"("body":{})");
-        return;
-      }
-
-      const std::string disasm = m_controller.Disassemble(*address, instruction_count);
-      std::string instructions_json;
-      u32 addr = *address;
-      size_t start = 0;
-      while (start <= disasm.size())
-      {
-        const size_t end = disasm.find('\n', start);
-        const size_t line_end = end == std::string::npos ? disasm.size() : end;
-        const std::string line = disasm.substr(start, line_end - start);
-        if (!line.empty())
-        {
-          if (!instructions_json.empty())
-            instructions_json += ',';
-          instructions_json += fmt::format(R"({{"address":{},"instruction":"{}"}})", addr,
-                                           Json::EscapeString(line));
-          addr += 4;
-        }
-        if (end == std::string::npos)
-          break;
-        start = end + 1;
-      }
-
-      WriteResponse(*request_seq, "disassemble",
-                      fmt::format(R"("body":{{"instructions":[{}]}})", instructions_json));
+      HandleWriteMemory(*request);
       return;
     }
 
-    if (*command == "attach")
+    if (command == "disassemble")
     {
-      WriteResponse(*request_seq, "attach", R"("body":{})");
+      HandleDisassemble(*request);
+      return;
+    }
+
+    if (command == "attach")
+    {
+      Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("attach");
       return;
     }
 
-    WARN_LOG_FMT(CONSOLE, "DAP: unhandled command {}", *command);
-    m_transport.WriteMessage(fmt::format(
-        R"({{"seq":{},"type":"response","request_seq":{},"command":"{}","success":false,"message":"unsupported"}})",
-        m_next_seq++, *request_seq, *command));
+    WARN_LOG_FMT(CONSOLE, "DAP: unhandled command {}", command);
+    RespondError(request->seq, command, "unsupported");
   }
 
-  std::string MakeVariablesResponse(int variables_reference)
+  void HandleSetBreakpoints(const Protocol::Request& request)
+  {
+    const Protocol::SetBreakpointsArguments arguments =
+        Protocol::ParseSetBreakpoints(request.arguments);
+
+    std::vector<u32> addresses;
+    picojson::array breakpoints;
+    for (const Protocol::RequestedBreakpoint& breakpoint : arguments.breakpoints)
+    {
+      picojson::object entry;
+      entry.emplace("verified", breakpoint.address.has_value());
+      if (breakpoint.address)
+      {
+        entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
+        addresses.push_back(*breakpoint.address);
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
+
+    // DESNOTE(jbarber, 2026-07-02): DAP setBreakpoints is authoritative for the
+    // given source, so a bare source address with no breakpoint entries clears
+    // it. We still honor a base-only request (no entries) by setting that one.
+    if (arguments.breakpoints.empty() && arguments.base)
+      addresses.push_back(*arguments.base);
+
+    m_controller.SetCodeBreakpoints(addresses);
+
+    picojson::object body;
+    body.emplace("breakpoints", std::move(breakpoints));
+    Respond(request.seq, "setBreakpoints", std::move(body));
+  }
+
+  void HandleReadMemory(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::ReadMemoryArguments> arguments =
+        Protocol::ParseReadMemory(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "readMemory", "invalid readMemory arguments");
+      return;
+    }
+
+    const u32 address = ApplyOffset(arguments->address, arguments->offset);
+    const std::vector<u8> bytes = m_controller.ReadMemory(address, arguments->count);
+    const u32 unreadable = arguments->count - static_cast<u32>(bytes.size());
+
+    picojson::object body;
+    body.emplace("address", Json::FormatAddress(address));
+    body.emplace("data", Json::Base64Encode(bytes));
+    if (unreadable > 0)
+      body.emplace("unreadableBytes", static_cast<double>(unreadable));
+    Respond(request.seq, "readMemory", std::move(body));
+  }
+
+  void HandleWriteMemory(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::WriteMemoryArguments> arguments =
+        Protocol::ParseWriteMemory(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "writeMemory", "invalid writeMemory arguments");
+      return;
+    }
+
+    const u32 address = ApplyOffset(arguments->address, arguments->offset);
+    const std::size_t written = m_controller.WriteMemory(address, arguments->data);
+
+    if (written < arguments->data.size() && !arguments->allow_partial)
+    {
+      RespondError(request.seq, "writeMemory", "memory range not fully writable");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("bytesWritten", static_cast<double>(written));
+    body.emplace("offset", 0.0);
+    Respond(request.seq, "writeMemory", std::move(body));
+  }
+
+  void HandleDisassemble(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::DisassembleArguments> arguments =
+        Protocol::ParseDisassemble(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "disassemble", "invalid disassemble arguments");
+      return;
+    }
+
+    u32 address = ApplyOffset(arguments->address, arguments->offset) +
+                  static_cast<u32>(arguments->instruction_offset * 4);
+    const std::string disasm =
+        m_controller.Disassemble(address, static_cast<int>(arguments->instruction_count));
+
+    picojson::array instructions;
+    size_t start = 0;
+    while (start <= disasm.size())
+    {
+      const size_t end = disasm.find('\n', start);
+      const size_t line_end = end == std::string::npos ? disasm.size() : end;
+      const std::string line = disasm.substr(start, line_end - start);
+      if (!line.empty())
+      {
+        picojson::object instruction;
+        instruction.emplace("address", Json::FormatAddress(address));
+        instruction.emplace("instruction", line);
+        instructions.emplace_back(std::move(instruction));
+        address += 4;
+      }
+      if (end == std::string::npos)
+        break;
+      start = end + 1;
+    }
+
+    picojson::object body;
+    body.emplace("instructions", std::move(instructions));
+    Respond(request.seq, "disassemble", std::move(body));
+  }
+
+  static picojson::object MakeScope(std::string_view name, int variables_reference)
+  {
+    picojson::object scope;
+    scope.emplace("name", std::string(name));
+    scope.emplace("variablesReference", static_cast<double>(variables_reference));
+    scope.emplace("expensive", false);
+    return scope;
+  }
+
+  picojson::object MakeScopes()
+  {
+    picojson::array scopes;
+    scopes.emplace_back(MakeScope("Registers", kRegistersScope));
+    scopes.emplace_back(MakeScope("PC", kPcScope));
+
+    picojson::object body;
+    body.emplace("scopes", std::move(scopes));
+    return body;
+  }
+
+  picojson::object MakeVariables(int variables_reference)
   {
     const RegisterSnapshot registers = m_controller.GetRegisters();
-    std::string variables_json;
-
-    auto append_variable = [&](std::string_view name, u32 value) {
-      if (!variables_json.empty())
-        variables_json += ',';
-      variables_json +=
-          fmt::format(R"({{"name":"{}","value":"0x{:08x}","type":"uint32","variablesReference":0}})",
-                      name, value);
-    };
+    picojson::array variables;
 
     if (variables_reference == kRegistersScope)
     {
       for (std::size_t i = 0; i < registers.gpr.size(); ++i)
-        append_variable(fmt::format("r{}", i), registers.gpr[i]);
+        variables.emplace_back(MakeVariable(fmt::format("r{}", i), registers.gpr[i]));
     }
     else if (variables_reference == kPcScope)
     {
-      append_variable("pc", registers.pc);
-      append_variable("lr", registers.lr);
-      append_variable("ctr", registers.ctr);
-      append_variable("msr", registers.msr);
-      append_variable("cr", registers.cr);
-      append_variable("xer", registers.xer);
+      variables.emplace_back(MakeVariable("pc", registers.pc));
+      variables.emplace_back(MakeVariable("lr", registers.lr));
+      variables.emplace_back(MakeVariable("ctr", registers.ctr));
+      variables.emplace_back(MakeVariable("msr", registers.msr));
+      variables.emplace_back(MakeVariable("cr", registers.cr));
+      variables.emplace_back(MakeVariable("xer", registers.xer));
     }
 
-    return fmt::format(R"("body":{{"variables":[{}]}})", variables_json);
+    picojson::object body;
+    body.emplace("variables", std::move(variables));
+    return body;
   }
 
   DapTransport& m_transport;

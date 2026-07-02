@@ -89,6 +89,23 @@ std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
   return bytes;
 }
 
+std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> data)
+{
+  Core::CPUThreadGuard guard(m_system);
+  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+
+  std::size_t written = 0;
+  for (const u8 byte : data)
+  {
+    const u32 addr = address + static_cast<u32>(written);
+    if (!accessors->IsValidAddress(guard, addr))
+      break;
+    accessors->WriteU8(guard, addr, byte);
+    ++written;
+  }
+  return written;
+}
+
 std::string DapDebugController::Disassemble(u32 address, int instruction_count)
 {
   Core::CPUThreadGuard guard(m_system);
