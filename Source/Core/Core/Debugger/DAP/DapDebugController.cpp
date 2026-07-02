@@ -67,8 +67,8 @@ RegisterSnapshot DapDebugController::GetRegisters()
   snapshot.lr = LR(ppc_state);
   snapshot.ctr = CTR(ppc_state);
   snapshot.msr = ppc_state.msr.Hex;
-  snapshot.cr = ppc_state.cr.GetHex();
-  snapshot.xer = XER(ppc_state);
+  snapshot.cr = ppc_state.cr.Get();
+  snapshot.xer = ppc_state.GetXER().Hex;
   return snapshot;
 }
 

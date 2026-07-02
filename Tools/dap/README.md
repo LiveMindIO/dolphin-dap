@@ -1,4 +1,4 @@
-# Dolphin DAP — Phase 0
+# Dolphin DAP
 
 Start the headless emulator with the DAP server listening on a TCP port:
 
@@ -36,5 +36,12 @@ PY
 ```
 
 Expect a JSON `response` with `"command":"initialize"` and `"success":true`.
+
+## Phase 1 commands (MVP)
+
+After `configurationDone`, the session emits a `stopped` event (`reason: entry`).
+Supported requests include `continue`, `pause`, `stepIn`, `setBreakpoints`,
+`scopes`, `variables`, `readMemory`, and `disassemble`. Breakpoint addresses
+are hex strings in `source.name` or `source.path` (optional `line` × 4 offset).
 
 GDB and DAP are mutually exclusive — do not set `GDBPort`/`GDBSocket` at the same time.

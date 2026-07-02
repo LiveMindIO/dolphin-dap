@@ -3,9 +3,14 @@
 
 #pragma once
 
+namespace Core
+{
+class System;
+}
+
 namespace DAP
 {
 class DapTransport;
 
-bool RunHandshake(DapTransport& transport);
+void RunSession(DapTransport& transport, Core::System& system);
 }  // namespace DAP

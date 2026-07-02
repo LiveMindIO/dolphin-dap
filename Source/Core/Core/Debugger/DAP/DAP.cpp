@@ -25,6 +25,7 @@ typedef SSIZE_T ssize_t;
 #include "Common/SocketContext.h"
 #include "Core/Debugger/DAP/DapSession.h"
 #include "Core/Debugger/DAP/DapTransport.h"
+#include "Core/System.h"
 
 namespace DAP
 {
@@ -71,17 +72,7 @@ static void IOThreadMain()
   DapTransport transport{s_client_sock};
   transport.ReleaseSocket();
 
-  if (!RunHandshake(transport))
-  {
-    ERROR_LOG_FMT(CONSOLE, "DAP: handshake failed.");
-    s_active.store(false);
-    return;
-  }
-
-  while (!s_shutting_down.load())
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
+  RunSession(transport, Core::System::GetInstance());
 
   s_active.store(false);
 }
