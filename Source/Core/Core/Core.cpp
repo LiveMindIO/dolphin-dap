@@ -66,6 +66,7 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/PatchEngine.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -360,27 +361,48 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
   }
 
   {
+    const bool hardcore = AchievementManager::GetInstance().IsHardcoreModeActive();
+    bool debugger_attached = false;
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
-    if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
+    if (!gdb_socket.empty() && !hardcore)
     {
       GDBStub::InitLocal(gdb_socket.data());
-      CPUSetInitialExecutionState(system, true);
+      debugger_attached = true;
     }
     else
 #endif
     {
       int gdb_port = Config::Get(Config::MAIN_GDB_PORT);
-      if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
+      if (gdb_port > 0 && !hardcore)
       {
         GDBStub::Init(gdb_port);
-        CPUSetInitialExecutionState(system, true);
-      }
-      else
-      {
-        CPUSetInitialExecutionState(system);
+        debugger_attached = true;
       }
     }
+
+    if (!debugger_attached && !hardcore)
+    {
+#ifndef _WIN32
+      std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
+      if (!dap_socket.empty())
+      {
+        DAP::InitLocal(dap_socket.data());
+        debugger_attached = true;
+      }
+      else
+#endif
+      {
+        int dap_port = Config::Get(Config::MAIN_DAP_PORT);
+        if (dap_port > 0)
+        {
+          DAP::Init(dap_port);
+          debugger_attached = true;
+        }
+      }
+    }
+
+    CPUSetInitialExecutionState(system, debugger_attached);
   }
 
   // Enter CPU run loop. When we leave it - we are done.
@@ -399,6 +421,13 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     GDBStub::Deinit();
     INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "GDB stopped."));
     INFO_LOG_FMT(GDB_STUB, "Killed by CPU shutdown");
+  }
+
+  if (DAP::IsActive())
+  {
+    INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "Stopping DAP ..."));
+    DAP::Deinit();
+    INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "DAP stopped."));
   }
 }
 
