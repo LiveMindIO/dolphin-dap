@@ -361,13 +361,12 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
   }
 
   {
-    bool debugger_attached = false;
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
     if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
       GDBStub::InitLocal(gdb_socket.data());
-      debugger_attached = true;
+      CPUSetInitialExecutionState(system, true);
     }
     else
 #endif
@@ -376,32 +375,33 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
       if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
       {
         GDBStub::Init(gdb_port);
-        debugger_attached = true;
-      }
-    }
-
-    if (!debugger_attached && !AchievementManager::GetInstance().IsHardcoreModeActive())
-    {
-#ifndef _WIN32
-      std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
-      if (!dap_socket.empty())
-      {
-        DAP::InitLocal(dap_socket.data());
-        debugger_attached = true;
+        CPUSetInitialExecutionState(system, true);
       }
       else
-#endif
       {
-        int dap_port = Config::Get(Config::MAIN_DAP_PORT);
-        if (dap_port > 0)
+#ifndef _WIN32
+        std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
+        if (!dap_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
         {
-          DAP::Init(dap_port);
-          debugger_attached = true;
+          DAP::InitLocal(dap_socket.data());
+          CPUSetInitialExecutionState(system, true);
+        }
+        else
+#endif
+        {
+          int dap_port = Config::Get(Config::MAIN_DAP_PORT);
+          if (dap_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
+          {
+            DAP::Init(dap_port);
+            CPUSetInitialExecutionState(system, true);
+          }
+          else
+          {
+            CPUSetInitialExecutionState(system);
+          }
         }
       }
     }
-
-    CPUSetInitialExecutionState(system, debugger_attached);
   }
 
   // Enter CPU run loop. When we leave it - we are done.
