@@ -64,6 +64,8 @@ add_library(core
   CPUThreadConfigCallback.h
   Debugger/DAP/DAP.cpp
   Debugger/DAP/DAP.h
+  Debugger/DAP/DapTransport.cpp
+  Debugger/DAP/DapTransport.h
   Debugger/BranchWatch.cpp
   Debugger/BranchWatch.h
   Debugger/CodeTrace.cpp
