@@ -340,4 +340,62 @@ TEST_F(DapControllerTest, StepOutTimesOutOnNonReturningCode)
   // PC still parked on the branch instead of hanging.
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
 }
+
+TEST_F(DapControllerTest, StepOutReturnsImmediatelyWhenPcIsOnReturn)
+{
+  // PC already sits on a blr: step-out should take the return on the first
+  // iteration and land on LR without stepping any preceding instructions.
+  const std::array<u8, 4> blr{{0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, blr.data(), blr.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  LR(ppc_state) = TEST_ADDRESS + 0x100;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepOut(std::chrono::seconds(1));
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
+}
+
+TEST_F(DapControllerTest, StepOutStepsOverNestedCall)
+{
+  // bl +0x40 then blr; the callee at +0x40 is nop; blr. Step-out must run the
+  // linking branch's inner loop (stepping the whole call as a unit) instead of
+  // stopping inside the callee, then take the outer return.
+  const std::array<u8, 8> caller{{0x48, 0x00, 0x00, 0x41, 0x4e, 0x80, 0x00, 0x20}};
+  const std::array<u8, 8> callee{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, caller.data(), caller.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS + 0x40, callee.data(), callee.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepOut(std::chrono::seconds(1));
+
+  // bl sets LR to TEST_ADDRESS + 4; the callee returns there, so the inner loop
+  // ends on the instruction after the call rather than parking inside the
+  // callee body ([TEST_ADDRESS + 0x40, TEST_ADDRESS + 0x48)).
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
+}
+
+TEST_F(DapControllerTest, StepOverNonLinkingBranchStepsInto)
+{
+  // Only linking branches get the temporary-breakpoint/continue treatment. A
+  // plain b +8 has no LK bit, so step-over degrades to step-into and follows
+  // the branch rather than planting a temporary breakpoint.
+  const std::array<u8, 4> branch{{0x48, 0x00, 0x00, 0x08}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, branch.data(), branch.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Stepped);
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 8u);
+  EXPECT_TRUE(System().GetCPU().IsStepping());
+}
 }  // namespace
