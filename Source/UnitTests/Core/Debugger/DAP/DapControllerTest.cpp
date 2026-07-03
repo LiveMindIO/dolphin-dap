@@ -63,6 +63,7 @@ protected:
   {
     auto& system = Core::System::GetInstance();
     system.GetPowerPC().GetBreakPoints().Clear();
+    system.GetPowerPC().GetMemChecks().Clear();
     system.GetCPU().Shutdown();
     AddressSpace::Shutdown();
     system.GetMemory().Shutdown();
@@ -451,6 +452,93 @@ TEST_F(DapControllerTest, SetCodeBreakpointsEmptyConditionIsUnconditional)
   const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
+}
+
+// Conditional breakpoint behavior is gated by PowerPCManager::CheckBreakPoints and
+// TMemCheck::Action, both of which call EvaluateCondition — the same path the
+// Qt debugger and interpreter use. We install via DAP then drive PPC state and
+// assert those core checks, mirroring PageFaultTest / PageTableHostMappingTest
+// (real Core::System, no ISO/JIT boot).
+
+TEST_F(DapControllerTest, ConditionalCodeBreakpointFiresWhenExpressionTrue)
+{
+  auto& power_pc = System().GetPowerPC();
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.gpr[3] = 5;
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 5"}});
+
+  EXPECT_TRUE(power_pc.CheckBreakPoints());
+}
+
+TEST_F(DapControllerTest, ConditionalCodeBreakpointSuppressedWhenExpressionFalse)
+{
+  auto& power_pc = System().GetPowerPC();
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.gpr[3] = 0;
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 5"}});
+
+  EXPECT_FALSE(power_pc.CheckBreakPoints());
+}
+
+TEST_F(DapControllerTest, UnconditionalCodeBreakpointFiresWithoutCondition)
+{
+  auto& power_pc = System().GetPowerPC();
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS}});
+
+  EXPECT_TRUE(power_pc.CheckBreakPoints());
+}
+
+TEST_F(DapControllerTest, ConditionalMemCheckFiresWhenExpressionTrue)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+  System().GetPPCState().gpr[3] = 1;
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+
+  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
+}
+
+TEST_F(DapControllerTest, ConditionalMemCheckSuppressedWhenExpressionFalse)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+  System().GetPPCState().gpr[3] = 0;
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+
+  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
+}
+
+TEST_F(DapControllerTest, ConditionalMemCheckRespectsAccessType)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+  System().GetPPCState().gpr[3] = 1;
+
+  DAP::DapDebugController controller(System());
+  // Read-only watchpoint must not fire on a write even when the condition is true.
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+
+  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
+  EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, false, 4, TEST_ADDRESS));
 }
 
 TEST_F(DapControllerTest, EvaluateExpressionReturnsRegisterValue)
