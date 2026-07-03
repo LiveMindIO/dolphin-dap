@@ -434,6 +434,29 @@ TEST_F(DapSessionTest, ThreadsAndStackTraceReturnPpcState)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, StackTraceWithUnknownThreadFails)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "stackTrace",
+    "arguments": {"threadId": 7}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
 TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
 {
   TestClient client(m_client_fd());

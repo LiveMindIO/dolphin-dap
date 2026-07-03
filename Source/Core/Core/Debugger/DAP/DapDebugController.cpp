@@ -282,15 +282,16 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
   StackTraceResult result;
   result.total_frames = static_cast<int>(frames.size());
 
-  const int clamped_start = std::max(0, start_frame);
-  if (levels < 0)
-    return result;
-
-  const std::size_t begin = static_cast<std::size_t>(clamped_start);
+  const std::size_t begin = static_cast<std::size_t>(std::max(0, start_frame));
   if (begin >= frames.size())
     return result;
 
-  const std::size_t end = std::min(frames.size(), begin + static_cast<std::size_t>(levels));
+  // DESNOTE(jbarber, 2026-07-03): Per the DAP spec `levels` of 0 (or omitted)
+  // means "all frames"; a negative value is invalid and treated the same way.
+  // See https://microsoft.github.io/debug-adapter-protocol/specification#Requests_StackTrace
+  const std::size_t end = levels <= 0 ?
+                              frames.size() :
+                              std::min(frames.size(), begin + static_cast<std::size_t>(levels));
   frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(end), frames.end());
   frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(begin));
   for (std::size_t i = 0; i < frames.size(); ++i)

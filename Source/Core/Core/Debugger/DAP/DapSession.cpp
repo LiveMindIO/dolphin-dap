@@ -445,7 +445,9 @@ private:
     }
 
     const int start_frame = ReadNumericFromJson<int>(request.arguments, "startFrame").value_or(0);
-    const int levels = ReadNumericFromJson<int>(request.arguments, "levels").value_or(20);
+    // DESNOTE(jbarber, 2026-07-03): DAP treats an omitted `levels` as "all
+    // frames"; the controller interprets 0 that way.
+    const int levels = ReadNumericFromJson<int>(request.arguments, "levels").value_or(0);
 
     const StackTraceResult trace = m_controller.GetStackTrace(start_frame, levels);
 
