@@ -202,6 +202,7 @@ TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
   EXPECT_TRUE(caps.at("supportsDisassembleRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsSetVariable").get<bool>());
   EXPECT_TRUE(caps.at("supportsStackTraceRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsDataBreakpoints").get<bool>());
 }
 
 TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
@@ -425,6 +426,59 @@ TEST_F(DapSessionTest, ThreadsAndStackTraceReturnPpcState)
   ASSERT_GE(stack_frames.size(), 1u);
   EXPECT_EQ(stack_frames[0].get<picojson::object>().at("instructionPointerReference").to_str(),
             "0x00003100");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, EvaluateReturnsExpressionResult)
+{
+  Core::System::GetInstance().GetPPCState().gpr[3] = 0x12345678;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "evaluate",
+    "arguments": {"expression": "r3"}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_EQ(response->at("body").get<picojson::object>().at("result").to_str(), "0x12345678");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetDataBreakpointsInstallsWatchpoint)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "0x00003100", "accessType": "write"}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_NE(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(CODE_ADDRESS),
+            nullptr);
 
   client.Send(R"({
     "seq": 9,

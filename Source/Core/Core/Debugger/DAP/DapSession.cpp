@@ -210,6 +210,8 @@ private:
     capabilities.emplace("supportsWriteMemoryRequest", true);
     capabilities.emplace("supportsSetVariable", true);
     capabilities.emplace("supportsStackTraceRequest", true);
+    capabilities.emplace("supportsDataBreakpoints", true);
+    capabilities.emplace("supportsEvaluateForHovers", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -302,6 +304,18 @@ private:
       return;
     }
 
+    if (command == "setDataBreakpoints")
+    {
+      HandleSetDataBreakpoints(*request);
+      return;
+    }
+
+    if (command == "evaluate")
+    {
+      HandleEvaluate(*request);
+      return;
+    }
+
     if (command == "scopes")
     {
       Respond(request->seq, command, MakeScopes());
@@ -369,7 +383,7 @@ private:
     const Protocol::SetBreakpointsArguments arguments =
         Protocol::ParseSetBreakpoints(request.arguments);
 
-    std::vector<u32> addresses;
+    std::vector<CodeBreakpointRequest> breakpoint_requests;
     picojson::array breakpoints;
     for (const Protocol::RequestedBreakpoint& breakpoint : arguments.breakpoints)
     {
@@ -378,7 +392,10 @@ private:
       if (breakpoint.address)
       {
         entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
-        addresses.push_back(*breakpoint.address);
+        CodeBreakpointRequest bp;
+        bp.address = *breakpoint.address;
+        bp.condition = breakpoint.condition;
+        breakpoint_requests.push_back(std::move(bp));
       }
       breakpoints.emplace_back(std::move(entry));
     }
@@ -387,13 +404,71 @@ private:
     // given source, so a bare source address with no breakpoint entries clears
     // it. We still honor a base-only request (no entries) by setting that one.
     if (arguments.breakpoints.empty() && arguments.base)
-      addresses.push_back(*arguments.base);
+    {
+      CodeBreakpointRequest bp;
+      bp.address = *arguments.base;
+      breakpoint_requests.push_back(std::move(bp));
+    }
 
-    m_controller.SetCodeBreakpoints(addresses);
+    m_controller.SetCodeBreakpoints(std::move(breakpoint_requests));
 
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setBreakpoints", std::move(body));
+  }
+
+  void HandleSetDataBreakpoints(const Protocol::Request& request)
+  {
+    const Protocol::SetDataBreakpointsArguments arguments =
+        Protocol::ParseSetDataBreakpoints(request.arguments);
+
+    std::vector<DataBreakpointRequest> breakpoint_requests;
+    picojson::array breakpoints;
+    for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
+    {
+      picojson::object entry;
+      entry.emplace("verified", breakpoint.address.has_value());
+      if (breakpoint.address)
+      {
+        DataBreakpointRequest bp;
+        bp.address = *breakpoint.address;
+        bp.read = breakpoint.read;
+        bp.write = breakpoint.write;
+        bp.condition = breakpoint.condition;
+        breakpoint_requests.push_back(std::move(bp));
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
+
+    m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
+
+    picojson::object body;
+    body.emplace("breakpoints", std::move(breakpoints));
+    Respond(request.seq, "setDataBreakpoints", std::move(body));
+  }
+
+  void HandleEvaluate(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::EvaluateArguments> arguments =
+        Protocol::ParseEvaluate(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "evaluate", "invalid evaluate arguments");
+      return;
+    }
+
+    const std::optional<std::string> result =
+        m_controller.EvaluateExpression(arguments->expression);
+    if (!result)
+    {
+      RespondError(request.seq, "evaluate", "invalid expression");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("result", *result);
+    body.emplace("type", std::string("string"));
+    Respond(request.seq, "evaluate", std::move(body));
   }
 
   void HandleSetVariable(const Protocol::Request& request)

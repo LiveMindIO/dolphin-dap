@@ -4,6 +4,7 @@
 #include "Core/Debugger/DAP/DapDebugController.h"
 
 #include <chrono>
+#include <cmath>
 #include <string_view>
 
 #include <fmt/format.h>
@@ -18,6 +19,7 @@
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
 #include "Core/PowerPC/BreakPoints.h"
+#include "Core/PowerPC/Expression.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -148,12 +150,53 @@ void DapDebugController::StepOut(std::chrono::milliseconds timeout_ms)
   power_pc.SetMode(old_mode);
 }
 
-void DapDebugController::SetCodeBreakpoints(const std::vector<u32>& addresses)
+void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints)
 {
-  auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
-  breakpoints.Clear();
-  for (const u32 address : addresses)
-    breakpoints.Add(address, true, false, std::nullopt);
+  auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
+  breakpoint_manager.Clear();
+  for (CodeBreakpointRequest& request : breakpoints)
+  {
+    std::optional<Expression> condition;
+    if (request.condition && !request.condition->empty())
+      condition = Expression::TryParse(*request.condition);
+
+    breakpoint_manager.Add(request.address, true, false, std::move(condition));
+  }
+}
+
+void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
+{
+  auto& memchecks = m_system.GetPowerPC().GetMemChecks();
+  memchecks.Clear();
+  for (const DataBreakpointRequest& request : breakpoints)
+  {
+    TMemCheck check;
+    check.start_address = request.address;
+    check.end_address = request.address;
+    check.is_ranged = false;
+    check.is_break_on_read = request.read;
+    check.is_break_on_write = request.write;
+    check.break_on_hit = true;
+    check.log_on_hit = false;
+    check.is_enabled = true;
+    if (request.condition && !request.condition->empty())
+      check.condition = Expression::TryParse(*request.condition);
+    memchecks.Add(std::move(check));
+  }
+}
+
+std::optional<std::string> DapDebugController::EvaluateExpression(const std::string_view expression)
+{
+  const std::optional<Expression> parsed = Expression::TryParse(expression);
+  if (!parsed)
+    return std::nullopt;
+
+  Core::CPUThreadGuard guard(m_system);
+  const double value = parsed->Evaluate(m_system);
+  if (value == std::trunc(value) && value >= 0 && value <= 0xffffffff)
+    return fmt::format("0x{:08x}", static_cast<u32>(value));
+
+  return fmt::format("{}", value);
 }
 
 RegisterSnapshot DapDebugController::GetRegisters()

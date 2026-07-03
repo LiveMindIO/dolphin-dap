@@ -361,18 +361,73 @@ TEST_F(DapControllerTest, SetCodeBreakpointsAddsThenReplaces)
   auto& breakpoints = System().GetPowerPC().GetBreakPoints();
 
   DAP::DapDebugController controller(System());
-  controller.SetCodeBreakpoints({0x80003100, 0x80003200});
+  controller.SetCodeBreakpoints({{.address = 0x80003100}, {.address = 0x80003200}});
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(0x80003100));
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(0x80003200));
 
   // setBreakpoints is authoritative: a new set replaces the previous one.
-  controller.SetCodeBreakpoints({0x80003300});
+  controller.SetCodeBreakpoints({{.address = 0x80003300}});
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003100));
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003200));
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(0x80003300));
 
   controller.SetCodeBreakpoints({});
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003300));
+}
+
+TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
+{
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 0"}});
+
+  const TBreakPoint* bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
+  ASSERT_NE(bp, nullptr);
+  ASSERT_TRUE(bp->condition.has_value());
+  EXPECT_EQ(bp->condition->GetText(), "r3 == 0");
+}
+
+TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+
+  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->is_break_on_read);
+  EXPECT_FALSE(check->is_break_on_write);
+  ASSERT_TRUE(check->condition.has_value());
+  EXPECT_EQ(check->condition->GetText(), "r3 == 1");
+}
+
+TEST_F(DapControllerTest, SetDataBreakpointsReplacesPreviousWatchpoints)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 4, .read = false, .write = true}});
+
+  EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+  ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 4), nullptr);
+}
+
+TEST_F(DapControllerTest, EvaluateExpressionReturnsRegisterValue)
+{
+  System().GetPPCState().gpr[3] = 0x12345678;
+
+  DAP::DapDebugController controller(System());
+  const std::optional<std::string> result = controller.EvaluateExpression("r3");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "0x12345678");
+}
+
+TEST_F(DapControllerTest, EvaluateExpressionRejectsInvalidSyntax)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.EvaluateExpression("not an expression").has_value());
 }
 
 TEST_F(DapControllerTest, StepIntoAdvancesPc)
@@ -487,7 +542,7 @@ TEST_F(DapControllerTest, StepOutStopsAtBreakpointBeforeReturn)
   ASSERT_TRUE(System().GetCPU().IsStepping());
 
   DAP::DapDebugController controller(System());
-  controller.SetCodeBreakpoints({TEST_ADDRESS + 4});
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4}});
   controller.StepOut();
 
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);

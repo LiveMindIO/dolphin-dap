@@ -59,6 +59,20 @@ struct StackTraceResult
   int total_frames = 0;
 };
 
+struct CodeBreakpointRequest
+{
+  u32 address = 0;
+  std::optional<std::string> condition;
+};
+
+struct DataBreakpointRequest
+{
+  u32 address = 0;
+  bool read = false;
+  bool write = false;
+  std::optional<std::string> condition;
+};
+
 class DapDebugController
 {
 public:
@@ -72,7 +86,10 @@ public:
   // wall-clock time elapses. The timeout bounds otherwise non-returning code
   // (e.g. an infinite loop) and is injectable so it can be exercised in tests.
   void StepOut(std::chrono::milliseconds timeout = std::chrono::seconds(5));
-  void SetCodeBreakpoints(const std::vector<u32>& addresses);
+  void SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
+  void SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
+  // Evaluates a PPC debugger expression (same syntax as breakpoint conditions).
+  std::optional<std::string> EvaluateExpression(std::string_view expression);
 
   RegisterSnapshot GetRegisters();
   // Writes a register exposed by the `variables` scopes. Returns the new value

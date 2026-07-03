@@ -200,6 +200,44 @@ TEST(DapProtocol, ParseSetBreakpointsUsesPathWhenNameNotHex)
   EXPECT_EQ(*parsed.breakpoints[0].address, 0x80004004u);
 }
 
+TEST(DapProtocol, ParseSetBreakpointsExtractsCondition)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "source": {"name": "0x80001000"},
+    "breakpoints": [{"line": 1, "condition": "r3 == 0"}]
+  })");
+  const auto parsed = Protocol::ParseSetBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].condition.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].condition, "r3 == 0");
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsResolvesAccessType)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [
+      {"dataId": "0x80003100", "accessType": "write"},
+      {"dataId": "0x80003200", "accessType": "read"}
+    ]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 2u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80003100u);
+  EXPECT_FALSE(parsed.breakpoints[0].read);
+  EXPECT_TRUE(parsed.breakpoints[0].write);
+  EXPECT_TRUE(parsed.breakpoints[1].read);
+  EXPECT_FALSE(parsed.breakpoints[1].write);
+}
+
+TEST(DapProtocol, ParseEvaluateExtractsExpression)
+{
+  const auto message = ParseObjectOrDie(R"({"expression": "r3"})");
+  const auto parsed = Protocol::ParseEvaluate(message);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->expression, "r3");
+}
+
 TEST(DapProtocol, ParseSetVariableExtractsArguments)
 {
   const auto message = ParseObjectOrDie(R"({
