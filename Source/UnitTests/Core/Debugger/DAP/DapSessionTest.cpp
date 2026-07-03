@@ -200,6 +200,9 @@ TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
   EXPECT_TRUE(caps.at("supportsReadMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsWriteMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsDisassembleRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsSetVariable").get<bool>());
+  EXPECT_TRUE(caps.at("supportsStackTraceRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsDataBreakpoints").get<bool>());
 }
 
 TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
@@ -351,6 +354,242 @@ TEST_F(DapSessionTest, VariablesReturnsRegisters)
       response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
   EXPECT_EQ(variables.size(), 32u);
   EXPECT_EQ(variables[0].get<picojson::object>().at("name").to_str(), "r0");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetVariableUpdatesRegisterAndReturnsFormattedValue)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setVariable",
+    "arguments": {
+      "variablesReference": 1000,
+      "name": "r3",
+      "value": "0x12345678"
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_EQ(response->at("body").get<picojson::object>().at("value").to_str(), "0x12345678");
+  EXPECT_EQ(Core::System::GetInstance().GetPPCState().gpr[3], 0x12345678u);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, ThreadsAndStackTraceReturnPpcState)
+{
+  auto& ppc_state = Core::System::GetInstance().GetPPCState();
+  ppc_state.pc = CODE_ADDRESS;
+  LR(ppc_state) = CODE_ADDRESS + 4;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "threads"
+  })");
+  const auto threads_response = client.Receive();
+  ASSERT_TRUE(threads_response.has_value());
+  const auto& threads =
+      threads_response->at("body").get<picojson::object>().at("threads").get<picojson::array>();
+  ASSERT_EQ(threads.size(), 1u);
+  EXPECT_EQ(threads[0].get<picojson::object>().at("id").get<double>(), 1.0);
+
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "stackTrace",
+    "arguments": {"threadId": 1}
+  })");
+  const auto stack_response = client.Receive();
+  ASSERT_TRUE(stack_response.has_value());
+  const auto& stack_frames =
+      stack_response->at("body").get<picojson::object>().at("stackFrames").get<picojson::array>();
+  ASSERT_GE(stack_frames.size(), 1u);
+  EXPECT_EQ(stack_frames[0].get<picojson::object>().at("instructionPointerReference").to_str(),
+            "0x00003100");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, EvaluateReturnsExpressionResult)
+{
+  Core::System::GetInstance().GetPPCState().gpr[3] = 0x12345678;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "evaluate",
+    "arguments": {"expression": "r3"}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_EQ(response->at("body").get<picojson::object>().at("result").to_str(), "0x12345678");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, EvaluateInvalidExpressionFails)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "evaluate",
+    "arguments": {"expression": "this is not valid"}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetDataBreakpointsUnresolvedDataIdInstallsNothing)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "not-hex", "accessType": "write"}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 1u);
+  EXPECT_FALSE(breakpoints[0].get<picojson::object>().at("verified").get<bool>());
+  EXPECT_FALSE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetDataBreakpointsInstallsWatchpoint)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "0x00003100", "accessType": "write"}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_NE(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(CODE_ADDRESS),
+            nullptr);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, StackTraceWithUnknownThreadFails)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "stackTrace",
+    "arguments": {"threadId": 7}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // next, stepIn and stepOut must all be recognized (stepOut previously fell
+  // through to the "unsupported" error) and each acknowledges with a response
+  // followed by a stopped(step) event.
+  const auto expect_step = [&](std::string_view command) {
+    client.Send(
+        std::string(R"({"type":"request","seq":3,"command":")").append(command).append(R"("})"));
+
+    const auto response = client.Receive();
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response->at("command").to_str(), command);
+    EXPECT_TRUE(response->at("success").get<bool>());
+
+    const auto stopped = client.Receive();
+    ASSERT_TRUE(stopped.has_value());
+    EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+    EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "step");
+  };
+
+  expect_step("stepIn");
+  expect_step("next");
+  expect_step("stepOut");
 
   client.Send(R"({
     "seq": 9,

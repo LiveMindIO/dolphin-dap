@@ -149,9 +149,89 @@ SetBreakpointsArguments ParseSetBreakpoints(const picojson::object& arguments)
       breakpoint.address = *result.base;
     }
 
+    if (const std::optional<std::string> condition = ReadStringFromJson(entry_obj, "condition"))
+      breakpoint.condition = *condition;
+
     result.breakpoints.push_back(breakpoint);
   }
 
+  return result;
+}
+
+std::optional<SetVariableArguments> ParseSetVariable(const picojson::object& arguments)
+{
+  const std::optional<int> variables_reference =
+      ReadNumericFromJson<int>(arguments, "variablesReference");
+  const std::optional<std::string> name = ReadStringFromJson(arguments, "name");
+  const std::optional<std::string> value = ReadStringFromJson(arguments, "value");
+  if (!variables_reference || !name || !value)
+    return std::nullopt;
+
+  SetVariableArguments result;
+  result.variables_reference = *variables_reference;
+  result.name = *name;
+  result.value = *value;
+  return result;
+}
+
+SetDataBreakpointsArguments ParseSetDataBreakpoints(const picojson::object& arguments)
+{
+  SetDataBreakpointsArguments result;
+
+  const picojson::array* breakpoints = GetArray(arguments, "breakpoints");
+  if (breakpoints == nullptr)
+    return result;
+
+  for (const picojson::value& entry : *breakpoints)
+  {
+    if (!entry.is<picojson::object>())
+      continue;
+
+    const picojson::object& entry_obj = entry.get<picojson::object>();
+    RequestedDataBreakpoint breakpoint;
+
+    if (const std::optional<std::string> data_id = ReadStringFromJson(entry_obj, "dataId"))
+    {
+      if (const std::optional<u32> address = Json::ParseHexAddress(*data_id))
+        breakpoint.address = *address;
+    }
+
+    if (const std::optional<std::string> access_type = ReadStringFromJson(entry_obj, "accessType"))
+    {
+      if (*access_type == "read")
+      {
+        breakpoint.read = true;
+        breakpoint.write = false;
+      }
+      else if (*access_type == "write")
+      {
+        breakpoint.read = false;
+        breakpoint.write = true;
+      }
+      else
+      {
+        breakpoint.read = true;
+        breakpoint.write = true;
+      }
+    }
+
+    if (const std::optional<std::string> condition = ReadStringFromJson(entry_obj, "condition"))
+      breakpoint.condition = *condition;
+
+    result.breakpoints.push_back(std::move(breakpoint));
+  }
+
+  return result;
+}
+
+std::optional<EvaluateArguments> ParseEvaluate(const picojson::object& arguments)
+{
+  const std::optional<std::string> expression = ReadStringFromJson(arguments, "expression");
+  if (!expression)
+    return std::nullopt;
+
+  EvaluateArguments result;
+  result.expression = *expression;
   return result;
 }
 

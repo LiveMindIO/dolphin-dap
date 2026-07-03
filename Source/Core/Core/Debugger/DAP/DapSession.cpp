@@ -35,9 +35,6 @@ namespace DAP
 {
 namespace
 {
-constexpr int REGISTERS_SCOPE = 1000;
-constexpr int PC_SCOPE = 1001;
-
 bool WaitForReadable(int socket, int timeout_ms)
 {
   fd_set readfds;
@@ -211,6 +208,10 @@ private:
     capabilities.emplace("supportsDisassembleRequest", true);
     capabilities.emplace("supportsReadMemoryRequest", true);
     capabilities.emplace("supportsWriteMemoryRequest", true);
+    capabilities.emplace("supportsSetVariable", true);
+    capabilities.emplace("supportsStackTraceRequest", true);
+    capabilities.emplace("supportsDataBreakpoints", true);
+    capabilities.emplace("supportsEvaluateForHovers", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -263,9 +264,34 @@ private:
       return;
     }
 
-    if (command == "next" || command == "stepIn")
+    if (command == "next")
+    {
+      const StepOverResult result = m_controller.StepOver();
+      Respond(request->seq, command, picojson::object{});
+      if (result == StepOverResult::Stepped)
+      {
+        SendStoppedEvent("step");
+        SyncSteppingBaseline();
+      }
+      else
+      {
+        SyncSteppingBaseline();
+      }
+      return;
+    }
+
+    if (command == "stepIn")
     {
       m_controller.StepInto();
+      Respond(request->seq, command, picojson::object{});
+      SendStoppedEvent("step");
+      SyncSteppingBaseline();
+      return;
+    }
+
+    if (command == "stepOut")
+    {
+      m_controller.StepOut();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
       SyncSteppingBaseline();
@@ -275,6 +301,18 @@ private:
     if (command == "setBreakpoints")
     {
       HandleSetBreakpoints(*request);
+      return;
+    }
+
+    if (command == "setDataBreakpoints")
+    {
+      HandleSetDataBreakpoints(*request);
+      return;
+    }
+
+    if (command == "evaluate")
+    {
+      HandleEvaluate(*request);
       return;
     }
 
@@ -289,6 +327,24 @@ private:
       const std::optional<int> variables_reference =
           ReadNumericFromJson<int>(request->arguments, "variablesReference");
       Respond(request->seq, command, MakeVariables(variables_reference.value_or(0)));
+      return;
+    }
+
+    if (command == "setVariable")
+    {
+      HandleSetVariable(*request);
+      return;
+    }
+
+    if (command == "threads")
+    {
+      Respond(request->seq, command, MakeThreads());
+      return;
+    }
+
+    if (command == "stackTrace")
+    {
+      HandleStackTrace(*request);
       return;
     }
 
@@ -327,7 +383,7 @@ private:
     const Protocol::SetBreakpointsArguments arguments =
         Protocol::ParseSetBreakpoints(request.arguments);
 
-    std::vector<u32> addresses;
+    std::vector<CodeBreakpointRequest> breakpoint_requests;
     picojson::array breakpoints;
     for (const Protocol::RequestedBreakpoint& breakpoint : arguments.breakpoints)
     {
@@ -336,7 +392,10 @@ private:
       if (breakpoint.address)
       {
         entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
-        addresses.push_back(*breakpoint.address);
+        CodeBreakpointRequest bp;
+        bp.address = *breakpoint.address;
+        bp.condition = breakpoint.condition;
+        breakpoint_requests.push_back(std::move(bp));
       }
       breakpoints.emplace_back(std::move(entry));
     }
@@ -345,13 +404,144 @@ private:
     // given source, so a bare source address with no breakpoint entries clears
     // it. We still honor a base-only request (no entries) by setting that one.
     if (arguments.breakpoints.empty() && arguments.base)
-      addresses.push_back(*arguments.base);
+    {
+      CodeBreakpointRequest bp;
+      bp.address = *arguments.base;
+      breakpoint_requests.push_back(std::move(bp));
+    }
 
-    m_controller.SetCodeBreakpoints(addresses);
+    m_controller.SetCodeBreakpoints(std::move(breakpoint_requests));
 
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setBreakpoints", std::move(body));
+  }
+
+  void HandleSetDataBreakpoints(const Protocol::Request& request)
+  {
+    const Protocol::SetDataBreakpointsArguments arguments =
+        Protocol::ParseSetDataBreakpoints(request.arguments);
+
+    std::vector<DataBreakpointRequest> breakpoint_requests;
+    picojson::array breakpoints;
+    for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
+    {
+      picojson::object entry;
+      entry.emplace("verified", breakpoint.address.has_value());
+      if (breakpoint.address)
+      {
+        DataBreakpointRequest bp;
+        bp.address = *breakpoint.address;
+        bp.read = breakpoint.read;
+        bp.write = breakpoint.write;
+        bp.condition = breakpoint.condition;
+        breakpoint_requests.push_back(std::move(bp));
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
+
+    m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
+
+    picojson::object body;
+    body.emplace("breakpoints", std::move(breakpoints));
+    Respond(request.seq, "setDataBreakpoints", std::move(body));
+  }
+
+  void HandleEvaluate(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::EvaluateArguments> arguments =
+        Protocol::ParseEvaluate(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "evaluate", "invalid evaluate arguments");
+      return;
+    }
+
+    const std::optional<std::string> result =
+        m_controller.EvaluateExpression(arguments->expression);
+    if (!result)
+    {
+      RespondError(request.seq, "evaluate", "invalid expression");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("result", *result);
+    body.emplace("type", std::string("string"));
+    Respond(request.seq, "evaluate", std::move(body));
+  }
+
+  void HandleSetVariable(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::SetVariableArguments> arguments =
+        Protocol::ParseSetVariable(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+      return;
+    }
+
+    const std::optional<u32> value =
+        m_controller.SetRegister(arguments->variables_reference, arguments->name, arguments->value);
+    if (!value)
+    {
+      RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("value", fmt::format("0x{:08x}", *value));
+    Respond(request.seq, "setVariable", std::move(body));
+  }
+
+  picojson::object MakeThreads()
+  {
+    picojson::array threads;
+    for (const ThreadInfo& thread : m_controller.GetThreads())
+    {
+      picojson::object entry;
+      entry.emplace("id", static_cast<double>(thread.id));
+      entry.emplace("name", thread.name);
+      threads.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("threads", std::move(threads));
+    return body;
+  }
+
+  void HandleStackTrace(const Protocol::Request& request)
+  {
+    const std::optional<int> thread_id = ReadNumericFromJson<int>(request.arguments, "threadId");
+    if (!thread_id || *thread_id != 1)
+    {
+      RespondError(request.seq, "stackTrace", "invalid stackTrace arguments");
+      return;
+    }
+
+    const int start_frame = ReadNumericFromJson<int>(request.arguments, "startFrame").value_or(0);
+    // DESNOTE(jbarber, 2026-07-03): DAP treats an omitted `levels` as "all
+    // frames"; the controller interprets 0 that way.
+    const int levels = ReadNumericFromJson<int>(request.arguments, "levels").value_or(0);
+
+    const StackTraceResult trace = m_controller.GetStackTrace(start_frame, levels);
+
+    picojson::array stack_frames;
+    for (const StackFrame& frame : trace.frames)
+    {
+      picojson::object entry;
+      entry.emplace("id", static_cast<double>(frame.id));
+      entry.emplace("name", frame.name);
+      entry.emplace("instructionPointerReference", Json::FormatAddress(frame.address));
+      entry.emplace("line", 0.0);
+      entry.emplace("column", 0.0);
+      stack_frames.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("stackFrames", std::move(stack_frames));
+    body.emplace("totalFrames", static_cast<double>(trace.total_frames));
+    Respond(request.seq, "stackTrace", std::move(body));
   }
 
   void HandleReadMemory(const Protocol::Request& request)

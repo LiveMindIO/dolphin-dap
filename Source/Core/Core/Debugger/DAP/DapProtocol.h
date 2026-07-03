@@ -68,6 +68,7 @@ std::optional<DisassembleArguments> ParseDisassemble(const picojson::object& arg
 struct RequestedBreakpoint
 {
   std::optional<u32> address;
+  std::optional<std::string> condition;
 };
 
 // Arguments of a `setBreakpoints` request. The base address is taken from the
@@ -80,6 +81,37 @@ struct SetBreakpointsArguments
 };
 
 SetBreakpointsArguments ParseSetBreakpoints(const picojson::object& arguments);
+
+struct SetVariableArguments
+{
+  int variables_reference = 0;
+  std::string name;
+  std::string value;
+};
+
+std::optional<SetVariableArguments> ParseSetVariable(const picojson::object& arguments);
+
+struct RequestedDataBreakpoint
+{
+  std::optional<u32> address;
+  bool read = true;
+  bool write = true;
+  std::optional<std::string> condition;
+};
+
+struct SetDataBreakpointsArguments
+{
+  std::vector<RequestedDataBreakpoint> breakpoints;
+};
+
+SetDataBreakpointsArguments ParseSetDataBreakpoints(const picojson::object& arguments);
+
+struct EvaluateArguments
+{
+  std::string expression;
+};
+
+std::optional<EvaluateArguments> ParseEvaluate(const picojson::object& arguments);
 
 // Envelope builders. `seq` is the server's monotonically increasing sequence
 // number; the caller owns its allocation.

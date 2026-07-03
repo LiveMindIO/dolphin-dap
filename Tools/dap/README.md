@@ -40,10 +40,20 @@ Expect a JSON `response` with `"command":"initialize"` and `"success":true`.
 ## Phase 1 commands (MVP)
 
 After `configurationDone`, the session emits a `stopped` event (`reason: entry`).
-Supported requests include `continue`, `pause`, `stepIn`, `setBreakpoints`,
-`scopes`, `variables`, `readMemory`, `writeMemory`, and `disassemble`. Breakpoint
-addresses are hex strings in `source.name` or `source.path` (optional `line` × 4
-offset).
+Supported requests include `continue`, `pause`, `stepIn`, `next`, `stepOut`,
+`setBreakpoints`, `scopes`, `variables`, `readMemory`, `writeMemory`, and
+`disassemble`. Breakpoint addresses are hex strings in `source.name` or
+`source.path` (optional `line` × 4 offset).
+
+## Phase 2 (in progress)
+
+Step over/out mirror `CodeWidget::StepOver` / `CodeWidget::StepOut` (temporary
+breakpoint for branch step-over; interpreter loop for step-out). `setVariable`
+writes GPRs and PC-scope registers (`pc`, `lr`, `ctr`, `cr`, `xer`) exposed by
+`variables`. `threads` and `stackTrace` expose the emulated PPC thread and call
+stack. Conditional breakpoints (`setBreakpoints` `condition`), memory watchpoints
+(`setDataBreakpoints` with hex `dataId`), and `evaluate` for PPC expressions are
+supported. Phase 2 is complete for the planned command surface.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
@@ -67,8 +77,8 @@ translation off, so effective addresses map straight to physical RAM).
 | `DapFramingTest` | transport | `Content-Length` framing encode/decode |
 | `DapJsonTest` | JSON | picojson parsing, hex addresses, base64 |
 | `DapProtocolTest` | protocol | request parsing + response/event building |
-| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read, memory read/write (incl. partial/invalid), disassembly, breakpoints |
-| `DapSessionTest` | end-to-end | full `RunSession` command loop over a `socketpair`: handshake, `setBreakpoints`, `readMemory`, `writeMemory`, `disassemble`, `variables`, unknown-command error |
+| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read/write, memory read/write (incl. partial/invalid), disassembly, breakpoints |
+| `DapSessionTest` | end-to-end | full `RunSession` command loop over a `socketpair`: handshake, `setBreakpoints`, `readMemory`, `writeMemory`, `disassemble`, `variables`, `setVariable`, unknown-command error |
 
 `DapSessionTest` connects a `socketpair` to `RunSession` running on a background
 thread (which declares itself the CPU thread, so the controller's
