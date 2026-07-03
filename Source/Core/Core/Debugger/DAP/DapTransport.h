@@ -22,11 +22,17 @@ public:
   bool WriteMessage(std::string_view body);
 
   int GetSocket() const { return m_socket; }
+
+  // Relinquish ownership of the socket without invalidating it: the transport
+  // keeps using the fd for I/O but will not close it on destruction. Used when
+  // the socket's lifetime is owned elsewhere (e.g. DAP::Deinit closes it to
+  // unblock the accept/read on shutdown).
   void ReleaseSocket();
 
 private:
   bool ReadExact(void* data, size_t size);
 
   int m_socket = -1;
+  bool m_owns_socket = true;
 };
 }  // namespace DAP

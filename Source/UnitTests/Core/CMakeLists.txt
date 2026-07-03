@@ -6,6 +6,8 @@ add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(DapFramingTest Debugger/DAP/DapFramingTest.cpp)
 add_dolphin_test(DapJsonTest Debugger/DAP/DapJsonTest.cpp)
 add_dolphin_test(DapProtocolTest Debugger/DAP/DapProtocolTest.cpp)
+add_dolphin_test(DapControllerTest Debugger/DAP/DapControllerTest.cpp)
+add_dolphin_test(DapSessionTest Debugger/DAP/DapSessionTest.cpp)
 
 add_dolphin_test(DSPAcceleratorTest DSP/DSPAcceleratorTest.cpp)
 add_dolphin_test(DSPAssemblyTest

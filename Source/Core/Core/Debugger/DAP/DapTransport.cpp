@@ -23,7 +23,7 @@ DapTransport::DapTransport(int socket) : m_socket(socket)
 
 DapTransport::~DapTransport()
 {
-  if (m_socket != -1)
+  if (m_owns_socket && m_socket != -1)
   {
 #ifdef _WIN32
     closesocket(m_socket);
@@ -36,7 +36,7 @@ DapTransport::~DapTransport()
 
 void DapTransport::ReleaseSocket()
 {
-  m_socket = -1;
+  m_owns_socket = false;
 }
 
 bool DapTransport::ReadExact(void* data, size_t size)
