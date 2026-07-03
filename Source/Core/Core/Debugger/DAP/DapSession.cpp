@@ -137,11 +137,44 @@ private:
     FlushEvents();
   }
 
+  // Emits a `stopped` event whose reason is classified from the current PC
+  // (code breakpoint, data watchpoint, or step) and carries `hitBreakpointIds`
+  // when a breakpoint at the PC caused the stop.
+  void SendClassifiedStoppedEvent()
+  {
+    const StopInfo info = m_controller.GetStopInfo();
+
+    picojson::object body;
+    body.emplace("threadId", 1.0);
+    switch (info.reason)
+    {
+    case StopReason::CodeBreakpoint:
+      body.emplace("reason", std::string("breakpoint"));
+      break;
+    case StopReason::DataBreakpoint:
+      body.emplace("reason", std::string("data breakpoint"));
+      break;
+    case StopReason::Step:
+      body.emplace("reason", std::string("step"));
+      break;
+    }
+
+    if (info.hit_breakpoint_address)
+    {
+      picojson::array hit_ids;
+      hit_ids.emplace_back(static_cast<double>(*info.hit_breakpoint_address));
+      body.emplace("hitBreakpointIds", std::move(hit_ids));
+    }
+
+    QueueEvent("stopped", std::move(body));
+    FlushEvents();
+  }
+
   void PollBreakpointStop()
   {
     const bool stepping = m_system.GetCPU().IsStepping();
     if (!m_was_stepping && stepping)
-      SendStoppedEvent("breakpoint");
+      SendClassifiedStoppedEvent();
     m_was_stepping = stepping;
     FlushEvents();
   }
@@ -212,6 +245,9 @@ private:
     capabilities.emplace("supportsStackTraceRequest", true);
     capabilities.emplace("supportsDataBreakpoints", true);
     capabilities.emplace("supportsEvaluateForHovers", true);
+    capabilities.emplace("supportsInstructionBreakpoints", true);
+    capabilities.emplace("supportsGotoTargetsRequest", true);
+    capabilities.emplace("supportsExceptionInfoRequest", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -307,6 +343,30 @@ private:
     if (command == "setDataBreakpoints")
     {
       HandleSetDataBreakpoints(*request);
+      return;
+    }
+
+    if (command == "setInstructionBreakpoints")
+    {
+      HandleSetInstructionBreakpoints(*request);
+      return;
+    }
+
+    if (command == "gotoTargets")
+    {
+      HandleGotoTargets(*request);
+      return;
+    }
+
+    if (command == "goto")
+    {
+      HandleGoto(*request);
+      return;
+    }
+
+    if (command == "exceptionInfo")
+    {
+      HandleExceptionInfo(*request);
       return;
     }
 
@@ -415,6 +475,90 @@ private:
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setBreakpoints", std::move(body));
+  }
+
+  void HandleSetInstructionBreakpoints(const Protocol::Request& request)
+  {
+    const Protocol::SetInstructionBreakpointsArguments arguments =
+        Protocol::ParseSetInstructionBreakpoints(request.arguments);
+
+    std::vector<CodeBreakpointRequest> breakpoint_requests;
+    picojson::array breakpoints;
+    for (const Protocol::RequestedInstructionBreakpoint& breakpoint : arguments.breakpoints)
+    {
+      picojson::object entry;
+      entry.emplace("verified", breakpoint.address.has_value());
+      if (breakpoint.address)
+      {
+        entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
+        CodeBreakpointRequest bp;
+        bp.address = *breakpoint.address;
+        bp.condition = breakpoint.condition;
+        breakpoint_requests.push_back(std::move(bp));
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
+
+    // DESNOTE(jbarber, 2026-07-03): Dolphin keeps a single code-breakpoint list,
+    // so instruction breakpoints share storage with source breakpoints; each
+    // authoritative set replaces the whole list (as the GDB stub also does).
+    m_controller.SetCodeBreakpoints(std::move(breakpoint_requests));
+
+    picojson::object body;
+    body.emplace("breakpoints", std::move(breakpoints));
+    Respond(request.seq, "setInstructionBreakpoints", std::move(body));
+  }
+
+  void HandleGotoTargets(const Protocol::Request& request)
+  {
+    const Protocol::GotoTargetsArguments arguments = Protocol::ParseGotoTargets(request.arguments);
+
+    picojson::array targets;
+    if (arguments.address)
+    {
+      picojson::object target;
+      // The address doubles as the target id so `goto` can resolve it statelessly.
+      target.emplace("id", static_cast<double>(*arguments.address));
+      target.emplace("label", Json::FormatAddress(*arguments.address));
+      target.emplace("line", 0.0);
+      target.emplace("instructionPointerReference", Json::FormatAddress(*arguments.address));
+      targets.emplace_back(std::move(target));
+    }
+
+    picojson::object body;
+    body.emplace("targets", std::move(targets));
+    Respond(request.seq, "gotoTargets", std::move(body));
+  }
+
+  void HandleGoto(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::GotoArguments> arguments = Protocol::ParseGoto(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "goto", "invalid goto arguments");
+      return;
+    }
+
+    m_controller.SetPC(arguments->target);
+    Respond(request.seq, "goto", picojson::object{});
+    SendStoppedEvent("goto");
+    SyncSteppingBaseline();
+  }
+
+  void HandleExceptionInfo(const Protocol::Request& request)
+  {
+    const std::optional<ExceptionInfo> info = m_controller.GetExceptionInfo();
+    if (!info)
+    {
+      RespondError(request.seq, "exceptionInfo", "no exception");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("exceptionId", fmt::format("0x{:08x}", info->exceptions));
+    body.emplace("description", info->description);
+    body.emplace("breakMode", std::string("always"));
+    Respond(request.seq, "exceptionInfo", std::move(body));
   }
 
   void HandleSetDataBreakpoints(const Protocol::Request& request)

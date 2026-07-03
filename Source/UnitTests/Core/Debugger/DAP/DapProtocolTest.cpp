@@ -341,6 +341,118 @@ TEST(DapProtocol, MakeEventSerializesEnvelope)
   EXPECT_EQ(parsed->at("body").get<picojson::object>().at("reason").to_str(), "breakpoint");
 }
 
+TEST(DapProtocol, ParseSetInstructionBreakpointsResolvesReference)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"instructionReference": "0x80001000"}]
+  })");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80001000u);
+  EXPECT_FALSE(parsed.breakpoints[0].condition.has_value());
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsAppliesOffsetAndCondition)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"instructionReference": "0x80001000", "offset": 8, "condition": "r3 == 1"}]
+  })");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80001008u);
+  ASSERT_TRUE(parsed.breakpoints[0].condition.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].condition, "r3 == 1");
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsAppliesNegativeOffset)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"instructionReference": "0x80001000", "offset": -4}]
+  })");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80000ffcu);
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsLeavesNonHexReferenceUnresolved)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"instructionReference": "not-hex"}]
+  })");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_FALSE(parsed.breakpoints[0].address.has_value());
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsEmptyWhenNoBreakpointsKey)
+{
+  const auto message = ParseObjectOrDie(R"({})");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  EXPECT_TRUE(parsed.breakpoints.empty());
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsClearsWithEmptyArray)
+{
+  const auto message = ParseObjectOrDie(R"({"breakpoints": []})");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  EXPECT_TRUE(parsed.breakpoints.empty());
+}
+
+TEST(DapProtocol, ParseSetInstructionBreakpointsSkipsNonObjectEntries)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": ["nonsense", {"instructionReference": "0x80001000"}]
+  })");
+  const auto parsed = Protocol::ParseSetInstructionBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80001000u);
+}
+
+TEST(DapProtocol, ParseGotoTargetsResolvesSourceAndLine)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "source": {"name": "0x80001000"},
+    "line": 2
+  })");
+  const auto parsed = Protocol::ParseGotoTargets(message);
+  ASSERT_TRUE(parsed.address.has_value());
+  EXPECT_EQ(*parsed.address, 0x80001008u);
+}
+
+TEST(DapProtocol, ParseGotoTargetsWithoutSourceIsUnresolved)
+{
+  const auto message = ParseObjectOrDie(R"({"line": 2})");
+  const auto parsed = Protocol::ParseGotoTargets(message);
+  EXPECT_FALSE(parsed.address.has_value());
+}
+
+TEST(DapProtocol, ParseGotoTargetsWithoutLineUsesSourceBase)
+{
+  const auto message = ParseObjectOrDie(R"({"source": {"name": "0x80001000"}})");
+  const auto parsed = Protocol::ParseGotoTargets(message);
+  ASSERT_TRUE(parsed.address.has_value());
+  EXPECT_EQ(*parsed.address, 0x80001000u);
+}
+
+TEST(DapProtocol, ParseGotoExtractsThreadAndTarget)
+{
+  const auto message = ParseObjectOrDie(R"({"threadId": 1, "targetId": 2147487744})");
+  const auto parsed = Protocol::ParseGoto(message);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->thread_id, 1);
+  EXPECT_EQ(parsed->target, 0x80001000u);
+}
+
+TEST(DapProtocol, ParseGotoRejectsMissingTarget)
+{
+  const auto message = ParseObjectOrDie(R"({"threadId": 1})");
+  EXPECT_FALSE(Protocol::ParseGoto(message).has_value());
+}
+
 TEST(DapProtocol, DisassemblyInstructionTextIsEscapedOnSerialize)
 {
   // Instruction text with a quote must serialize into valid JSON.

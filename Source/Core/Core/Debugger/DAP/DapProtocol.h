@@ -113,6 +113,41 @@ struct EvaluateArguments
 
 std::optional<EvaluateArguments> ParseEvaluate(const picojson::object& arguments);
 
+// A single requested instruction breakpoint, resolved from the hex
+// `instructionReference` string plus an optional signed byte `offset`.
+struct RequestedInstructionBreakpoint
+{
+  std::optional<u32> address;
+  std::optional<std::string> condition;
+};
+
+struct SetInstructionBreakpointsArguments
+{
+  std::vector<RequestedInstructionBreakpoint> breakpoints;
+};
+
+SetInstructionBreakpointsArguments
+ParseSetInstructionBreakpoints(const picojson::object& arguments);
+
+// Arguments of a `gotoTargets` request. The base address is taken from the
+// `source.name`/`source.path` hex string; `line` is a 4-byte instruction index.
+struct GotoTargetsArguments
+{
+  std::optional<u32> address;
+};
+
+GotoTargetsArguments ParseGotoTargets(const picojson::object& arguments);
+
+// Arguments of a `goto` request. `target` is the resolved address (gotoTargets
+// reports each target's address as its id).
+struct GotoArguments
+{
+  int thread_id = 0;
+  u32 target = 0;
+};
+
+std::optional<GotoArguments> ParseGoto(const picojson::object& arguments);
+
 // Envelope builders. `seq` is the server's monotonically increasing sequence
 // number; the caller owns its allocation.
 picojson::object MakeResponse(int seq, int request_seq, std::string_view command, bool success,

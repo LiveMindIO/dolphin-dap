@@ -3,13 +3,15 @@
 
 #include "Core/Debugger/DAP/DapDebugController.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <fmt/format.h>
-
-#include <algorithm>
 
 #include "Common/Event.h"
 #include "Common/StringUtil.h"
@@ -41,6 +43,42 @@ bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
       inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
   const bool is_bclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
   return is_bclr && counter && condition && !inst.LK_3;
+}
+
+std::string DescribeExceptions(u32 exceptions)
+{
+  static constexpr std::array<std::pair<u32, std::string_view>, 10> NAMES{{
+      {EXCEPTION_DECREMENTER, "Decrementer"},
+      {EXCEPTION_SYSCALL, "Syscall"},
+      {EXCEPTION_EXTERNAL_INT, "External Interrupt"},
+      {EXCEPTION_DSI, "DSI"},
+      {EXCEPTION_ISI, "ISI"},
+      {EXCEPTION_ALIGNMENT, "Alignment"},
+      {EXCEPTION_FPU_UNAVAILABLE, "FPU Unavailable"},
+      {EXCEPTION_PROGRAM, "Program"},
+      {EXCEPTION_PERFORMANCE_MONITOR, "Performance Monitor"},
+      {EXCEPTION_FAKE_MEMCHECK_HIT, "Memcheck Hit"},
+  }};
+
+  std::string result;
+  u32 remaining = exceptions;
+  for (const auto& [mask, name] : NAMES)
+  {
+    if ((exceptions & mask) == 0)
+      continue;
+    if (!result.empty())
+      result += ", ";
+    result += name;
+    remaining &= ~mask;
+  }
+
+  if (remaining != 0)
+  {
+    if (!result.empty())
+      result += ", ";
+    result += fmt::format("Unknown (0x{:08x})", remaining);
+  }
+  return result;
 }
 }  // namespace
 
@@ -398,5 +436,65 @@ u32 DapDebugController::GetPC()
 {
   Core::CPUThreadGuard guard(m_system);
   return m_system.GetPPCState().pc;
+}
+
+void DapDebugController::SetPC(const u32 address)
+{
+  Core::CPUThreadGuard guard(m_system);
+  m_system.GetPPCState().pc = address;
+  m_system.GetPPCState().npc = address;
+}
+
+StopInfo DapDebugController::GetStopInfo()
+{
+  StopInfo info;
+
+  Core::CPUThreadGuard guard(m_system);
+  const auto& ppc_state = m_system.GetPPCState();
+  const u32 pc = ppc_state.pc;
+
+  // DESNOTE(jbarber, 2026-07-03): A watchpoint fires on the instruction that
+  // accessed the watched data (MMU.cpp tags it EXCEPTION_DSI |
+  // EXCEPTION_FAKE_MEMCHECK_HIT). The PC is that instruction, not the watched
+  // data address, so this cannot be detected by matching the PC against a
+  // memcheck range. The flag is transient (PowerPC::CheckExceptions clears it),
+  // so this is best-effort: if it has already been cleared we fall back to
+  // Step rather than mis-reporting, which is safe for the DAP `stopped` reason.
+  if ((ppc_state.Exceptions & EXCEPTION_FAKE_MEMCHECK_HIT) != 0)
+  {
+    info.reason = StopReason::DataBreakpoint;
+    return info;
+  }
+
+  if (m_system.GetPowerPC().GetBreakPoints().GetBreakpoint(pc) != nullptr)
+  {
+    info.reason = StopReason::CodeBreakpoint;
+    info.hit_breakpoint_address = pc;
+    return info;
+  }
+
+  info.reason = StopReason::Step;
+  return info;
+}
+
+std::optional<ExceptionInfo> DapDebugController::GetExceptionInfo()
+{
+  Core::CPUThreadGuard guard(m_system);
+  u32 exceptions = m_system.GetPPCState().Exceptions;
+
+  // DESNOTE(jbarber, 2026-07-03): A memory watchpoint hit is delivered as a
+  // synthetic DSI tagged with EXCEPTION_FAKE_MEMCHECK_HIT (see MMU.cpp). That is
+  // the debugger's own break mechanism, not a guest exception, so it is surfaced
+  // as a "data breakpoint" stop and excluded from exceptionInfo here.
+  if ((exceptions & EXCEPTION_FAKE_MEMCHECK_HIT) != 0)
+    exceptions &= ~(EXCEPTION_FAKE_MEMCHECK_HIT | EXCEPTION_DSI);
+
+  if (exceptions == 0)
+    return std::nullopt;
+
+  ExceptionInfo info;
+  info.exceptions = exceptions;
+  info.description = DescribeExceptions(exceptions);
+  return info;
 }
 }  // namespace DAP
