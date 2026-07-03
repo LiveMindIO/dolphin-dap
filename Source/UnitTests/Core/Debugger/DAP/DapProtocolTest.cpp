@@ -230,6 +230,55 @@ TEST(DapProtocol, ParseSetDataBreakpointsResolvesAccessType)
   EXPECT_FALSE(parsed.breakpoints[1].write);
 }
 
+TEST(DapProtocol, ParseSetDataBreakpointsDefaultsToReadWrite)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100"}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_TRUE(parsed.breakpoints[0].read);
+  EXPECT_TRUE(parsed.breakpoints[0].write);
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsUnknownAccessTypeIsReadWrite)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100", "accessType": "readWrite"}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_TRUE(parsed.breakpoints[0].read);
+  EXPECT_TRUE(parsed.breakpoints[0].write);
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsLeavesNonHexDataIdUnresolved)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "not-hex", "accessType": "write"}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_FALSE(parsed.breakpoints[0].address.has_value());
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsExtractsCondition)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100", "condition": "r3 == 1"}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].condition.has_value());
+  EXPECT_EQ(*parsed.breakpoints[0].condition, "r3 == 1");
+}
+
+TEST(DapProtocol, ParseEvaluateRejectsMissingExpression)
+{
+  const auto message = ParseObjectOrDie(R"({"context": "watch"})");
+  EXPECT_FALSE(Protocol::ParseEvaluate(message).has_value());
+}
+
 TEST(DapProtocol, ParseEvaluateExtractsExpression)
 {
   const auto message = ParseObjectOrDie(R"({"expression": "r3"})");

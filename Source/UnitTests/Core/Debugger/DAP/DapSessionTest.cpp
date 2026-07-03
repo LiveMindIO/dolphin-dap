@@ -461,6 +461,59 @@ TEST_F(DapSessionTest, EvaluateReturnsExpressionResult)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, EvaluateInvalidExpressionFails)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "evaluate",
+    "arguments": {"expression": "this is not valid"}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetDataBreakpointsUnresolvedDataIdInstallsNothing)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "not-hex", "accessType": "write"}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 1u);
+  EXPECT_FALSE(breakpoints[0].get<picojson::object>().at("verified").get<bool>());
+  EXPECT_FALSE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
 TEST_F(DapSessionTest, SetDataBreakpointsInstallsWatchpoint)
 {
   TestClient client(m_client_fd());

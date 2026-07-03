@@ -414,6 +414,45 @@ TEST_F(DapControllerTest, SetDataBreakpointsReplacesPreviousWatchpoints)
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 4), nullptr);
 }
 
+TEST_F(DapControllerTest, SetDataBreakpointsEmptyClearsExisting)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+
+  controller.SetDataBreakpoints({});
+  EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+  EXPECT_FALSE(memchecks.HasAny());
+}
+
+TEST_F(DapControllerTest, SetCodeBreakpointsInvalidConditionAddsUnconditionalBreakpoint)
+{
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+
+  DAP::DapDebugController controller(System());
+  // A condition that fails to parse must not drop the breakpoint; it stays as an
+  // unconditional stop rather than silently disappearing.
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "not a condition"}});
+
+  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  ASSERT_NE(bp, nullptr);
+  EXPECT_FALSE(bp->condition.has_value());
+}
+
+TEST_F(DapControllerTest, SetCodeBreakpointsEmptyConditionIsUnconditional)
+{
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = ""}});
+
+  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  ASSERT_NE(bp, nullptr);
+  EXPECT_FALSE(bp->condition.has_value());
+}
+
 TEST_F(DapControllerTest, EvaluateExpressionReturnsRegisterValue)
 {
   System().GetPPCState().gpr[3] = 0x12345678;
@@ -428,6 +467,38 @@ TEST_F(DapControllerTest, EvaluateExpressionRejectsInvalidSyntax)
 {
   DAP::DapDebugController controller(System());
   EXPECT_FALSE(controller.EvaluateExpression("not an expression").has_value());
+}
+
+TEST_F(DapControllerTest, EvaluateExpressionFormatsFractionalResultAsDecimal)
+{
+  DAP::DapDebugController controller(System());
+  // Non-integral results can't be shown as a 32-bit hex word, so they fall back
+  // to a plain decimal string.
+  const std::optional<std::string> result = controller.EvaluateExpression("1.5");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "1.5");
+}
+
+TEST_F(DapControllerTest, EvaluateExpressionFormatsNegativeResultAsDecimal)
+{
+  DAP::DapDebugController controller(System());
+  // Negative values fall outside the unsigned-hex range and use decimal too.
+  const std::optional<std::string> result = controller.EvaluateExpression("0 - 5");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "-5");
+}
+
+TEST_F(DapControllerTest, EvaluateExpressionWritesBackToRegisters)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.gpr[3] = 0;
+
+  DAP::DapDebugController controller(System());
+  // The PPC expression evaluator supports assignment; the controller must run it
+  // under a CPUThreadGuard so the write reaches emulated state.
+  const std::optional<std::string> result = controller.EvaluateExpression("r3 = 42");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(ppc_state.gpr[3], 42u);
 }
 
 TEST_F(DapControllerTest, StepIntoAdvancesPc)
