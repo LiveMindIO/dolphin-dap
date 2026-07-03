@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -39,6 +40,25 @@ enum class StepOverResult
   Continuing,
 };
 
+struct ThreadInfo
+{
+  int id = 1;
+  std::string name;
+};
+
+struct StackFrame
+{
+  int id = 0;
+  u32 address = 0;
+  std::string name;
+};
+
+struct StackTraceResult
+{
+  std::vector<StackFrame> frames;
+  int total_frames = 0;
+};
+
 class DapDebugController
 {
 public:
@@ -59,6 +79,8 @@ public:
   // on success, or nullopt when the scope, name, value, or writability is invalid.
   std::optional<u32> SetRegister(int variables_reference, std::string_view name,
                                  std::string_view value);
+  std::vector<ThreadInfo> GetThreads();
+  StackTraceResult GetStackTrace(int start_frame = 0, int levels = 20);
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
   // returns the number written; stops at the first invalid address.

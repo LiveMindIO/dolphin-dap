@@ -50,8 +50,9 @@ Supported requests include `continue`, `pause`, `stepIn`, `next`, `stepOut`,
 Step over/out mirror `CodeWidget::StepOver` / `CodeWidget::StepOut` (temporary
 breakpoint for branch step-over; interpreter loop for step-out). `setVariable`
 writes GPRs and PC-scope registers (`pc`, `lr`, `ctr`, `cr`, `xer`) exposed by
-`variables`. Remaining phase 2 work: memory watchpoints, conditional breakpoints,
-`stackTrace`, `threads`, and `evaluate`.
+`variables`. `threads` and `stackTrace` expose the emulated PPC thread and call
+stack. Remaining phase 2 work: memory watchpoints, conditional breakpoints, and
+`evaluate`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/

@@ -149,6 +149,80 @@ TEST_F(DapControllerTest, SetRegisterRejectsInvalidValue)
   EXPECT_FALSE(controller.SetRegister(DAP::REGISTERS_SCOPE, "r0", "not-a-number").has_value());
 }
 
+TEST_F(DapControllerTest, GetThreadsReturnsSinglePpcThread)
+{
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::ThreadInfo> threads = controller.GetThreads();
+  ASSERT_EQ(threads.size(), 1u);
+  EXPECT_EQ(threads[0].id, 1);
+  EXPECT_EQ(threads[0].name, "PPC");
+}
+
+TEST_F(DapControllerTest, GetStackTraceUsesLrAndWalksStackChain)
+{
+  const u32 sp = TEST_ADDRESS + 0x500;
+  const u32 parent = TEST_ADDRESS + 0x600;
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.gpr[1] = sp;
+  LR(ppc_state) = 0x80001004;
+
+  const std::array<u8, 4> backchain{{0x00, 0x00, 0x37, 0x00}};
+  const std::array<u8, 4> parent_backchain{{0x00, 0x00, 0x00, 0x00}};
+  const std::array<u8, 4> saved_lr{{0x80, 0x00, 0x20, 0x04}};
+  System().GetMemory().CopyToEmu(sp, backchain.data(), backchain.size());
+  System().GetMemory().CopyToEmu(parent, parent_backchain.data(), parent_backchain.size());
+  System().GetMemory().CopyToEmu(parent + 4, saved_lr.data(), saved_lr.size());
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+
+  ASSERT_EQ(trace.total_frames, 2);
+  ASSERT_EQ(trace.frames.size(), 2u);
+  EXPECT_EQ(trace.frames[0].address, 0x80001000u);
+  EXPECT_EQ(trace.frames[1].address, 0x80002000u);
+}
+
+TEST_F(DapControllerTest, GetStackTraceFallsBackToPcWhenEmpty)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.gpr[1] = 0;
+  LR(ppc_state) = 0;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+
+  ASSERT_EQ(trace.total_frames, 1);
+  ASSERT_EQ(trace.frames.size(), 1u);
+  EXPECT_EQ(trace.frames[0].address, TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, GetStackTraceHonorsStartFrameAndLevels)
+{
+  const u32 sp = TEST_ADDRESS + 0x500;
+  const u32 parent = TEST_ADDRESS + 0x600;
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.gpr[1] = sp;
+  LR(ppc_state) = 0x80001004;
+
+  const std::array<u8, 4> backchain{{0x00, 0x00, 0x37, 0x00}};
+  const std::array<u8, 4> parent_backchain{{0x00, 0x00, 0x00, 0x00}};
+  const std::array<u8, 4> saved_lr{{0x80, 0x00, 0x20, 0x04}};
+  System().GetMemory().CopyToEmu(sp, backchain.data(), backchain.size());
+  System().GetMemory().CopyToEmu(parent, parent_backchain.data(), parent_backchain.size());
+  System().GetMemory().CopyToEmu(parent + 4, saved_lr.data(), saved_lr.size());
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace(1, 1);
+
+  ASSERT_EQ(trace.total_frames, 2);
+  ASSERT_EQ(trace.frames.size(), 1u);
+  EXPECT_EQ(trace.frames[0].id, 1);
+  EXPECT_EQ(trace.frames[0].address, 0x80002000u);
+}
+
 TEST_F(DapControllerTest, ReadMemoryRoundTripsRam)
 {
   const std::array<u8, 8> payload{{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}};

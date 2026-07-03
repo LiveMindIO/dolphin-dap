@@ -6,6 +6,10 @@
 #include <chrono>
 #include <string_view>
 
+#include <fmt/format.h>
+
+#include <algorithm>
+
 #include "Common/Event.h"
 #include "Common/StringUtil.h"
 #include "Core/Core.h"
@@ -225,6 +229,75 @@ std::optional<u32> DapDebugController::SetRegister(const int variables_reference
   }
 
   return std::nullopt;
+}
+
+std::vector<ThreadInfo> DapDebugController::GetThreads()
+{
+  // Dolphin exposes a single emulated PPC thread to DAP clients. OS-level
+  // threads from GetDebugInterface().GetThreads() can be layered on later.
+  return {{1, "PPC"}};
+}
+
+StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const int levels)
+{
+  Core::CPUThreadGuard guard(m_system);
+  auto& power_pc = m_system.GetPowerPC();
+  const auto& ppc_state = power_pc.GetPPCState();
+  auto& debug_interface = power_pc.GetDebugInterface();
+
+  std::vector<StackFrame> frames;
+
+  const auto push_frame = [&](const u32 address) {
+    StackFrame frame;
+    frame.id = static_cast<int>(frames.size());
+    frame.address = address;
+    std::string description = debug_interface.GetDescription(address);
+    if (description.empty() || description == "Invalid")
+      description = fmt::format("0x{:08x}", address);
+    frame.name = std::move(description);
+    frames.push_back(std::move(frame));
+  };
+
+  const auto is_stack_bottom = [&](const u32 addr) {
+    return !addr || !PowerPC::MMU::HostIsRAMAddress(guard, addr);
+  };
+
+  if (LR(ppc_state) != 0)
+    push_frame(LR(ppc_state) - 4);
+
+  if (!is_stack_bottom(ppc_state.gpr[1]))
+  {
+    u32 addr = PowerPC::MMU::HostRead<u32>(guard, ppc_state.gpr[1]);
+    for (int count = 0; !is_stack_bottom(addr) && !is_stack_bottom(addr + 4) && count < 20; ++count)
+    {
+      const u32 func_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 4);
+      push_frame(func_addr - 4);
+      addr = PowerPC::MMU::HostRead<u32>(guard, addr);
+    }
+  }
+
+  if (frames.empty())
+    push_frame(ppc_state.pc);
+
+  StackTraceResult result;
+  result.total_frames = static_cast<int>(frames.size());
+
+  const int clamped_start = std::max(0, start_frame);
+  if (levels < 0)
+    return result;
+
+  const std::size_t begin = static_cast<std::size_t>(clamped_start);
+  if (begin >= frames.size())
+    return result;
+
+  const std::size_t end = std::min(frames.size(), begin + static_cast<std::size_t>(levels));
+  frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(end), frames.end());
+  frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(begin));
+  for (std::size_t i = 0; i < frames.size(); ++i)
+    frames[i].id = static_cast<int>(begin + i);
+
+  result.frames = std::move(frames);
+  return result;
 }
 
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)

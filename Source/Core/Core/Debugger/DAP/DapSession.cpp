@@ -209,6 +209,7 @@ private:
     capabilities.emplace("supportsReadMemoryRequest", true);
     capabilities.emplace("supportsWriteMemoryRequest", true);
     capabilities.emplace("supportsSetVariable", true);
+    capabilities.emplace("supportsStackTraceRequest", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -321,6 +322,18 @@ private:
       return;
     }
 
+    if (command == "threads")
+    {
+      Respond(request->seq, command, MakeThreads());
+      return;
+    }
+
+    if (command == "stackTrace")
+    {
+      HandleStackTrace(*request);
+      return;
+    }
+
     if (command == "readMemory")
     {
       HandleReadMemory(*request);
@@ -404,6 +417,54 @@ private:
     picojson::object body;
     body.emplace("value", fmt::format("0x{:08x}", *value));
     Respond(request.seq, "setVariable", std::move(body));
+  }
+
+  picojson::object MakeThreads()
+  {
+    picojson::array threads;
+    for (const ThreadInfo& thread : m_controller.GetThreads())
+    {
+      picojson::object entry;
+      entry.emplace("id", static_cast<double>(thread.id));
+      entry.emplace("name", thread.name);
+      threads.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("threads", std::move(threads));
+    return body;
+  }
+
+  void HandleStackTrace(const Protocol::Request& request)
+  {
+    const std::optional<int> thread_id = ReadNumericFromJson<int>(request.arguments, "threadId");
+    if (!thread_id || *thread_id != 1)
+    {
+      RespondError(request.seq, "stackTrace", "invalid stackTrace arguments");
+      return;
+    }
+
+    const int start_frame = ReadNumericFromJson<int>(request.arguments, "startFrame").value_or(0);
+    const int levels = ReadNumericFromJson<int>(request.arguments, "levels").value_or(20);
+
+    const StackTraceResult trace = m_controller.GetStackTrace(start_frame, levels);
+
+    picojson::array stack_frames;
+    for (const StackFrame& frame : trace.frames)
+    {
+      picojson::object entry;
+      entry.emplace("id", static_cast<double>(frame.id));
+      entry.emplace("name", frame.name);
+      entry.emplace("instructionPointerReference", Json::FormatAddress(frame.address));
+      entry.emplace("line", 0.0);
+      entry.emplace("column", 0.0);
+      stack_frames.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("stackFrames", std::move(stack_frames));
+    body.emplace("totalFrames", static_cast<double>(trace.total_frames));
+    Respond(request.seq, "stackTrace", std::move(body));
   }
 
   void HandleReadMemory(const Protocol::Request& request)
