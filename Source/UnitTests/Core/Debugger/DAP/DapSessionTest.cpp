@@ -360,6 +360,41 @@ TEST_F(DapSessionTest, VariablesReturnsRegisters)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // next, stepIn and stepOut must all be recognized (stepOut previously fell
+  // through to the "unsupported" error) and each acknowledges with a response
+  // followed by a stopped(step) event.
+  const auto expect_step = [&](std::string_view command) {
+    client.Send(
+        std::string(R"({"type":"request","seq":3,"command":")").append(command).append(R"("})"));
+
+    const auto response = client.Receive();
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response->at("command").to_str(), command);
+    EXPECT_TRUE(response->at("success").get<bool>());
+
+    const auto stopped = client.Receive();
+    ASSERT_TRUE(stopped.has_value());
+    EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+    EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "step");
+  };
+
+  expect_step("stepIn");
+  expect_step("next");
+  expect_step("stepOut");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
 TEST_F(DapSessionTest, UnknownCommandReturnsError)
 {
   TestClient client(m_client_fd());

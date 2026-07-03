@@ -97,14 +97,14 @@ StepOverResult DapDebugController::StepOver()
   return StepOverResult::Stepped;
 }
 
-void DapDebugController::StepOut()
+void DapDebugController::StepOut(std::chrono::milliseconds timeout_ms)
 {
   auto& cpu = m_system.GetCPU();
   if (!cpu.IsStepping())
     return;
 
   using clock = std::chrono::steady_clock;
-  const clock::time_point timeout = clock::now() + std::chrono::seconds(5);
+  const clock::time_point timeout = clock::now() + timeout_ms;
 
   auto& power_pc = m_system.GetPowerPC();
   auto& ppc_state = power_pc.GetPPCState();

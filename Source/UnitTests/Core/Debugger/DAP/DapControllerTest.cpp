@@ -10,6 +10,7 @@
 // read/write/disassemble paths need.
 
 #include <array>
+#include <chrono>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -201,6 +202,57 @@ TEST_F(DapControllerTest, SetCodeBreakpointsAddsThenReplaces)
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003300));
 }
 
+TEST_F(DapControllerTest, StepIntoAdvancesPc)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepInto();
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
+}
+
+TEST_F(DapControllerTest, StepIntoWhenNotSteppingIsNoOp)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  System().GetCPU().SetStepping(false);
+  ASSERT_FALSE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepInto();
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, StepOverWhenNotSteppingReturnsSteppedWithoutAdvancing)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  System().GetCPU().SetStepping(false);
+
+  DAP::DapDebugController controller(System());
+  EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Stepped);
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, StepOutWhenNotSteppingIsNoOp)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  System().GetCPU().SetStepping(false);
+
+  DAP::DapDebugController controller(System());
+  controller.StepOut();
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
+}
+
 TEST_F(DapControllerTest, StepOverNonBranchAdvancesPc)
 {
   const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
@@ -228,6 +280,9 @@ TEST_F(DapControllerTest, StepOverBranchSetsTemporaryAndContinues)
   DAP::DapDebugController controller(System());
   EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Continuing);
   EXPECT_FALSE(System().GetCPU().IsStepping());
+  // The resume relies on a temporary breakpoint planted at the return address
+  // (pc + 4) so the core stops again once the call returns.
+  EXPECT_NE(System().GetPowerPC().GetBreakPoints().GetBreakpoint(TEST_ADDRESS + 4), nullptr);
 }
 
 TEST_F(DapControllerTest, StepOutRunsUntilReturn)
@@ -243,5 +298,46 @@ TEST_F(DapControllerTest, StepOutRunsUntilReturn)
   DAP::DapDebugController controller(System());
   controller.StepOut();
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
+}
+
+TEST_F(DapControllerTest, StepOutStopsAtBreakpointBeforeReturn)
+{
+  // nop; nop; blr — a breakpoint on the second instruction must abort the
+  // step-out there rather than running through to the return address.
+  const std::array<u8, 12> code{
+      {0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  LR(ppc_state) = TEST_ADDRESS + 0x200;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({TEST_ADDRESS + 4});
+  controller.StepOut();
+
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
+  EXPECT_NE(ppc_state.pc, TEST_ADDRESS + 0x200u);
+}
+
+TEST_F(DapControllerTest, StepOutTimesOutOnNonReturningCode)
+{
+  // b . (branch-to-self, 0x48000000) never returns and hits no breakpoint, so
+  // only the timeout can end the step-out. A small deadline keeps this fast;
+  // without the timeout the interpreter loop would spin forever.
+  const std::array<u8, 4> spin{{0x48, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, spin.data(), spin.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepOut(std::chrono::milliseconds(5));
+
+  // The branch loops back to itself, so the bounded step-out returns with the
+  // PC still parked on the branch instead of hanging.
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
 }
 }  // namespace

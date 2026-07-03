@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -44,7 +45,10 @@ public:
   void Pause();
   void StepInto();
   StepOverResult StepOver();
-  void StepOut();
+  // Steps until the current function returns, a breakpoint is hit, or `timeout`
+  // wall-clock time elapses. The timeout bounds otherwise non-returning code
+  // (e.g. an infinite loop) and is injectable so it can be exercised in tests.
+  void StepOut(std::chrono::milliseconds timeout = std::chrono::seconds(5));
   void SetCodeBreakpoints(const std::vector<u32>& addresses);
 
   RegisterSnapshot GetRegisters();
