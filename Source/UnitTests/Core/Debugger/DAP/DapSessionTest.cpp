@@ -31,6 +31,7 @@
 #include "Core/Debugger/DAP/DapTransport.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/Memmap.h"
+#include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
@@ -203,6 +204,9 @@ TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
   EXPECT_TRUE(caps.at("supportsSetVariable").get<bool>());
   EXPECT_TRUE(caps.at("supportsStackTraceRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsDataBreakpoints").get<bool>());
+  EXPECT_TRUE(caps.at("supportsInstructionBreakpoints").get<bool>());
+  EXPECT_TRUE(caps.at("supportsGotoTargetsRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsExceptionInfoRequest").get<bool>());
 }
 
 TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
@@ -590,6 +594,198 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
   expect_step("stepIn");
   expect_step("next");
   expect_step("stepOut");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetInstructionBreakpointsInstallsCodeBreakpoint)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setInstructionBreakpoints",
+    "arguments": {
+      "breakpoints": [{"instructionReference": "0x80003100"}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("command").to_str(), "setInstructionBreakpoints");
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 1u);
+  EXPECT_TRUE(breakpoints[0].get<picojson::object>().at("verified").get<bool>());
+
+  EXPECT_TRUE(
+      Core::System::GetInstance().GetPowerPC().GetBreakPoints().IsAddressBreakPoint(0x80003100));
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetInstructionBreakpointsReplacesPreviousBreakpoints)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setInstructionBreakpoints",
+    "arguments": {"breakpoints": [{"instructionReference": "0x80003100"}]}
+  })");
+  (void)client.Receive();
+
+  // An authoritative second set with a different address must drop the first.
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "setInstructionBreakpoints",
+    "arguments": {"breakpoints": [{"instructionReference": "0x80003200"}]}
+  })");
+  (void)client.Receive();
+
+  auto& bps = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
+  EXPECT_FALSE(bps.IsAddressBreakPoint(0x80003100));
+  EXPECT_TRUE(bps.IsAddressBreakPoint(0x80003200));
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, GotoTargetsWithoutSourceReturnsNoTargets)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "gotoTargets",
+    "arguments": {"line": 1}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto& targets =
+      response->at("body").get<picojson::object>().at("targets").get<picojson::array>();
+  EXPECT_TRUE(targets.empty());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, GotoTargetsThenGotoMovesPc)
+{
+  auto& ppc_state = Core::System::GetInstance().GetPPCState();
+  ppc_state.pc = CODE_ADDRESS;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "gotoTargets",
+    "arguments": {"source": {"name": "0x00003100"}, "line": 1}
+  })");
+  const auto targets_response = client.Receive();
+  ASSERT_TRUE(targets_response.has_value());
+  const auto& targets =
+      targets_response->at("body").get<picojson::object>().at("targets").get<picojson::array>();
+  ASSERT_EQ(targets.size(), 1u);
+  const double target_id = targets[0].get<picojson::object>().at("id").get<double>();
+  EXPECT_EQ(target_id, static_cast<double>(CODE_ADDRESS + 4));
+
+  client.Send(std::string(R"({"type":"request","seq":4,"command":"goto","arguments":)")
+                  .append(R"({"threadId":1,"targetId":)")
+                  .append(std::to_string(CODE_ADDRESS + 4))
+                  .append("}}"));
+  const auto goto_response = client.Receive();
+  ASSERT_TRUE(goto_response.has_value());
+  EXPECT_EQ(goto_response->at("command").to_str(), "goto");
+  EXPECT_TRUE(goto_response->at("success").get<bool>());
+
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "goto");
+  EXPECT_EQ(Core::System::GetInstance().GetPPCState().pc, CODE_ADDRESS + 4u);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, ExceptionInfoReportsPendingException)
+{
+  Core::System::GetInstance().GetPPCState().Exceptions = EXCEPTION_PROGRAM;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "exceptionInfo",
+    "arguments": {"threadId": 1}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto& body = response->at("body").get<picojson::object>();
+  EXPECT_NE(body.at("description").to_str().find("Program"), std::string::npos);
+
+  Core::System::GetInstance().GetPPCState().Exceptions = 0;
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, ExceptionInfoWithoutExceptionFails)
+{
+  Core::System::GetInstance().GetPPCState().Exceptions = 0;
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "exceptionInfo",
+    "arguments": {"threadId": 1}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("command").to_str(), "exceptionInfo");
+  EXPECT_FALSE(response->at("success").get<bool>());
 
   client.Send(R"({
     "seq": 9,

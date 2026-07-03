@@ -45,7 +45,7 @@ Supported requests include `continue`, `pause`, `stepIn`, `next`, `stepOut`,
 `disassemble`. Breakpoint addresses are hex strings in `source.name` or
 `source.path` (optional `line` × 4 offset).
 
-## Phase 2 (in progress)
+## Phase 2
 
 Step over/out mirror `CodeWidget::StepOver` / `CodeWidget::StepOut` (temporary
 breakpoint for branch step-over; interpreter loop for step-out). `setVariable`
@@ -53,7 +53,15 @@ writes GPRs and PC-scope registers (`pc`, `lr`, `ctr`, `cr`, `xer`) exposed by
 `variables`. `threads` and `stackTrace` expose the emulated PPC thread and call
 stack. Conditional breakpoints (`setBreakpoints` `condition`), memory watchpoints
 (`setDataBreakpoints` with hex `dataId`), and `evaluate` for PPC expressions are
-supported. Phase 2 is complete for the planned command surface.
+supported.
+
+## Phase 3 (in progress)
+
+Execution-control completeness and richer stop semantics:
+`setInstructionBreakpoints` sets code breakpoints from hex `instructionReference`
+values; `gotoTargets`/`goto` move the PC to an address; `stopped` events classify
+the reason (`breakpoint`, `data breakpoint`, `step`) and carry `hitBreakpointIds`;
+`exceptionInfo` reports pending PPC exceptions.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/

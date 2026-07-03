@@ -11,6 +11,7 @@
 
 #include <array>
 #include <chrono>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -54,6 +55,7 @@ protected:
     auto& ppc_state = system.GetPPCState();
     ppc_state.msr.IR = 0;
     ppc_state.msr.DR = 0;
+    ppc_state.Exceptions = 0;
     power_pc.MSRUpdated();
 
     power_pc.GetBreakPoints().Clear();
@@ -784,5 +786,130 @@ TEST_F(DapControllerTest, StepOverNonLinkingBranchStepsInto)
   EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 8u);
   EXPECT_TRUE(System().GetCPU().IsStepping());
+}
+
+TEST_F(DapControllerTest, SetPcMovesProgramCounterAndNpc)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.npc = TEST_ADDRESS + 4;
+
+  DAP::DapDebugController controller(System());
+  controller.SetPC(TEST_ADDRESS + 0x40);
+
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x40u);
+  EXPECT_EQ(ppc_state.npc, TEST_ADDRESS + 0x40u);
+  EXPECT_EQ(controller.GetPC(), TEST_ADDRESS + 0x40u);
+}
+
+TEST_F(DapControllerTest, GetStopInfoClassifiesCodeBreakpoint)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS}});
+
+  const DAP::StopInfo info = controller.GetStopInfo();
+  EXPECT_EQ(info.reason, DAP::StopReason::CodeBreakpoint);
+  ASSERT_TRUE(info.hit_breakpoint_address.has_value());
+  EXPECT_EQ(*info.hit_breakpoint_address, TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, GetStopInfoClassifiesDataBreakpointFromMemcheckFlag)
+{
+  // A watchpoint hit is signaled by EXCEPTION_FAKE_MEMCHECK_HIT on the accessing
+  // instruction, not by the PC matching the watched data address.
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.Exceptions = EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StopInfo info = controller.GetStopInfo();
+  EXPECT_EQ(info.reason, DAP::StopReason::DataBreakpoint);
+  // The watched data address is not the PC, so no code-breakpoint id is attached.
+  EXPECT_FALSE(info.hit_breakpoint_address.has_value());
+}
+
+TEST_F(DapControllerTest, GetStopInfoPrefersDataBreakpointOverCodeBreakpointAtPc)
+{
+  // If a watchpoint fired while the PC also sits on a code breakpoint, the
+  // executed data access is the actual cause and wins the classification.
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.Exceptions = EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS}});
+
+  EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::DataBreakpoint);
+}
+
+TEST_F(DapControllerTest, GetStopInfoWithWatchpointButNoHitFlagIsStep)
+{
+  // A watchpoint being installed is not itself a stop cause; without the
+  // memcheck-hit flag the classification falls back to Step.
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+
+  EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::Step);
+}
+
+TEST_F(DapControllerTest, GetStopInfoDefaultsToStepWithoutBreakpoint)
+{
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StopInfo info = controller.GetStopInfo();
+  EXPECT_EQ(info.reason, DAP::StopReason::Step);
+  EXPECT_FALSE(info.hit_breakpoint_address.has_value());
+}
+
+TEST_F(DapControllerTest, GetExceptionInfoReturnsNulloptWhenNoException)
+{
+  System().GetPPCState().Exceptions = 0;
+
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.GetExceptionInfo().has_value());
+}
+
+TEST_F(DapControllerTest, GetExceptionInfoDescribesPendingExceptions)
+{
+  System().GetPPCState().Exceptions = EXCEPTION_DSI | EXCEPTION_PROGRAM;
+
+  DAP::DapDebugController controller(System());
+  const auto info = controller.GetExceptionInfo();
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->exceptions, static_cast<u32>(EXCEPTION_DSI | EXCEPTION_PROGRAM));
+  EXPECT_NE(info->description.find("DSI"), std::string::npos);
+  EXPECT_NE(info->description.find("Program"), std::string::npos);
+}
+
+TEST_F(DapControllerTest, GetExceptionInfoExcludesMemcheckHit)
+{
+  // A watchpoint hit (synthetic DSI + fake-memcheck flag) is a data breakpoint,
+  // not a guest exception, so exceptionInfo reports nothing.
+  System().GetPPCState().Exceptions = EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.GetExceptionInfo().has_value());
+}
+
+TEST_F(DapControllerTest, GetExceptionInfoReportsRealExceptionAlongsideMemcheckHit)
+{
+  // Only the synthetic DSI is suppressed by the memcheck flag; a genuine
+  // exception raised in the same word is still reported.
+  System().GetPPCState().Exceptions =
+      EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT | EXCEPTION_PROGRAM;
+
+  DAP::DapDebugController controller(System());
+  const auto info = controller.GetExceptionInfo();
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->exceptions, static_cast<u32>(EXCEPTION_PROGRAM));
+  EXPECT_NE(info->description.find("Program"), std::string::npos);
+  EXPECT_EQ(info->description.find("DSI"), std::string::npos);
 }
 }  // namespace

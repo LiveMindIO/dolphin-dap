@@ -235,6 +235,70 @@ std::optional<EvaluateArguments> ParseEvaluate(const picojson::object& arguments
   return result;
 }
 
+SetInstructionBreakpointsArguments ParseSetInstructionBreakpoints(const picojson::object& arguments)
+{
+  SetInstructionBreakpointsArguments result;
+
+  const picojson::array* breakpoints = GetArray(arguments, "breakpoints");
+  if (breakpoints == nullptr)
+    return result;
+
+  for (const picojson::value& entry : *breakpoints)
+  {
+    if (!entry.is<picojson::object>())
+      continue;
+
+    const picojson::object& entry_obj = entry.get<picojson::object>();
+    RequestedInstructionBreakpoint breakpoint;
+
+    if (const std::optional<std::string> reference =
+            ReadStringFromJson(entry_obj, "instructionReference"))
+    {
+      if (const std::optional<u32> base = Json::ParseHexAddress(*reference))
+      {
+        const s64 offset = ReadNumericFromJson<s64>(entry_obj, "offset").value_or(0);
+        breakpoint.address = static_cast<u32>(static_cast<s64>(*base) + offset);
+      }
+    }
+
+    if (const std::optional<std::string> condition = ReadStringFromJson(entry_obj, "condition"))
+      breakpoint.condition = *condition;
+
+    result.breakpoints.push_back(std::move(breakpoint));
+  }
+
+  return result;
+}
+
+GotoTargetsArguments ParseGotoTargets(const picojson::object& arguments)
+{
+  GotoTargetsArguments result;
+
+  const std::optional<u32> base = ResolveSourceBase(arguments);
+  if (!base)
+    return result;
+
+  // DESNOTE(jbarber, 2026-07-03): Dolphin models a "source" as a code region
+  // anchored at a hex address, so a goto line resolves to base + line*4, matching
+  // setBreakpoints' line handling.
+  const std::optional<u32> line = ReadNumericFromJson<u32>(arguments, "line");
+  result.address = *base + line.value_or(0) * 4;
+  return result;
+}
+
+std::optional<GotoArguments> ParseGoto(const picojson::object& arguments)
+{
+  const std::optional<int> thread_id = ReadNumericFromJson<int>(arguments, "threadId");
+  const std::optional<s64> target = ReadNumericFromJson<s64>(arguments, "targetId");
+  if (!thread_id || !target)
+    return std::nullopt;
+
+  GotoArguments result;
+  result.thread_id = *thread_id;
+  result.target = static_cast<u32>(*target);
+  return result;
+}
+
 picojson::object MakeResponse(const int seq, const int request_seq, const std::string_view command,
                               const bool success, picojson::object body)
 {

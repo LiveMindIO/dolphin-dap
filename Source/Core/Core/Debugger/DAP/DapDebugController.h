@@ -73,6 +73,26 @@ struct DataBreakpointRequest
   std::optional<std::string> condition;
 };
 
+enum class StopReason
+{
+  Step,
+  CodeBreakpoint,
+  DataBreakpoint,
+};
+
+struct StopInfo
+{
+  StopReason reason = StopReason::Step;
+  // Set when the stop is attributable to a breakpoint/watchpoint at the PC.
+  std::optional<u32> hit_breakpoint_address;
+};
+
+struct ExceptionInfo
+{
+  u32 exceptions = 0;
+  std::string description;
+};
+
 class DapDebugController
 {
 public:
@@ -105,6 +125,12 @@ public:
   std::string Disassemble(u32 address, int instruction_count);
 
   u32 GetPC();
+  void SetPC(u32 address);
+  // Classifies why the core is stopped at the current PC (code breakpoint,
+  // memory watchpoint, or a plain step) for the DAP `stopped` event.
+  StopInfo GetStopInfo();
+  // Returns pending PPC exceptions, or nullopt when none are raised.
+  std::optional<ExceptionInfo> GetExceptionInfo();
 
 private:
   Core::System& m_system;
