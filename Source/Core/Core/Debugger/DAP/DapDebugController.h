@@ -29,6 +29,12 @@ struct RegisterSnapshot
   u32 xer = 0;
 };
 
+enum class StepOverResult
+{
+  Stepped,
+  Continuing,
+};
+
 class DapDebugController
 {
 public:
@@ -37,6 +43,8 @@ public:
   void Continue();
   void Pause();
   void StepInto();
+  StepOverResult StepOver();
+  void StepOut();
   void SetCodeBreakpoints(const std::vector<u32>& addresses);
 
   RegisterSnapshot GetRegisters();

@@ -16,8 +16,10 @@
 
 #include "Common/CommonTypes.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
 #include "Core/HW/AddressSpace.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/BreakPoints.h"
 #include "Core/PowerPC/Gekko.h"
@@ -41,13 +43,13 @@ protected:
 
     memory.Init();
     AddressSpace::Init();
+    system.GetCoreTiming().Init();
     Core::DeclareAsCPUThread();
-
-    auto& power_pc = system.GetPowerPC();
-    power_pc.Reset();
+    system.GetCPU().Init(PowerPC::CPUCore::Interpreter);
 
     // Disable address translation so effective == physical and we can exercise
     // the debugger's Effective address space without setting up BATs/page tables.
+    auto& power_pc = system.GetPowerPC();
     auto& ppc_state = system.GetPPCState();
     ppc_state.msr.IR = 0;
     ppc_state.msr.DR = 0;
@@ -60,8 +62,10 @@ protected:
   {
     auto& system = Core::System::GetInstance();
     system.GetPowerPC().GetBreakPoints().Clear();
+    system.GetCPU().Shutdown();
     AddressSpace::Shutdown();
     system.GetMemory().Shutdown();
+    system.GetCoreTiming().Shutdown();
     Core::UndeclareAsCPUThread();
   }
 
@@ -195,5 +199,49 @@ TEST_F(DapControllerTest, SetCodeBreakpointsAddsThenReplaces)
 
   controller.SetCodeBreakpoints({});
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003300));
+}
+
+TEST_F(DapControllerTest, StepOverNonBranchAdvancesPc)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Stepped);
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
+}
+
+TEST_F(DapControllerTest, StepOverBranchSetsTemporaryAndContinues)
+{
+  // bl +4 then nop — step over should resume until the insn after the branch.
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  EXPECT_EQ(controller.StepOver(), DAP::StepOverResult::Continuing);
+  EXPECT_FALSE(System().GetCPU().IsStepping());
+}
+
+TEST_F(DapControllerTest, StepOutRunsUntilReturn)
+{
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  LR(ppc_state) = TEST_ADDRESS + 0x100;
+  ASSERT_TRUE(System().GetCPU().IsStepping());
+
+  DAP::DapDebugController controller(System());
+  controller.StepOut();
+  EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 }  // namespace

@@ -18,6 +18,23 @@
 
 namespace DAP
 {
+namespace
+{
+bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
+{
+  if (inst.hex == 0x4C000064u)
+    return true;
+
+  const auto& ppc_state = system.GetPPCState();
+  const bool counter =
+      (inst.BO_2 >> 2 & 1) != 0 || (CTR(ppc_state) != 0) != ((inst.BO_2 >> 1 & 1) != 0);
+  const bool condition =
+      inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
+  const bool is_bclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
+  return is_bclr && counter && condition && !inst.LK_3;
+}
+}  // namespace
+
 DapDebugController::DapDebugController(Core::System& system) : m_system(system)
 {
 }
@@ -38,12 +55,89 @@ void DapDebugController::StepInto()
   if (!cpu.IsStepping())
     return;
 
-  Common::Event sync_event;
   auto& power_pc = m_system.GetPowerPC();
+  if (Core::IsCPUThread())
+  {
+    Core::CPUThreadGuard guard(m_system);
+    const PowerPC::CoreMode old_mode = power_pc.GetMode();
+    power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+    power_pc.SingleStep();
+    power_pc.SetMode(old_mode);
+    return;
+  }
+
+  Common::Event sync_event;
   const PowerPC::CoreMode old_mode = power_pc.GetMode();
   power_pc.SetMode(PowerPC::CoreMode::Interpreter);
   cpu.StepOpcode(&sync_event);
   sync_event.WaitFor(std::chrono::milliseconds(20));
+  power_pc.SetMode(old_mode);
+}
+
+StepOverResult DapDebugController::StepOver()
+{
+  auto& cpu = m_system.GetCPU();
+  if (!cpu.IsStepping())
+    return StepOverResult::Stepped;
+
+  const UGeckoInstruction inst = [&] {
+    Core::CPUThreadGuard guard(m_system);
+    return PowerPC::MMU::HostRead_Instruction(guard, m_system.GetPPCState().pc);
+  }();
+
+  if (inst.LK)
+  {
+    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
+    breakpoints.SetTemporary(m_system.GetPPCState().pc + 4);
+    cpu.SetStepping(false);
+    return StepOverResult::Continuing;
+  }
+
+  StepInto();
+  return StepOverResult::Stepped;
+}
+
+void DapDebugController::StepOut()
+{
+  auto& cpu = m_system.GetCPU();
+  if (!cpu.IsStepping())
+    return;
+
+  using clock = std::chrono::steady_clock;
+  const clock::time_point timeout = clock::now() + std::chrono::seconds(5);
+
+  auto& power_pc = m_system.GetPowerPC();
+  auto& ppc_state = power_pc.GetPPCState();
+  Core::CPUThreadGuard guard(m_system);
+
+  const PowerPC::CoreMode old_mode = power_pc.GetMode();
+  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+
+  UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
+  do
+  {
+    if (WillInstructionReturn(m_system, inst))
+    {
+      power_pc.SingleStep();
+      break;
+    }
+
+    if (inst.LK)
+    {
+      const u32 next_pc = ppc_state.pc + 4;
+      do
+      {
+        power_pc.SingleStep();
+      } while (ppc_state.pc != next_pc && clock::now() < timeout && !power_pc.CheckBreakPoints());
+    }
+    else
+    {
+      power_pc.SingleStep();
+    }
+
+    inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
+  } while (clock::now() < timeout && !power_pc.CheckBreakPoints());
+
   power_pc.SetMode(old_mode);
 }
 

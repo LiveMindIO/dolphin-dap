@@ -263,9 +263,34 @@ private:
       return;
     }
 
-    if (command == "next" || command == "stepIn")
+    if (command == "next")
+    {
+      const StepOverResult result = m_controller.StepOver();
+      Respond(request->seq, command, picojson::object{});
+      if (result == StepOverResult::Stepped)
+      {
+        SendStoppedEvent("step");
+        SyncSteppingBaseline();
+      }
+      else
+      {
+        SyncSteppingBaseline();
+      }
+      return;
+    }
+
+    if (command == "stepIn")
     {
       m_controller.StepInto();
+      Respond(request->seq, command, picojson::object{});
+      SendStoppedEvent("step");
+      SyncSteppingBaseline();
+      return;
+    }
+
+    if (command == "stepOut")
+    {
+      m_controller.StepOut();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
       SyncSteppingBaseline();

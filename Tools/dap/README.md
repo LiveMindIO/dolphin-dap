@@ -40,10 +40,17 @@ Expect a JSON `response` with `"command":"initialize"` and `"success":true`.
 ## Phase 1 commands (MVP)
 
 After `configurationDone`, the session emits a `stopped` event (`reason: entry`).
-Supported requests include `continue`, `pause`, `stepIn`, `setBreakpoints`,
-`scopes`, `variables`, `readMemory`, `writeMemory`, and `disassemble`. Breakpoint
-addresses are hex strings in `source.name` or `source.path` (optional `line` × 4
-offset).
+Supported requests include `continue`, `pause`, `stepIn`, `next`, `stepOut`,
+`setBreakpoints`, `scopes`, `variables`, `readMemory`, `writeMemory`, and
+`disassemble`. Breakpoint addresses are hex strings in `source.name` or
+`source.path` (optional `line` × 4 offset).
+
+## Phase 2 (in progress)
+
+Step over/out mirror `CodeWidget::StepOver` / `CodeWidget::StepOut` (temporary
+breakpoint for branch step-over; interpreter loop for step-out). Remaining phase 2
+work: memory watchpoints, conditional breakpoints, `setVariable`, `stackTrace`,
+`threads`, and `evaluate`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
