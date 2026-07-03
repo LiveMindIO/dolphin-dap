@@ -35,8 +35,8 @@ namespace DAP
 {
 namespace
 {
-constexpr int kRegistersScope = 1000;
-constexpr int kPcScope = 1001;
+constexpr int REGISTERS_SCOPE = 1000;
+constexpr int PC_SCOPE = 1001;
 
 bool WaitForReadable(int socket, int timeout_ms)
 {
@@ -164,8 +164,8 @@ private:
 
   bool RespondError(int request_seq, std::string_view command, std::string_view message)
   {
-    return m_transport.WriteMessage(
-        Protocol::Serialize(Protocol::MakeErrorResponse(m_next_seq++, request_seq, command, message)));
+    return m_transport.WriteMessage(Protocol::Serialize(
+        Protocol::MakeErrorResponse(m_next_seq++, request_seq, command, message)));
   }
 
   bool RunHandshake()
@@ -453,8 +453,8 @@ private:
   picojson::object MakeScopes()
   {
     picojson::array scopes;
-    scopes.emplace_back(MakeScope("Registers", kRegistersScope));
-    scopes.emplace_back(MakeScope("PC", kPcScope));
+    scopes.emplace_back(MakeScope("Registers", REGISTERS_SCOPE));
+    scopes.emplace_back(MakeScope("PC", PC_SCOPE));
 
     picojson::object body;
     body.emplace("scopes", std::move(scopes));
@@ -466,12 +466,12 @@ private:
     const RegisterSnapshot registers = m_controller.GetRegisters();
     picojson::array variables;
 
-    if (variables_reference == kRegistersScope)
+    if (variables_reference == REGISTERS_SCOPE)
     {
       for (std::size_t i = 0; i < registers.gpr.size(); ++i)
         variables.emplace_back(MakeVariable(fmt::format("r{}", i), registers.gpr[i]));
     }
-    else if (variables_reference == kPcScope)
+    else if (variables_reference == PC_SCOPE)
     {
       variables.emplace_back(MakeVariable("pc", registers.pc));
       variables.emplace_back(MakeVariable("lr", registers.lr));

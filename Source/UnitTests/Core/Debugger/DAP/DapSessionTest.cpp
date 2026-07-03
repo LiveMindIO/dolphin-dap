@@ -37,8 +37,8 @@
 #ifndef _WIN32
 namespace
 {
-constexpr u32 kCodeAddress = 0x00003100;
-constexpr u32 kDataAddress = 0x00004000;
+constexpr u32 CODE_ADDRESS = 0x00003100;
+constexpr u32 DATA_ADDRESS = 0x00004000;
 
 // A DAP client over one end of a socketpair. Reads are bounded by a socket
 // receive timeout so a protocol failure surfaces as a test failure instead of
@@ -116,9 +116,9 @@ protected:
 
     // ori r0,r0,0 (nop) then blr, plus a data pattern for readMemory.
     const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
-    memory.CopyToEmu(kCodeAddress, code.data(), code.size());
+    memory.CopyToEmu(CODE_ADDRESS, code.data(), code.size());
     const std::array<u8, 4> data{{0xde, 0xad, 0xbe, 0xef}};
-    memory.CopyToEmu(kDataAddress, data.data(), data.size());
+    memory.CopyToEmu(DATA_ADDRESS, data.data(), data.size());
     Core::UndeclareAsCPUThread();
 
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, m_fds), 0);
@@ -150,13 +150,22 @@ protected:
   // Runs the initialize/configurationDone handshake and consumes the entry stop.
   void Handshake(TestClient& client)
   {
-    client.Send(R"({"seq":1,"type":"request","command":"initialize","arguments":{}})");
+    client.Send(R"({
+      "seq": 1,
+      "type": "request",
+      "command": "initialize",
+      "arguments": {}
+    })");
     const auto init = client.Receive();
     ASSERT_TRUE(init.has_value());
     EXPECT_EQ(init->at("command").to_str(), "initialize");
     EXPECT_TRUE(init->at("success").get<bool>());
 
-    client.Send(R"({"seq":2,"type":"request","command":"configurationDone"})");
+    client.Send(R"({
+      "seq": 2,
+      "type": "request",
+      "command": "configurationDone"
+    })");
     const auto config = client.Receive();
     ASSERT_TRUE(config.has_value());
     EXPECT_EQ(config->at("command").to_str(), "configurationDone");
@@ -176,12 +185,18 @@ protected:
 TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
 {
   TestClient client(m_client_fd());
-  client.Send(R"({"seq":1,"type":"request","command":"initialize","arguments":{}})");
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
 
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
   ASSERT_TRUE(response->at("success").get<bool>());
-  const auto& caps = response->at("body").get<picojson::object>().at("capabilities").get<picojson::object>();
+  const auto& caps =
+      response->at("body").get<picojson::object>().at("capabilities").get<picojson::object>();
   EXPECT_TRUE(caps.at("supportsReadMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsWriteMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsDisassembleRequest").get<bool>());
@@ -192,12 +207,20 @@ TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  client.Send(
-      R"({"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"name":"0x80003100"},"breakpoints":[{"line":0},{"line":1}]}})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setBreakpoints",
+    "arguments": {
+      "source": {"name": "0x80003100"},
+      "breakpoints": [{"line": 0}, {"line": 1}]
+    }
+  })");
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
   EXPECT_EQ(response->at("command").to_str(), "setBreakpoints");
-  const auto& breakpoints = response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
   ASSERT_EQ(breakpoints.size(), 2u);
   EXPECT_TRUE(breakpoints[0].get<picojson::object>().at("verified").get<bool>());
   EXPECT_TRUE(breakpoints[1].get<picojson::object>().at("verified").get<bool>());
@@ -206,7 +229,11 @@ TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
   EXPECT_TRUE(bps.IsAddressBreakPoint(0x80003100));
   EXPECT_TRUE(bps.IsAddressBreakPoint(0x80003104));
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 
@@ -215,8 +242,12 @@ TEST_F(DapSessionTest, ReadMemoryReturnsBase64OfRam)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  client.Send(
-      R"({"seq":3,"type":"request","command":"readMemory","arguments":{"memoryReference":"0x00004000","count":4}})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "readMemory",
+    "arguments": {"memoryReference": "0x00004000", "count": 4}
+  })");
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
   ASSERT_TRUE(response->at("success").get<bool>());
@@ -225,7 +256,11 @@ TEST_F(DapSessionTest, ReadMemoryReturnsBase64OfRam)
   ASSERT_TRUE(decoded.has_value());
   EXPECT_EQ(*decoded, (std::vector<u8>{0xde, 0xad, 0xbe, 0xef}));
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 
@@ -235,23 +270,36 @@ TEST_F(DapSessionTest, WriteMemoryThenReadBack)
   Handshake(client);
 
   // "TWFu" == "Man" == {0x4d,0x61,0x6e}
-  client.Send(
-      R"({"seq":3,"type":"request","command":"writeMemory","arguments":{"memoryReference":"0x00004000","data":"TWFu"}})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "writeMemory",
+    "arguments": {"memoryReference": "0x00004000", "data": "TWFu"}
+  })");
   const auto write_response = client.Receive();
   ASSERT_TRUE(write_response.has_value());
   ASSERT_TRUE(write_response->at("success").get<bool>());
-  EXPECT_EQ(write_response->at("body").get<picojson::object>().at("bytesWritten").get<double>(), 3.0);
+  EXPECT_EQ(write_response->at("body").get<picojson::object>().at("bytesWritten").get<double>(),
+            3.0);
 
-  client.Send(
-      R"({"seq":4,"type":"request","command":"readMemory","arguments":{"memoryReference":"0x00004000","count":3}})");
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "readMemory",
+    "arguments": {"memoryReference": "0x00004000", "count": 3}
+  })");
   const auto read_response = client.Receive();
   ASSERT_TRUE(read_response.has_value());
-  const auto decoded =
-      DAP::Json::Base64Decode(read_response->at("body").get<picojson::object>().at("data").to_str());
+  const auto decoded = DAP::Json::Base64Decode(
+      read_response->at("body").get<picojson::object>().at("data").to_str());
   ASSERT_TRUE(decoded.has_value());
   EXPECT_EQ(*decoded, (std::vector<u8>{0x4d, 0x61, 0x6e}));
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 
@@ -260,18 +308,27 @@ TEST_F(DapSessionTest, DisassembleReturnsInstructions)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  client.Send(
-      R"({"seq":3,"type":"request","command":"disassemble","arguments":{"memoryReference":"0x00003100","instructionCount":2}})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "disassemble",
+    "arguments": {"memoryReference": "0x00003100", "instructionCount": 2}
+  })");
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
-  const auto& instructions = response->at("body").get<picojson::object>().at("instructions").get<picojson::array>();
+  const auto& instructions =
+      response->at("body").get<picojson::object>().at("instructions").get<picojson::array>();
   ASSERT_EQ(instructions.size(), 2u);
   EXPECT_NE(instructions[0].get<picojson::object>().at("instruction").to_str().find("nop"),
             std::string::npos);
   EXPECT_NE(instructions[1].get<picojson::object>().at("instruction").to_str().find("blr"),
             std::string::npos);
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 
@@ -282,15 +339,24 @@ TEST_F(DapSessionTest, VariablesReturnsRegisters)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  client.Send(
-      R"({"seq":3,"type":"request","command":"variables","arguments":{"variablesReference":1000}})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "variables",
+    "arguments": {"variablesReference": 1000}
+  })");
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
-  const auto& variables = response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  const auto& variables =
+      response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
   EXPECT_EQ(variables.size(), 32u);
   EXPECT_EQ(variables[0].get<picojson::object>().at("name").to_str(), "r0");
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 
@@ -299,13 +365,21 @@ TEST_F(DapSessionTest, UnknownCommandReturnsError)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  client.Send(R"({"seq":3,"type":"request","command":"frobnicate"})");
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "frobnicate"
+  })");
   const auto response = client.Receive();
   ASSERT_TRUE(response.has_value());
   EXPECT_EQ(response->at("command").to_str(), "frobnicate");
   EXPECT_FALSE(response->at("success").get<bool>());
 
-  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
   (void)client.Receive();
 }
 }  // namespace

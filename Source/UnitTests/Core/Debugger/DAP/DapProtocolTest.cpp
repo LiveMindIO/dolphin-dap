@@ -25,8 +25,12 @@ picojson::object ParseObjectOrDie(const std::string& text)
 
 TEST(DapProtocol, ParseRequestExtractsEnvelope)
 {
-  const auto message =
-      ParseObjectOrDie(R"({"seq":7,"type":"request","command":"continue","arguments":{"x":1}})");
+  const auto message = ParseObjectOrDie(R"({
+    "seq": 7,
+    "type": "request",
+    "command": "continue",
+    "arguments": {"x": 1}
+  })");
   const auto request = Protocol::ParseRequest(message);
   ASSERT_TRUE(request.has_value());
   EXPECT_EQ(request->seq, 7);
@@ -36,7 +40,10 @@ TEST(DapProtocol, ParseRequestExtractsEnvelope)
 
 TEST(DapProtocol, ParseRequestAllowsMissingArguments)
 {
-  const auto message = ParseObjectOrDie(R"({"seq":1,"command":"configurationDone"})");
+  const auto message = ParseObjectOrDie(R"({
+    "seq": 1,
+    "command": "configurationDone"
+  })");
   const auto request = Protocol::ParseRequest(message);
   ASSERT_TRUE(request.has_value());
   EXPECT_TRUE(request->arguments.empty());
@@ -56,8 +63,11 @@ TEST(DapProtocol, ParseRequestRejectsMissingSeq)
 
 TEST(DapProtocol, ParseReadMemoryResolvesFields)
 {
-  const auto args =
-      ParseObjectOrDie(R"({"memoryReference":"0x80003100","offset":16,"count":64})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "offset": 16,
+    "count": 64
+  })");
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->address, 0x80003100u);
@@ -67,7 +77,10 @@ TEST(DapProtocol, ParseReadMemoryResolvesFields)
 
 TEST(DapProtocol, ParseReadMemoryDefaultsOffset)
 {
-  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100","count":4})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "count": 4
+  })");
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->offset, 0);
@@ -75,8 +88,11 @@ TEST(DapProtocol, ParseReadMemoryDefaultsOffset)
 
 TEST(DapProtocol, ParseReadMemoryAllowsNegativeOffset)
 {
-  const auto args =
-      ParseObjectOrDie(R"({"memoryReference":"0x80003100","offset":-8,"count":4})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "offset": -8,
+    "count": 4
+  })");
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->offset, -8);
@@ -97,8 +113,11 @@ TEST(DapProtocol, ParseReadMemoryRejectsMissingCount)
 TEST(DapProtocol, ParseWriteMemoryDecodesData)
 {
   // "TWFu" decodes to "Man".
-  const auto args =
-      ParseObjectOrDie(R"({"memoryReference":"0x80003100","data":"TWFu","allowPartial":true})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "data": "TWFu",
+    "allowPartial": true
+  })");
   const auto write = Protocol::ParseWriteMemory(args);
   ASSERT_TRUE(write.has_value());
   EXPECT_EQ(write->address, 0x80003100u);
@@ -108,7 +127,10 @@ TEST(DapProtocol, ParseWriteMemoryDecodesData)
 
 TEST(DapProtocol, ParseWriteMemoryDefaultsAllowPartial)
 {
-  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100","data":"TWFu"})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "data": "TWFu"
+  })");
   const auto write = Protocol::ParseWriteMemory(args);
   ASSERT_TRUE(write.has_value());
   EXPECT_FALSE(write->allow_partial);
@@ -116,7 +138,10 @@ TEST(DapProtocol, ParseWriteMemoryDefaultsAllowPartial)
 
 TEST(DapProtocol, ParseWriteMemoryRejectsInvalidBase64)
 {
-  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100","data":"!!!!"})");
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x80003100",
+    "data": "!!!!"
+  })");
   EXPECT_FALSE(Protocol::ParseWriteMemory(args).has_value());
 }
 
@@ -138,8 +163,10 @@ TEST(DapProtocol, ParseDisassembleDefaults)
 
 TEST(DapProtocol, ParseSetBreakpointsResolvesLinesAgainstBase)
 {
-  const auto args = ParseObjectOrDie(
-      R"({"source":{"name":"0x80003000"},"breakpoints":[{"line":0},{"line":2}]})");
+  const auto args = ParseObjectOrDie(R"({
+    "source": {"name": "0x80003000"},
+    "breakpoints": [{"line": 0}, {"line": 2}]
+  })");
   const auto parsed = Protocol::ParseSetBreakpoints(args);
   ASSERT_EQ(parsed.breakpoints.size(), 2u);
   ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
@@ -150,7 +177,10 @@ TEST(DapProtocol, ParseSetBreakpointsResolvesLinesAgainstBase)
 
 TEST(DapProtocol, ParseSetBreakpointsLeavesLinesUnresolvedWithoutBase)
 {
-  const auto args = ParseObjectOrDie(R"({"source":{"name":"main.c"},"breakpoints":[{"line":3}]})");
+  const auto args = ParseObjectOrDie(R"({
+    "source": {"name": "main.c"},
+    "breakpoints": [{"line": 3}]
+  })");
   const auto parsed = Protocol::ParseSetBreakpoints(args);
   ASSERT_EQ(parsed.breakpoints.size(), 1u);
   EXPECT_FALSE(parsed.breakpoints[0].address.has_value());
@@ -158,8 +188,10 @@ TEST(DapProtocol, ParseSetBreakpointsLeavesLinesUnresolvedWithoutBase)
 
 TEST(DapProtocol, ParseSetBreakpointsUsesPathWhenNameNotHex)
 {
-  const auto args = ParseObjectOrDie(
-      R"({"source":{"name":"game.c","path":"0x80004000"},"breakpoints":[{"line":1}]})");
+  const auto args = ParseObjectOrDie(R"({
+    "source": {"name": "game.c", "path": "0x80004000"},
+    "breakpoints": [{"line": 1}]
+  })");
   const auto parsed = Protocol::ParseSetBreakpoints(args);
   ASSERT_TRUE(parsed.base.has_value());
   EXPECT_EQ(*parsed.base, 0x80004000u);
@@ -213,10 +245,8 @@ TEST(DapProtocol, DisassemblyInstructionTextIsEscapedOnSerialize)
       Protocol::Serialize(Protocol::MakeResponse(1, 1, "disassemble", true, std::move(body)));
   const auto reparsed = Json::ParseObject(serialized);
   ASSERT_TRUE(reparsed.has_value());
-  const auto& out = reparsed->at("body")
-                        .get<picojson::object>()
-                        .at("instructions")
-                        .get<picojson::array>();
+  const auto& out =
+      reparsed->at("body").get<picojson::object>().at("instructions").get<picojson::array>();
   ASSERT_EQ(out.size(), 1u);
   EXPECT_EQ(out[0].get<picojson::object>().at("instruction").to_str(), R"(li r3, "x")");
 }

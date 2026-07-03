@@ -27,9 +27,9 @@
 namespace
 {
 // A GameCube-range physical/effective address comfortably inside MEM1.
-constexpr u32 kTestAddress = 0x00003100;
+constexpr u32 TEST_ADDRESS = 0x00003100;
 // Segment 0 but past MEM1 (24 MiB), so not a RAM address.
-constexpr u32 kInvalidAddress = 0x0C000000;
+constexpr u32 INVALID_ADDRESS = 0x0C000000;
 
 class DapControllerTest : public ::testing::Test
 {
@@ -98,10 +98,10 @@ TEST_F(DapControllerTest, GetRegistersReflectsPpcState)
 TEST_F(DapControllerTest, ReadMemoryRoundTripsRam)
 {
   const std::array<u8, 8> payload{{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}};
-  System().GetMemory().CopyToEmu(kTestAddress, payload.data(), payload.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, payload.data(), payload.size());
 
   DAP::DapDebugController controller(System());
-  const std::vector<u8> read = controller.ReadMemory(kTestAddress, payload.size());
+  const std::vector<u8> read = controller.ReadMemory(TEST_ADDRESS, payload.size());
 
   ASSERT_EQ(read.size(), payload.size());
   EXPECT_TRUE(std::equal(payload.begin(), payload.end(), read.begin()));
@@ -110,7 +110,7 @@ TEST_F(DapControllerTest, ReadMemoryRoundTripsRam)
 TEST_F(DapControllerTest, ReadMemoryInvalidAddressReturnsEmpty)
 {
   DAP::DapDebugController controller(System());
-  EXPECT_TRUE(controller.ReadMemory(kInvalidAddress, 16).empty());
+  EXPECT_TRUE(controller.ReadMemory(INVALID_ADDRESS, 16).empty());
 }
 
 TEST_F(DapControllerTest, ReadMemoryStopsAtEndOfRam)
@@ -128,15 +128,15 @@ TEST_F(DapControllerTest, WriteMemoryPersistsToRam)
   const std::array<u8, 4> payload{{0xca, 0xfe, 0xd0, 0x0d}};
 
   DAP::DapDebugController controller(System());
-  const std::size_t written = controller.WriteMemory(kTestAddress, payload);
+  const std::size_t written = controller.WriteMemory(TEST_ADDRESS, payload);
   EXPECT_EQ(written, payload.size());
 
   std::array<u8, 4> read_back{};
-  System().GetMemory().CopyFromEmu(read_back.data(), kTestAddress, read_back.size());
+  System().GetMemory().CopyFromEmu(read_back.data(), TEST_ADDRESS, read_back.size());
   EXPECT_EQ(read_back, payload);
 
   // And it round-trips back through the controller's own read path.
-  const std::vector<u8> via_controller = controller.ReadMemory(kTestAddress, payload.size());
+  const std::vector<u8> via_controller = controller.ReadMemory(TEST_ADDRESS, payload.size());
   ASSERT_EQ(via_controller.size(), payload.size());
   EXPECT_TRUE(std::equal(payload.begin(), payload.end(), via_controller.begin()));
 }
@@ -155,17 +155,17 @@ TEST_F(DapControllerTest, WriteMemoryInvalidAddressWritesNothing)
 {
   const std::array<u8, 4> payload{{1, 2, 3, 4}};
   DAP::DapDebugController controller(System());
-  EXPECT_EQ(controller.WriteMemory(kInvalidAddress, payload), 0u);
+  EXPECT_EQ(controller.WriteMemory(INVALID_ADDRESS, payload), 0u);
 }
 
 TEST_F(DapControllerTest, DisassembleDecodesKnownOpcodes)
 {
   // Big-endian PPC encodings: ori r0,r0,0 (canonical nop) and blr.
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
-  System().GetMemory().CopyToEmu(kTestAddress, code.data(), code.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
 
   DAP::DapDebugController controller(System());
-  const std::string disasm = controller.Disassemble(kTestAddress, 2);
+  const std::string disasm = controller.Disassemble(TEST_ADDRESS, 2);
 
   EXPECT_NE(disasm.find("nop"), std::string::npos) << disasm;
   EXPECT_NE(disasm.find("blr"), std::string::npos) << disasm;
@@ -174,7 +174,7 @@ TEST_F(DapControllerTest, DisassembleDecodesKnownOpcodes)
 TEST_F(DapControllerTest, DisassembleInvalidAddressReportsNoRam)
 {
   DAP::DapDebugController controller(System());
-  const std::string disasm = controller.Disassemble(kInvalidAddress, 1);
+  const std::string disasm = controller.Disassemble(INVALID_ADDRESS, 1);
   EXPECT_NE(disasm.find("No RAM"), std::string::npos) << disasm;
 }
 
