@@ -35,9 +35,6 @@ namespace DAP
 {
 namespace
 {
-constexpr int REGISTERS_SCOPE = 1000;
-constexpr int PC_SCOPE = 1001;
-
 bool WaitForReadable(int socket, int timeout_ms)
 {
   fd_set readfds;
@@ -211,6 +208,7 @@ private:
     capabilities.emplace("supportsDisassembleRequest", true);
     capabilities.emplace("supportsReadMemoryRequest", true);
     capabilities.emplace("supportsWriteMemoryRequest", true);
+    capabilities.emplace("supportsSetVariable", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -317,6 +315,12 @@ private:
       return;
     }
 
+    if (command == "setVariable")
+    {
+      HandleSetVariable(*request);
+      return;
+    }
+
     if (command == "readMemory")
     {
       HandleReadMemory(*request);
@@ -377,6 +381,29 @@ private:
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setBreakpoints", std::move(body));
+  }
+
+  void HandleSetVariable(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::SetVariableArguments> arguments =
+        Protocol::ParseSetVariable(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+      return;
+    }
+
+    const std::optional<u32> value =
+        m_controller.SetRegister(arguments->variables_reference, arguments->name, arguments->value);
+    if (!value)
+    {
+      RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("value", fmt::format("0x{:08x}", *value));
+    Respond(request.seq, "setVariable", std::move(body));
   }
 
   void HandleReadMemory(const Protocol::Request& request)

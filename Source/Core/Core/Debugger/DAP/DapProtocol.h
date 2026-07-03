@@ -81,6 +81,15 @@ struct SetBreakpointsArguments
 
 SetBreakpointsArguments ParseSetBreakpoints(const picojson::object& arguments);
 
+struct SetVariableArguments
+{
+  int variables_reference = 0;
+  std::string name;
+  std::string value;
+};
+
+std::optional<SetVariableArguments> ParseSetVariable(const picojson::object& arguments);
+
 // Envelope builders. `seq` is the server's monotonically increasing sequence
 // number; the caller owns its allocation.
 picojson::object MakeResponse(int seq, int request_seq, std::string_view command, bool success,

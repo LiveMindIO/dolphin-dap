@@ -3,6 +3,8 @@
 
 #include "Core/Debugger/DAP/DapJson.h"
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 
 #include <fmt/format.h>
@@ -37,6 +39,26 @@ std::optional<u32> ParseHexAddress(const std::string_view text)
     return std::nullopt;
 
   return value;
+}
+
+std::optional<u32> ParseRegisterValue(const std::string_view text)
+{
+  std::string trimmed(text);
+  if (trimmed.starts_with("0x") || trimmed.starts_with("0X"))
+    return ParseHexAddress(text);
+
+  const bool looks_decimal =
+      !trimmed.empty() &&
+      std::all_of(trimmed.begin(), trimmed.end(), [](const char c) { return std::isdigit(c); });
+  if (looks_decimal)
+  {
+    u32 value = 0;
+    if (TryParse(trimmed, &value, 10))
+      return value;
+    return std::nullopt;
+  }
+
+  return ParseHexAddress(text);
 }
 
 std::string FormatAddress(const u32 address)

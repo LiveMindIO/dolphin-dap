@@ -100,6 +100,55 @@ TEST_F(DapControllerTest, GetRegistersReflectsPpcState)
   EXPECT_EQ(snapshot.xer, ppc_state.GetXER().Hex);
 }
 
+TEST_F(DapControllerTest, SetRegisterGprRoundTrips)
+{
+  DAP::DapDebugController controller(System());
+
+  const std::optional<u32> written =
+      controller.SetRegister(DAP::REGISTERS_SCOPE, "r3", "0x12345678");
+  ASSERT_TRUE(written.has_value());
+  EXPECT_EQ(*written, 0x12345678u);
+  EXPECT_EQ(System().GetPPCState().gpr[3], 0x12345678u);
+  EXPECT_EQ(controller.GetRegisters().gpr[3], 0x12345678u);
+}
+
+TEST_F(DapControllerTest, SetRegisterPcScopeRoundTrips)
+{
+  DAP::DapDebugController controller(System());
+
+  ASSERT_TRUE(controller.SetRegister(DAP::PC_SCOPE, "pc", "0x80003100").has_value());
+  ASSERT_TRUE(controller.SetRegister(DAP::PC_SCOPE, "lr", "0x80004000").has_value());
+  ASSERT_TRUE(controller.SetRegister(DAP::PC_SCOPE, "ctr", "42").has_value());
+  ASSERT_TRUE(controller.SetRegister(DAP::PC_SCOPE, "cr", "0xa5a5a5a5").has_value());
+  ASSERT_TRUE(controller.SetRegister(DAP::PC_SCOPE, "xer", "0x20000000").has_value());
+
+  const DAP::RegisterSnapshot snapshot = controller.GetRegisters();
+  EXPECT_EQ(snapshot.pc, 0x80003100u);
+  EXPECT_EQ(snapshot.lr, 0x80004000u);
+  EXPECT_EQ(snapshot.ctr, 42u);
+  EXPECT_EQ(snapshot.cr, 0xa5a5a5a5u);
+  EXPECT_EQ(snapshot.xer, 0x20000000u);
+}
+
+TEST_F(DapControllerTest, SetRegisterRejectsUnknownScope)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.SetRegister(9999, "r0", "0").has_value());
+}
+
+TEST_F(DapControllerTest, SetRegisterRejectsUnknownName)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.SetRegister(DAP::REGISTERS_SCOPE, "foo", "0").has_value());
+  EXPECT_FALSE(controller.SetRegister(DAP::PC_SCOPE, "msr", "0").has_value());
+}
+
+TEST_F(DapControllerTest, SetRegisterRejectsInvalidValue)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.SetRegister(DAP::REGISTERS_SCOPE, "r0", "not-a-number").has_value());
+}
+
 TEST_F(DapControllerTest, ReadMemoryRoundTripsRam)
 {
   const std::array<u8, 8> payload{{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}};

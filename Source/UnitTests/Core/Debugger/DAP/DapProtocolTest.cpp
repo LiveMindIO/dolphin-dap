@@ -200,6 +200,29 @@ TEST(DapProtocol, ParseSetBreakpointsUsesPathWhenNameNotHex)
   EXPECT_EQ(*parsed.breakpoints[0].address, 0x80004004u);
 }
 
+TEST(DapProtocol, ParseSetVariableExtractsArguments)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "variablesReference": 1000,
+    "name": "r3",
+    "value": "0x12345678"
+  })");
+  const auto arguments = Protocol::ParseSetVariable(message);
+  ASSERT_TRUE(arguments.has_value());
+  EXPECT_EQ(arguments->variables_reference, 1000);
+  EXPECT_EQ(arguments->name, "r3");
+  EXPECT_EQ(arguments->value, "0x12345678");
+}
+
+TEST(DapProtocol, ParseSetVariableRejectsMissingName)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "variablesReference": 1000,
+    "value": "0"
+  })");
+  EXPECT_FALSE(Protocol::ParseSetVariable(message).has_value());
+}
+
 TEST(DapProtocol, MakeResponseSerializesEnvelope)
 {
   picojson::object body;

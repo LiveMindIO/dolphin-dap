@@ -200,6 +200,7 @@ TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
   EXPECT_TRUE(caps.at("supportsReadMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsWriteMemoryRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsDisassembleRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsSetVariable").get<bool>());
 }
 
 TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
@@ -351,6 +352,35 @@ TEST_F(DapSessionTest, VariablesReturnsRegisters)
       response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
   EXPECT_EQ(variables.size(), 32u);
   EXPECT_EQ(variables[0].get<picojson::object>().at("name").to_str(), "r0");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetVariableUpdatesRegisterAndReturnsFormattedValue)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setVariable",
+    "arguments": {
+      "variablesReference": 1000,
+      "name": "r3",
+      "value": "0x12345678"
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  EXPECT_EQ(response->at("body").get<picojson::object>().at("value").to_str(), "0x12345678");
+  EXPECT_EQ(Core::System::GetInstance().GetPPCState().gpr[3], 0x12345678u);
 
   client.Send(R"({
     "seq": 9,

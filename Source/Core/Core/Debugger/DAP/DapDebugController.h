@@ -19,6 +19,9 @@ class System;
 
 namespace DAP
 {
+constexpr int REGISTERS_SCOPE = 1000;
+constexpr int PC_SCOPE = 1001;
+
 struct RegisterSnapshot
 {
   std::array<u32, 32> gpr{};
@@ -52,6 +55,10 @@ public:
   void SetCodeBreakpoints(const std::vector<u32>& addresses);
 
   RegisterSnapshot GetRegisters();
+  // Writes a register exposed by the `variables` scopes. Returns the new value
+  // on success, or nullopt when the scope, name, value, or writability is invalid.
+  std::optional<u32> SetRegister(int variables_reference, std::string_view name,
+                                 std::string_view value);
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
   // returns the number written; stops at the first invalid address.

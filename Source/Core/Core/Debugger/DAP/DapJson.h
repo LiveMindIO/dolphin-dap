@@ -23,6 +23,10 @@ std::optional<picojson::object> ParseObject(std::string_view text);
 // "0x80003100". Returns nullopt for empty or non-hex input.
 std::optional<u32> ParseHexAddress(std::string_view text);
 
+// Parses a register value from a DAP `setVariable` payload. Accepts the same
+// `0x`-prefixed hex strings returned by `variables`, or a plain decimal string.
+std::optional<u32> ParseRegisterValue(std::string_view text);
+
 // Format an address as the canonical DAP memory reference string.
 std::string FormatAddress(u32 address);
 

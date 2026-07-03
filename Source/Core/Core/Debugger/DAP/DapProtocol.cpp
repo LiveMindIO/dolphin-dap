@@ -155,6 +155,22 @@ SetBreakpointsArguments ParseSetBreakpoints(const picojson::object& arguments)
   return result;
 }
 
+std::optional<SetVariableArguments> ParseSetVariable(const picojson::object& arguments)
+{
+  const std::optional<int> variables_reference =
+      ReadNumericFromJson<int>(arguments, "variablesReference");
+  const std::optional<std::string> name = ReadStringFromJson(arguments, "name");
+  const std::optional<std::string> value = ReadStringFromJson(arguments, "value");
+  if (!variables_reference || !name || !value)
+    return std::nullopt;
+
+  SetVariableArguments result;
+  result.variables_reference = *variables_reference;
+  result.name = *name;
+  result.value = *value;
+  return result;
+}
+
 picojson::object MakeResponse(const int seq, const int request_seq, const std::string_view command,
                               const bool success, picojson::object body)
 {

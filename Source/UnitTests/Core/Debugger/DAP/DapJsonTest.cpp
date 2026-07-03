@@ -70,6 +70,17 @@ TEST(DapJson, ParseHexAddressRejectsEmpty)
   EXPECT_FALSE(Json::ParseHexAddress("").has_value());
 }
 
+TEST(DapJson, ParseRegisterValueAcceptsHexAndDecimal)
+{
+  EXPECT_EQ(Json::ParseRegisterValue("0x12345678"), 0x12345678u);
+  EXPECT_EQ(Json::ParseRegisterValue("42"), 42u);
+}
+
+TEST(DapJson, ParseRegisterValueRejectsGarbage)
+{
+  EXPECT_FALSE(Json::ParseRegisterValue("not-a-number").has_value());
+}
+
 TEST(DapJson, FormatAddressIsZeroPaddedHex)
 {
   EXPECT_EQ(Json::FormatAddress(0x8000u), "0x00008000");

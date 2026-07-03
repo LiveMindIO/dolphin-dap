@@ -4,9 +4,12 @@
 #include "Core/Debugger/DAP/DapDebugController.h"
 
 #include <chrono>
+#include <string_view>
 
 #include "Common/Event.h"
+#include "Common/StringUtil.h"
 #include "Core/Core.h"
+#include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/PPCDebugInterface.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
@@ -164,6 +167,64 @@ RegisterSnapshot DapDebugController::GetRegisters()
   snapshot.cr = ppc_state.cr.Get();
   snapshot.xer = ppc_state.GetXER().Hex;
   return snapshot;
+}
+
+std::optional<u32> DapDebugController::SetRegister(const int variables_reference,
+                                                   const std::string_view name,
+                                                   const std::string_view value_text)
+{
+  const std::optional<u32> value = Json::ParseRegisterValue(value_text);
+  if (!value)
+    return std::nullopt;
+
+  Core::CPUThreadGuard guard(m_system);
+  auto& ppc_state = m_system.GetPPCState();
+
+  if (variables_reference == REGISTERS_SCOPE)
+  {
+    if (name.size() < 2 || name[0] != 'r')
+      return std::nullopt;
+
+    unsigned index = 0;
+    if (!TryParse(std::string(name.substr(1)), &index, 10) || index >= 32)
+      return std::nullopt;
+
+    ppc_state.gpr[index] = *value;
+    return ppc_state.gpr[index];
+  }
+
+  if (variables_reference != PC_SCOPE)
+    return std::nullopt;
+
+  if (name == "pc")
+  {
+    ppc_state.pc = *value;
+    return ppc_state.pc;
+  }
+  if (name == "lr")
+  {
+    LR(ppc_state) = *value;
+    return LR(ppc_state);
+  }
+  if (name == "ctr")
+  {
+    CTR(ppc_state) = *value;
+    return CTR(ppc_state);
+  }
+  if (name == "cr")
+  {
+    ppc_state.cr.Set(*value);
+    return ppc_state.cr.Get();
+  }
+  if (name == "xer")
+  {
+    UReg_XER xer;
+    xer.Hex = *value;
+    ppc_state.SetXER(xer);
+    return ppc_state.GetXER().Hex;
+  }
+
+  return std::nullopt;
 }
 
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)

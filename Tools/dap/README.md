@@ -48,9 +48,10 @@ Supported requests include `continue`, `pause`, `stepIn`, `next`, `stepOut`,
 ## Phase 2 (in progress)
 
 Step over/out mirror `CodeWidget::StepOver` / `CodeWidget::StepOut` (temporary
-breakpoint for branch step-over; interpreter loop for step-out). Remaining phase 2
-work: memory watchpoints, conditional breakpoints, `setVariable`, `stackTrace`,
-`threads`, and `evaluate`.
+breakpoint for branch step-over; interpreter loop for step-out). `setVariable`
+writes GPRs and PC-scope registers (`pc`, `lr`, `ctr`, `cr`, `xer`) exposed by
+`variables`. Remaining phase 2 work: memory watchpoints, conditional breakpoints,
+`stackTrace`, `threads`, and `evaluate`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
@@ -74,8 +75,8 @@ translation off, so effective addresses map straight to physical RAM).
 | `DapFramingTest` | transport | `Content-Length` framing encode/decode |
 | `DapJsonTest` | JSON | picojson parsing, hex addresses, base64 |
 | `DapProtocolTest` | protocol | request parsing + response/event building |
-| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read, memory read/write (incl. partial/invalid), disassembly, breakpoints |
-| `DapSessionTest` | end-to-end | full `RunSession` command loop over a `socketpair`: handshake, `setBreakpoints`, `readMemory`, `writeMemory`, `disassemble`, `variables`, unknown-command error |
+| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read/write, memory read/write (incl. partial/invalid), disassembly, breakpoints |
+| `DapSessionTest` | end-to-end | full `RunSession` command loop over a `socketpair`: handshake, `setBreakpoints`, `readMemory`, `writeMemory`, `disassemble`, `variables`, `setVariable`, unknown-command error |
 
 `DapSessionTest` connects a `socketpair` to `RunSession` running on a background
 thread (which declares itself the CPU thread, so the controller's
