@@ -16,6 +16,9 @@ target_sources(DapSessionTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
 add_dolphin_test(DwarfReaderTest Debugger/DWARF/DwarfReaderTest.cpp)
 add_dolphin_test(PPCSymbolDBLineTest Debugger/DWARF/PPCSymbolDBLineTest.cpp)
 
+add_dolphin_test(EntrypointsImportTest Debugger/Entrypoints/EntrypointsImportTest.cpp)
+target_sources(EntrypointsImportTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+
 target_sources(DwarfReaderTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
 target_sources(PPCSymbolDBLineTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
 

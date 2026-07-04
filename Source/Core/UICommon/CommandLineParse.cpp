@@ -23,7 +23,7 @@ class CommandLineConfigLayerLoader final : public Config::ConfigLayerLoader
 public:
   CommandLineConfigLayerLoader(const std::list<std::string>& args, const std::string& video_backend,
                                const std::string& audio_backend, bool batch, bool debugger,
-                               std::string debug_elf)
+                               std::string debug_elf, std::string debug_entrypoints)
       : ConfigLayerLoader(Config::LayerType::CommandLine)
   {
     if (!video_backend.empty())
@@ -45,6 +45,12 @@ public:
 
     if (!debug_elf.empty())
       m_values.emplace_back(Config::MAIN_DEBUG_DWARF_ELF.GetLocation(), std::move(debug_elf));
+
+    if (!debug_entrypoints.empty())
+    {
+      m_values.emplace_back(Config::MAIN_DEBUG_ENTRYPOINTS.GetLocation(),
+                            std::move(debug_entrypoints));
+    }
 
     // Arguments are in the format of <System>.<Section>.<Key>=Value
     for (const auto& arg : args)
@@ -108,6 +114,11 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
       .metavar("<file>")
       .type("string")
       .help("Import DWARF 1.1 debug info from a sidecar ELF (e.g. main.elf when booting an ISO)");
+  parser->add_option("--debug-entrypoints")
+      .action("store")
+      .metavar("<file>")
+      .type("string")
+      .help("Import sparse function entrypoint mappings (entrypoints.json sidecar)");
   parser->add_option("-s", "--save_state")
       .action("store")
       .metavar("<file>")
@@ -146,11 +157,15 @@ static void AddConfigLayer(const optparse::Values& options)
   if (options.is_set("debug_elf"))
     debug_elf = static_cast<const char*>(options.get("debug_elf"));
 
+  std::string debug_entrypoints;
+  if (options.is_set("debug_entrypoints"))
+    debug_entrypoints = static_cast<const char*>(options.get("debug_entrypoints"));
+
   Config::AddLayer(std::make_unique<CommandLineConfigLayerLoader>(
       std::move(config_args), static_cast<const char*>(options.get("video_backend")),
       static_cast<const char*>(options.get("audio_emulation")),
       static_cast<bool>(options.get("batch")), static_cast<bool>(options.get("debugger")),
-      std::move(debug_elf)));
+      std::move(debug_elf), std::move(debug_entrypoints)));
 }
 
 optparse::Values& ParseArguments(optparse::OptionParser* parser, int argc, char** argv)

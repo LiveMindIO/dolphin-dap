@@ -150,6 +150,13 @@ local function build_launch_args(project, target, port)
 
   if project.elf and project.elf ~= "" then
     vim.list_extend(args, { "--debug-elf", project.elf })
+    local entrypoints = project.entrypoints
+    if not entrypoints or entrypoints == "" then
+      entrypoints = vim.fn.fnamemodify(project.elf, ":p:h") .. "/entrypoints.json"
+    end
+    if entrypoints ~= "" and vim.fn.filereadable(entrypoints) == 1 then
+      vim.list_extend(args, { "--debug-entrypoints", entrypoints })
+    end
   end
 
   return args

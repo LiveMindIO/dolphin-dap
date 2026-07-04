@@ -366,6 +366,7 @@ extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
 extern const Info<std::string> MAIN_DEBUG_DWARF_ELF;
+extern const Info<std::string> MAIN_DEBUG_ENTRYPOINTS;
 
 // Main.BluetoothPassthrough
 

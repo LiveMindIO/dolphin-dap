@@ -29,6 +29,7 @@
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
 #include "Core/Debugger/DWARF/DwarfImport.h"
+#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
@@ -284,6 +285,8 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
   if (ppc_symbol_db.LoadMapOnBoot(guard))
     symbols_changed = true;
   if (Core::Debug::ImportConfiguredDwarfElf(guard, ppc_symbol_db))
+    symbols_changed = true;
+  if (Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
     symbols_changed = true;
   if (symbols_changed)
     Host_PPCSymbolsChanged();

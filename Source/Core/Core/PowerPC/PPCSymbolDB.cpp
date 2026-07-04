@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -184,6 +185,27 @@ const std::vector<std::string>& PPCSymbolDB::GetSourceFiles() const
 {
   std::lock_guard lock(m_mutex);
   return m_source_files;
+}
+
+bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty() || size == 0)
+    return false;
+
+  const u32 end = start + size;
+  std::set<u32> distinct_lines;
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (address < start || address >= end)
+      continue;
+
+    distinct_lines.insert(entry.line);
+    if (distinct_lines.size() > 1)
+      return true;
+  }
+
+  return false;
 }
 
 // Adds the function to the list, unless it's already there

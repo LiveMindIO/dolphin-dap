@@ -72,6 +72,7 @@ public:
   std::optional<u32> FindSourceFileIndex(std::string_view file_query) const;
   std::optional<u32> GetLineAddressForQuery(std::string_view file_query, u32 line) const;
   const std::vector<std::string>& GetSourceFiles() const;
+  bool HasDenseLineInfoInRange(u32 start, u32 size) const;
 
   void PrintCalls(u32 funcAddr) const;
   void PrintCallers(u32 funcAddr) const;

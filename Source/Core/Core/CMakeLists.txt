@@ -80,6 +80,8 @@ add_library(core
   Debugger/DWARF/DwarfImport.h
   Debugger/DWARF/DwarfReader.cpp
   Debugger/DWARF/DwarfReader.h
+  Debugger/Entrypoints/EntrypointsImport.cpp
+  Debugger/Entrypoints/EntrypointsImport.h
   Debugger/BranchWatch.cpp
   Debugger/BranchWatch.h
   Debugger/CodeTrace.cpp

@@ -576,6 +576,7 @@ const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF{{System::Main, "Debug", "JitR
 const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING{{System::Main, "Debug", "JitEnableProfiling"},
                                                  false};
 const Info<std::string> MAIN_DEBUG_DWARF_ELF{{System::Main, "Debug", "DwarfElf"}, ""};
+const Info<std::string> MAIN_DEBUG_ENTRYPOINTS{{System::Main, "Debug", "Entrypoints"}, ""};
 
 // Main.BluetoothPassthrough
 

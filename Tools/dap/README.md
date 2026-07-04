@@ -82,7 +82,10 @@ dolphin-emu-nogui \
   --platform headless
 ```
 
-(`-C Dolphin.Debug.DwarfElf=...` is equivalent.) See `.ai-doc-reference/dwarf-1.1-format.md`.
+(`-C Dolphin.Debug.DwarfElf=...` is equivalent.) For NonMatching decomp units, Melee
+`configure.py --debug` also generates `entrypoints.json` beside `main.elf`; pass
+`--debug-entrypoints` or rely on auto-discovery when the sibling file exists. See
+`.ai-doc-reference/entrypoints-format.md`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
