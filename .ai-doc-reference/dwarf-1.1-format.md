@@ -66,7 +66,7 @@ Per compile unit at `AT_stmt_list` offset:
 ```
 
 - **Boot:** `ElfReader::LoadSymbols` calls `ImportDwarf` when `.debug` exists.
-- **Sidecar:** `Main.Debug.DwarfElf` / `--debug-elf` → `ImportConfiguredDwarfElf` in
+- **Sidecar:** `Dolphin.Debug.DwarfElf` / `--debug-elf` → `ImportConfiguredDwarfElf` in
   `SConfig::OnTitleDirectlyBooted` (ISO, DOL, WAD, etc.).
 - **GUI:** Symbols → Load DWARF/Debug Info… → `ImportDwarfFromElf`.
 - **DAP:** `GetStackTrace` / `loadedSources` / `source` / `breakpointLocations`

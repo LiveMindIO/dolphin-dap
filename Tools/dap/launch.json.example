@@ -7,7 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/dolphin-emu-nogui",
       "args": [
-        "-C", "Main.General.DAPPort=5678",
+        "-C", "Dolphin.General.DAPPort=5678",
         "--exec", "${input:gamePath}",
         "--platform", "headless"
       ],

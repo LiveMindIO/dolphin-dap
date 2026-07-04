@@ -53,6 +53,64 @@ u32 ApplyOffset(u32 address, s64 offset)
   return static_cast<u32>(static_cast<s64>(address) + offset);
 }
 
+const picojson::object* GetObject(const picojson::object& obj, const std::string& key)
+{
+  const auto it = obj.find(key);
+  if (it == obj.end() || !it->second.is<picojson::object>())
+    return nullptr;
+  return &it->second.get<picojson::object>();
+}
+
+std::optional<std::string> ReadSourceString(const picojson::object& source,
+                                            const std::string& key)
+{
+  if (const std::optional<std::string> value = ReadStringFromJson(source, key))
+  {
+    if (!value->empty())
+      return value;
+  }
+  return std::nullopt;
+}
+
+SourceBreakpointContext ParseSourceBreakpointContext(const picojson::object& arguments)
+{
+  SourceBreakpointContext context;
+  if (const std::optional<int> source_reference =
+          ReadNumericFromJson<int>(arguments, "sourceReference"))
+  {
+    context.source_reference = *source_reference;
+  }
+
+  if (const picojson::object* source = GetObject(arguments, "source"))
+  {
+    context.source_name = ReadSourceString(*source, "name");
+    context.source_path = ReadSourceString(*source, "path");
+  }
+  return context;
+}
+
+std::string MakeBreakpointSourceKey(const SourceBreakpointContext& context)
+{
+  if (context.source_reference && *context.source_reference > 0)
+    return fmt::format("ref:{}", *context.source_reference);
+
+  if (context.source_path)
+  {
+    if (Json::ParseHexAddress(*context.source_path))
+      return fmt::format("disasm:{}", *context.source_path);
+    return fmt::format("path:{}", *context.source_path);
+  }
+
+  if (context.source_name)
+  {
+    if (Json::ParseHexAddress(*context.source_name))
+      return fmt::format("disasm:{}", *context.source_name);
+    return fmt::format("name:{}", *context.source_name);
+  }
+
+  return "unknown";
+}
+
 picojson::object MakeVariable(std::string_view name, u32 value)
 {
   picojson::object variable;
@@ -86,7 +144,6 @@ public:
       return;
 
     m_was_stepping = m_system.GetCPU().IsStepping();
-    SendStoppedEvent("entry");
 
     while (m_running)
     {
@@ -200,8 +257,6 @@ private:
 
   bool RunHandshake()
   {
-    bool initialize_done = false;
-
     while (const std::optional<std::string> message = m_transport.ReadMessage())
     {
       if (message->empty())
@@ -220,14 +275,9 @@ private:
         if (!Respond(request->seq, "initialize", MakeCapabilities()))
           return false;
 
-        initialize_done = true;
-      }
-      else if (request->command == "configurationDone")
-      {
-        if (!initialize_done)
-          return false;
-
-        return Respond(request->seq, "configurationDone", picojson::object{});
+        QueueEvent("initialized", picojson::object{});
+        FlushEvents();
+        return true;
       }
     }
 
@@ -458,10 +508,20 @@ private:
       return;
     }
 
-    if (command == "attach")
+    if (command == "configurationDone")
     {
       Respond(request->seq, command, picojson::object{});
-      SendStoppedEvent("attach");
+      if (!m_debugging_started)
+        SendStoppedEvent("entry");
+      SyncSteppingBaseline();
+      return;
+    }
+
+    if (command == "launch" || command == "attach")
+    {
+      Respond(request->seq, command, picojson::object{});
+      m_debugging_started = true;
+      SendStoppedEvent(command == "launch" ? "entry" : "attach");
       SyncSteppingBaseline();
       return;
     }
@@ -472,37 +532,59 @@ private:
 
   void HandleSetBreakpoints(const Protocol::Request& request)
   {
-    const Protocol::SetBreakpointsArguments arguments =
-        Protocol::ParseSetBreakpoints(request.arguments);
+    const SourceBreakpointContext context = ParseSourceBreakpointContext(request.arguments);
+    const std::string source_key = MakeBreakpointSourceKey(context);
 
-    std::vector<CodeBreakpointRequest> breakpoint_requests;
+    const picojson::array* breakpoint_entries = nullptr;
+    const auto breakpoints_it = request.arguments.find("breakpoints");
+    if (breakpoints_it != request.arguments.end() && breakpoints_it->second.is<picojson::array>())
+      breakpoint_entries = &breakpoints_it->second.get<picojson::array>();
+
+    std::vector<SourceBreakpointSpec> specs;
+    if (breakpoint_entries != nullptr)
+    {
+      for (const picojson::value& entry : *breakpoint_entries)
+      {
+        if (!entry.is<picojson::object>())
+          continue;
+
+        const picojson::object& entry_obj = entry.get<picojson::object>();
+        const std::optional<u32> line = ReadNumericFromJson<u32>(entry_obj, "line");
+        if (!line)
+          continue;
+
+        SourceBreakpointSpec spec;
+        spec.line = *line;
+        if (const std::optional<std::string> condition = ReadStringFromJson(entry_obj, "condition"))
+          spec.condition = *condition;
+        specs.push_back(std::move(spec));
+      }
+    }
+
+    if (specs.empty())
+    {
+      const Protocol::SetBreakpointsArguments legacy = Protocol::ParseSetBreakpoints(request.arguments);
+      if (legacy.base)
+      {
+        SourceBreakpointSpec spec;
+        spec.line = 0;
+        specs.push_back(std::move(spec));
+      }
+    }
+
+    const std::vector<std::optional<u32>> addresses =
+        m_controller.UpdateSourceBreakpoints(source_key, context, specs);
+
     picojson::array breakpoints;
-    for (const Protocol::RequestedBreakpoint& breakpoint : arguments.breakpoints)
+    for (size_t i = 0; i < specs.size(); ++i)
     {
       picojson::object entry;
-      entry.emplace("verified", breakpoint.address.has_value());
-      if (breakpoint.address)
-      {
-        entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
-        CodeBreakpointRequest bp;
-        bp.address = *breakpoint.address;
-        bp.condition = breakpoint.condition;
-        breakpoint_requests.push_back(std::move(bp));
-      }
+      const std::optional<u32>& address = addresses[i];
+      entry.emplace("verified", address.has_value());
+      if (address)
+        entry.emplace("instructionReference", Json::FormatAddress(*address));
       breakpoints.emplace_back(std::move(entry));
     }
-
-    // DESNOTE(jbarber, 2026-07-02): DAP setBreakpoints is authoritative for the
-    // given source, so a bare source address with no breakpoint entries clears
-    // it. We still honor a base-only request (no entries) by setting that one.
-    if (arguments.breakpoints.empty() && arguments.base)
-    {
-      CodeBreakpointRequest bp;
-      bp.address = *arguments.base;
-      breakpoint_requests.push_back(std::move(bp));
-    }
-
-    m_controller.SetCodeBreakpoints(std::move(breakpoint_requests));
 
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
@@ -534,7 +616,7 @@ private:
     // DESNOTE(jbarber, 2026-07-03): Dolphin keeps a single code-breakpoint list,
     // so instruction breakpoints share storage with source breakpoints; each
     // authoritative set replaces the whole list (as the GDB stub also does).
-    m_controller.SetCodeBreakpoints(std::move(breakpoint_requests));
+    m_controller.UpdateInstructionBreakpoints(std::move(breakpoint_requests));
 
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
@@ -968,6 +1050,7 @@ private:
   // the CPU thread; keep allocation race-free.
   std::atomic<int> m_next_seq{1};
   bool m_was_stepping = false;
+  bool m_debugging_started = false;
 
   std::mutex m_event_mutex;
   std::vector<std::string> m_pending_events;

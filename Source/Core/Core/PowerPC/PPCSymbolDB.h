@@ -69,6 +69,8 @@ public:
   bool HasSourceLineInfo() const;
   std::optional<SourceLine> GetSourceLine(u32 addr) const;
   std::optional<u32> GetLineAddress(std::string_view file, u32 line) const;
+  std::optional<u32> FindSourceFileIndex(std::string_view file_query) const;
+  std::optional<u32> GetLineAddressForQuery(std::string_view file_query, u32 line) const;
   const std::vector<std::string>& GetSourceFiles() const;
 
   void PrintCalls(u32 funcAddr) const;

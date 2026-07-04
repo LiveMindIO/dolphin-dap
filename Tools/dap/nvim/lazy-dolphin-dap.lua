@@ -1,40 +1,53 @@
 --- lazy.nvim plugin spec — copy to ~/.config/nvim/lua/plugins/dolphin-dap.lua
 ---
 --- Adjust `DOLPHIN_DAP_RT` if your dolphin-dap checkout lives elsewhere.
+--- Do not add a separate `nvim-dap.lua` spec — Lazy merges by plugin id and
+--- `enabled = false` there would disable this plugin too.
 
 local DOLPHIN_DAP_RT = vim.fn.expand("~/projects/ai/yolo/dolphin-dap/Tools/dap/nvim")
+local rtp_ready = false
 
-local function setup_dolphin_dap()
-  vim.opt.rtp:append(DOLPHIN_DAP_RT)
-  require("dolphin-dap").setup()
+--- Lazy keymaps can run before `config`; always call this before `require("dolphin-dap")`.
+local function dolphin_dap()
+  if not rtp_ready then
+    vim.opt.rtp:append(DOLPHIN_DAP_RT)
+    rtp_ready = true
+  end
+  local mod = require("dolphin-dap")
+  mod.ensure_setup()
+  return mod
 end
 
 local LazyMapping = require("lib.lazy_mapping")
 
 return {
   {
-    "rcarriga/nvim-dap-ui",
+    "mfussenegger/nvim-dap",
+    name = "dolphin-dap",
     dependencies = {
-      "mfussenegger/nvim-dap",
+      "rcarriga/nvim-dap-ui",
       "nvim-neotest/nvim-nio",
     },
-    config = function()
-      setup_dolphin_dap()
+    init = function()
+      vim.opt.rtp:append(DOLPHIN_DAP_RT)
+      rtp_ready = true
     end,
-  },
-  {
-    "mfussenegger/nvim-dap",
+    config = function()
+      dolphin_dap()
+    end,
     keys = function()
-      local dap = require("dap")
       return {
-        LazyMapping.map("<leader>dc", "Continue / start Dolphin DAP", function()
-          dap.continue()
+        LazyMapping.map("<leader>dc", "Continue Dolphin DAP (attach if needed)", function()
+          dolphin_dap().continue()
         end),
         LazyMapping.map("<leader>da", "Pick Dolphin DAP configuration", function()
-          require("dolphin-dap").run()
+          dolphin_dap().run()
+        end),
+        LazyMapping.map("<leader>dA", "Attach to running Dolphin", function()
+          dolphin_dap().attach()
         end),
         LazyMapping.map("<leader>dr", "Toggle DAP REPL", function()
-          dap.repl.toggle()
+          require("dap").repl.toggle()
         end),
         LazyMapping.map("<leader>du", "Toggle DAP UI", function()
           require("dapui").toggle()
@@ -43,19 +56,19 @@ return {
           require("dap.ui.widgets").hover()
         end),
         LazyMapping.map("<leader>dt", "Toggle DAP breakpoint", function()
-          dap.toggle_breakpoint()
+          require("dap").toggle_breakpoint()
         end),
         LazyMapping.map("<leader>dso", "DAP step over", function()
-          dap.step_over()
+          require("dap").step_over()
         end),
         LazyMapping.map("<leader>dsi", "DAP step into", function()
-          dap.step_into()
+          require("dap").step_into()
         end),
         LazyMapping.map("<leader>dO", "DAP step out", function()
-          dap.step_out()
+          require("dap").step_out()
         end),
         LazyMapping.map("<leader>dl", "Re-run last DAP session", function()
-          dap.run_last()
+          require("dap").run_last()
         end),
       }
     end,

@@ -193,11 +193,11 @@ void DapDebugController::StepOut(std::chrono::milliseconds timeout_ms)
   power_pc.SetMode(old_mode);
 }
 
-void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints)
+void DapDebugController::ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
 {
   auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
   breakpoint_manager.Clear();
-  for (CodeBreakpointRequest& request : breakpoints)
+  for (const CodeBreakpointRequest& request : breakpoints)
   {
     std::optional<Expression> condition;
     if (request.condition && !request.condition->empty())
@@ -205,6 +205,109 @@ void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> b
 
     breakpoint_manager.Add(request.address, true, false, std::move(condition));
   }
+}
+
+void DapDebugController::ReapplyCodeBreakpoints()
+{
+  std::vector<CodeBreakpointRequest> breakpoints;
+  for (const auto& [_, source_breakpoints] : m_source_breakpoints)
+  {
+    breakpoints.insert(breakpoints.end(), source_breakpoints.begin(), source_breakpoints.end());
+  }
+  breakpoints.insert(breakpoints.end(), m_instruction_breakpoints.begin(),
+                     m_instruction_breakpoints.end());
+  ApplyCodeBreakpoints(breakpoints);
+}
+
+void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints)
+{
+  m_source_breakpoints.clear();
+  m_instruction_breakpoints.clear();
+  ApplyCodeBreakpoints(breakpoints);
+}
+
+std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
+    const SourceBreakpointContext& context, const u32 line)
+{
+  Core::CPUThreadGuard guard(m_system);
+  auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
+
+  if (symbol_db.HasSourceLineInfo())
+  {
+    if (context.source_reference && *context.source_reference > 0)
+    {
+      const auto& files = symbol_db.GetSourceFiles();
+      if (static_cast<size_t>(*context.source_reference) <= files.size())
+      {
+        if (const std::optional<u32> address =
+                symbol_db.GetLineAddress(files[*context.source_reference - 1], line))
+          return address;
+      }
+    }
+
+    if (context.source_path)
+    {
+      if (const std::optional<u32> address =
+              symbol_db.GetLineAddressForQuery(*context.source_path, line))
+        return address;
+    }
+
+    if (context.source_name)
+    {
+      if (const std::optional<u32> address =
+              symbol_db.GetLineAddressForQuery(*context.source_name, line))
+        return address;
+    }
+  }
+
+  std::optional<u32> base;
+  if (context.source_path)
+    base = Json::ParseHexAddress(*context.source_path);
+  if (!base && context.source_name)
+    base = Json::ParseHexAddress(*context.source_name);
+  if (!base)
+    return std::nullopt;
+
+  return *base + line * 4;
+}
+
+std::vector<std::optional<u32>> DapDebugController::UpdateSourceBreakpoints(
+    const std::string_view source_key, const SourceBreakpointContext& context,
+    std::vector<SourceBreakpointSpec> breakpoints)
+{
+  std::vector<CodeBreakpointRequest> resolved;
+  resolved.reserve(breakpoints.size());
+
+  std::vector<std::optional<u32>> addresses;
+  addresses.reserve(breakpoints.size());
+
+  for (SourceBreakpointSpec& spec : breakpoints)
+  {
+    std::optional<u32> address = ResolveSourceLineBreakpoint(context, spec.line);
+    addresses.push_back(address);
+    if (!address)
+      continue;
+
+    CodeBreakpointRequest request;
+    request.address = *address;
+    request.condition = std::move(spec.condition);
+    resolved.push_back(std::move(request));
+  }
+
+  if (resolved.empty())
+    m_source_breakpoints.erase(std::string(source_key));
+  else
+    m_source_breakpoints[std::string(source_key)] = std::move(resolved);
+
+  ReapplyCodeBreakpoints();
+  return addresses;
+}
+
+void DapDebugController::UpdateInstructionBreakpoints(
+    std::vector<CodeBreakpointRequest> breakpoints)
+{
+  m_instruction_breakpoints = std::move(breakpoints);
+  ReapplyCodeBreakpoints();
 }
 
 void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)

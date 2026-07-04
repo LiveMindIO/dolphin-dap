@@ -75,4 +75,19 @@ TEST(DwarfReaderTest, ParseReturnsNulloptWhenNoFunctionsOrLines)
   };
   EXPECT_FALSE(Core::Debug::Dwarf::Parse(padding_only, {}, true));
 }
+
+TEST(DwarfReaderTest, ParseMultiCompileUnitSiblingChain)
+{
+  const std::optional<Core::Debug::Dwarf::ParseResult> result = Core::Debug::Dwarf::Parse(
+      DwarfTestFixture::kMultiCuDebugSection, DwarfTestFixture::kMultiCuLineSection, true);
+  ASSERT_TRUE(result);
+  ASSERT_EQ(result->files.size(), 2U);
+  EXPECT_EQ(result->files[0], DwarfTestFixture::kFirstCompileUnitName);
+  EXPECT_EQ(result->files[1], DwarfTestFixture::kSecondCompileUnitName);
+  ASSERT_EQ(result->functions.size(), 2U);
+  EXPECT_EQ(result->functions[0].name, DwarfTestFixture::kFirstFunctionName);
+  EXPECT_EQ(result->functions[1].name, DwarfTestFixture::kSecondFunctionName);
+  EXPECT_EQ(result->functions[1].low_pc, DwarfTestFixture::kSecondFunctionAddress);
+  ASSERT_GE(result->lines.size(), 4U);
+}
 }  // namespace

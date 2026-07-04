@@ -383,6 +383,51 @@ TEST_F(DapControllerTest, SetCodeBreakpointsAddsThenReplaces)
   EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003300));
 }
 
+TEST_F(DapControllerTest, UpdateSourceBreakpointsMergesAcrossSources)
+{
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  DAP::DapDebugController controller(System());
+
+  {
+    Core::CPUThreadGuard guard(System());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                         DwarfTestFixture::kDebugSection,
+                                         DwarfTestFixture::kLineSection));
+  }
+
+  const DAP::SourceBreakpointContext first_context{.source_reference = 1};
+  controller.UpdateSourceBreakpoints("ref:1", first_context,
+                                     {{.line = 1}, {.line = 2}});
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kFunctionAddress));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kLineTwoAddress));
+
+  const DAP::SourceBreakpointContext second_context{.source_path = "other.c"};
+  controller.UpdateSourceBreakpoints("path:other.c", second_context, {{.line = 10}});
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kFunctionAddress));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kLineTwoAddress));
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80001000));
+
+  controller.UpdateSourceBreakpoints("ref:1", first_context, {});
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kFunctionAddress));
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kLineTwoAddress));
+}
+
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesDwarfLineTable)
+{
+  DAP::DapDebugController controller(System());
+  {
+    Core::CPUThreadGuard guard(System());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                         DwarfTestFixture::kDebugSection,
+                                         DwarfTestFixture::kLineSection));
+  }
+
+  const DAP::SourceBreakpointContext context{.source_reference = 1};
+  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 2);
+  ASSERT_TRUE(address);
+  EXPECT_EQ(*address, DwarfTestFixture::kLineTwoAddress);
+}
+
 TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
 {
   DAP::DapDebugController controller(System());

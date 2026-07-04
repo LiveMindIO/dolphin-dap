@@ -121,6 +121,65 @@ std::optional<u32> PPCSymbolDB::GetLineAddress(std::string_view file, u32 line) 
   return best_address;
 }
 
+namespace
+{
+bool SourcePathsMatch(std::string_view registered, std::string_view query)
+{
+  if (registered == query)
+    return true;
+
+  const auto basename = [](std::string_view path) -> std::string_view {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string_view::npos ? path : path.substr(slash + 1);
+  };
+
+  const std::string_view registered_name = basename(registered);
+  const std::string_view query_name = basename(query);
+  if (!registered_name.empty() && registered_name == query_name)
+    return true;
+
+  if (query.size() > registered.size())
+  {
+    const char separator = query[query.size() - registered.size() - 1];
+    if ((separator == '/' || separator == '\\') && query.substr(query.size() - registered.size()) == registered)
+      return true;
+  }
+
+  return false;
+}
+}  // namespace
+
+std::optional<u32> PPCSymbolDB::FindSourceFileIndex(const std::string_view file_query) const
+{
+  std::lock_guard lock(m_mutex);
+  if (file_query.empty() || m_source_files.empty())
+    return std::nullopt;
+
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (SourcePathsMatch(m_source_files[i], file_query))
+      return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddressForQuery(const std::string_view file_query,
+                                                        const u32 line) const
+{
+  const std::optional<u32> file_index = FindSourceFileIndex(file_query);
+  if (!file_index)
+    return std::nullopt;
+
+  std::string file;
+  {
+    std::lock_guard lock(m_mutex);
+    if (*file_index >= m_source_files.size())
+      return std::nullopt;
+    file = m_source_files[*file_index];
+  }
+  return GetLineAddress(file, line);
+}
+
 const std::vector<std::string>& PPCSymbolDB::GetSourceFiles() const
 {
   std::lock_guard lock(m_mutex);

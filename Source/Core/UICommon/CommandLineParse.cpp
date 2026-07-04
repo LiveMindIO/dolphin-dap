@@ -103,7 +103,7 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
       .metavar("<System>.<Section>.<Key>=<Value>")
       .type("string")
       .help("Set a configuration option");
-  parser->add_option("", "--debug-elf")
+  parser->add_option("--debug-elf")
       .action("store")
       .metavar("<file>")
       .type("string")

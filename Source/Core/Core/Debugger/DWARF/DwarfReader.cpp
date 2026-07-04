@@ -341,8 +341,13 @@ std::optional<ParseResult> Parse(std::span<const u8> debug_section,
                      big_endian, &result.lines);
     }
 
+    const u8* const unit_end =
+        unit_info.sibling != 0 && unit_info.sibling < debug_section.size() ?
+            debug_section.data() + unit_info.sibling :
+            section_end;
+
     const u8* child = current + unit_info.length;
-    while (child < section_end)
+    while (child < section_end && child < unit_end)
     {
       DieInfo child_info;
       if (!ParseDie(child, section_end, big_endian, &child_info))
@@ -373,7 +378,16 @@ std::optional<ParseResult> Parse(std::span<const u8> debug_section,
       }
     }
 
-    current += unit_info.length;
+    if (unit_info.sibling != 0)
+    {
+      if (unit_info.sibling >= debug_section.size())
+        break;
+      current = debug_section.data() + unit_info.sibling;
+    }
+    else
+    {
+      current += unit_info.length;
+    }
   }
 
   if (result.functions.empty() && result.lines.empty())

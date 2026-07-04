@@ -167,6 +167,10 @@ protected:
     EXPECT_EQ(init->at("command").to_str(), "initialize");
     EXPECT_TRUE(init->at("success").get<bool>());
 
+    const auto initialized = client.Receive();
+    ASSERT_TRUE(initialized.has_value());
+    EXPECT_EQ(initialized->at("event").to_str(), "initialized");
+
     client.Send(R"({
       "seq": 2,
       "type": "request",
@@ -962,6 +966,47 @@ TEST_F(DapSessionTest, BreakpointLocationsWithDwarfSourceReference)
   ASSERT_EQ(breakpoints.size(), 2u);
   EXPECT_EQ(breakpoints[0].get<picojson::object>().at("line").get<double>(), 1.0);
   EXPECT_EQ(breakpoints[1].get<picojson::object>().at("line").get<double>(), 2.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetBreakpointsWithDwarfSourceReference)
+{
+  {
+    Core::CPUThreadGuard guard(Core::System::GetInstance());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard,
+                                        Core::System::GetInstance().GetPowerPC().GetSymbolDB(),
+                                        DwarfTestFixture::kDebugSection,
+                                        DwarfTestFixture::kLineSection));
+  }
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setBreakpoints",
+    "arguments": {
+      "sourceReference": 1,
+      "breakpoints": [{"line": 2}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 1u);
+  EXPECT_TRUE(breakpoints[0].get<picojson::object>().at("verified").get<bool>());
+
+  auto& bps = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
+  EXPECT_TRUE(bps.IsAddressBreakPoint(DwarfTestFixture::kLineTwoAddress));
 
   client.Send(R"({
     "seq": 9,

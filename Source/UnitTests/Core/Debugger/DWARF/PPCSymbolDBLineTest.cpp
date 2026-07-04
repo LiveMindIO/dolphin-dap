@@ -131,6 +131,17 @@ TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)
   EXPECT_FALSE(SymbolDB().GetLineAddress("missing.c", 1).has_value());
 }
 
+TEST_F(PPCSymbolDBLineTest, GetLineAddressForQueryMatchesFullEditorPath)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("gm_16AE.c");
+  SymbolDB().AddLineEntry(0x80012340, file_index, 1126);
+
+  const std::optional<u32> address =
+      SymbolDB().GetLineAddressForQuery("/home/dev/melee/src/melee/gm/gm_16AE.c", 1126);
+  ASSERT_TRUE(address);
+  EXPECT_EQ(*address, 0x80012340U);
+}
+
 TEST_F(PPCSymbolDBLineTest, AddSourceFileDeduplicatesPaths)
 {
   const u32 first = SymbolDB().AddSourceFile("foo.c");

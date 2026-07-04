@@ -3,7 +3,7 @@
 Start the headless emulator with the DAP server listening on a TCP port:
 
 ```bash
-dolphin-emu-nogui -C Main.General.DAPPort=5678 --exec /path/to/game.iso --platform headless
+dolphin-emu-nogui -C Dolphin.General.DAPPort=5678 --exec /path/to/game.iso --platform headless
 ```
 
 Or persist in `Dolphin.ini`:
@@ -76,13 +76,13 @@ Info…** in the Qt UI, booting a debug ELF, or the sidecar path:
 
 ```bash
 dolphin-emu-nogui \
-  -C Main.General.DAPPort=5678 \
+  -C Dolphin.General.DAPPort=5678 \
   --debug-elf /path/to/main.elf \
   --exec /path/to/game.iso \
   --platform headless
 ```
 
-(`-C Main.Debug.DwarfElf=...` is equivalent.) See `.ai-doc-reference/dwarf-1.1-format.md`.
+(`-C Dolphin.Debug.DwarfElf=...` is equivalent.) See `.ai-doc-reference/dwarf-1.1-format.md`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/

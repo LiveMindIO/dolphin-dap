@@ -23,11 +23,15 @@ connects over TCP (or a Unix socket on Linux) after Dolphin is listening.
    # edit iso / elf / dolphin binary paths
    ```
 
-4. `:Lazy sync`, restart Neovim, open a `.c` file, then:
+Buffer diagnostics moved to `<leader>ld` so `<leader>d*` is free for DAP (see `dolphin-dap.lua`).
 
-   - `<leader>da` — pick **attach** or **launch**
-   - `<leader>dc` — continue / start debugging
+4. `:Lazy sync`, restart Neovim, open a `.c` file in your decomp tree, then:
+
+   - `<leader>dA` — attach to a running Dolphin (manual terminal workflow)
+   - `<leader>da` — pick attach / launch configuration
+   - `<leader>dc` — attach if needed, then continue (unpause the game)
    - `<leader>du` — toggle DAP UI
+   - `:DolphinDapCmd` — copy a manual terminal launch command (attach workflow)
 
 ## Workflows
 
@@ -37,19 +41,56 @@ Terminal:
 
 ```bash
 dolphin-emu-nogui \
-  -C Main.General.DAPPort=5678 \
+  -C Dolphin.General.DAPPort=5678 \
   --debug-elf /path/to/main.elf \
   --exec /path/to/game.iso \
   --platform headless
 ```
 
-Wait for `DAP: waiting for client to connect...`, then in Neovim choose
-**Dolphin attach (:5678)**.
+Wait for boot (or `ss -tlnp | grep 5678`), then in Neovim choose **Dolphin attach (:5678)**.
+
+**Important:** `-C` must use the `Dolphin` system prefix (`Dolphin.General.DAPPort=5678`).
+`Main.General.DAPPort=5678` is silently ignored and DAP will not listen.
+
+GUI build (same flags, no `--platform headless`):
+
+```bash
+dolphin-emu \
+  -C Dolphin.General.DAPPort=5678 \
+  --debug-elf /path/to/main.elf \
+  --exec /path/to/game.iso
+```
+
+Or pick **Dolphin attach (Qt spawn, :5678)** in Neovim to start `dolphin-emu` and
+connect on the configured port.
+
+Nogui with an emulator window (no Qt UI, but video output):
+
+```bash
+dolphin-emu-nogui \
+  -C Dolphin.General.DAPPort=5678 \
+  --debug-elf /path/to/main.elf \
+  --exec /path/to/game.iso \
+  --platform x11
+```
+
+On Linux use `x11`; on Windows `win32`; on macOS `macos`. Or pick **Dolphin launch
+nogui (video, x11)** / **Dolphin attach (nogui video spawn, :5678)** in Neovim.
 
 ### Launch (Neovim starts Dolphin)
 
-Requires `iso` in `.dolphin-dap.lua`. Neovim spawns `dolphin-emu-nogui` with a
-dynamic DAP port and connects automatically.
+Requires `iso` in `.dolphin-dap.lua`. Neovim spawns Dolphin with a dynamic DAP port
+and connects automatically:
+
+| Config | Binary | Platform |
+|--------|--------|----------|
+| **Dolphin launch headless** | `dolphin-emu-nogui` | `headless` (no video) |
+| **Dolphin launch nogui (video, …)** | `dolphin-emu-nogui` | `x11` / `win32` / `macos` |
+| **Dolphin launch (Qt)** | `dolphin-emu` | _(none — full Qt UI)_ |
+
+Set `platform = "x11"` (or `"auto"`) in `.dolphin-dap.lua` to override the default
+video backend. Optional `dolphin_gui` overrides the Qt binary path (defaults to
+`dolphin` with `-nogui` stripped).
 
 ## Source paths / DWARF
 
@@ -64,8 +105,16 @@ breakpoints are wired through the line table.
 
 ## Unix socket (Linux)
 
+Start Dolphin with:
+
+```bash
+dolphin-emu-nogui -C Dolphin.General.DAPSocket=/tmp/dolphin-dap.sock --exec /path/to/game.iso
+```
+
+Or set in `~/.config/dolphin-emu/Dolphin.ini`:
+
 ```ini
-# Dolphin.ini
+[General]
 DAPSocket = /tmp/dolphin-dap.sock
 ```
 

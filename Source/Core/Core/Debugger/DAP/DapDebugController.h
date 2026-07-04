@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -89,6 +90,19 @@ struct CodeBreakpointRequest
   std::optional<std::string> condition;
 };
 
+struct SourceBreakpointContext
+{
+  std::optional<int> source_reference;
+  std::optional<std::string> source_path;
+  std::optional<std::string> source_name;
+};
+
+struct SourceBreakpointSpec
+{
+  u32 line = 0;
+  std::optional<std::string> condition;
+};
+
 struct DataBreakpointRequest
 {
   u32 address = 0;
@@ -131,6 +145,10 @@ public:
   // (e.g. an infinite loop) and is injectable so it can be exercised in tests.
   void StepOut(std::chrono::milliseconds timeout = std::chrono::seconds(5));
   void SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
+  std::vector<std::optional<u32>> UpdateSourceBreakpoints(std::string_view source_key,
+                                                          const SourceBreakpointContext& context,
+                                                          std::vector<SourceBreakpointSpec> breakpoints);
+  void UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
   void SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
   // Evaluates a PPC debugger expression (same syntax as breakpoint conditions).
   std::optional<std::string> EvaluateExpression(std::string_view expression);
@@ -162,7 +180,14 @@ public:
   // Returns pending PPC exceptions, or nullopt when none are raised.
   std::optional<ExceptionInfo> GetExceptionInfo();
 
+  std::optional<u32> ResolveSourceLineBreakpoint(const SourceBreakpointContext& context, u32 line);
+
 private:
+  void ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints);
+  void ReapplyCodeBreakpoints();
+
   Core::System& m_system;
+  std::map<std::string, std::vector<CodeBreakpointRequest>> m_source_breakpoints;
+  std::vector<CodeBreakpointRequest> m_instruction_breakpoints;
 };
 }  // namespace DAP
