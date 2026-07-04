@@ -17,16 +17,20 @@
 #include <gtest/gtest.h>
 
 #include "Common/CommonTypes.h"
+#include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
+#include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/BreakPoints.h"
 #include "Core/PowerPC/Gekko.h"
+#include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "../DWARF/DwarfTestFixture.h"
 
 namespace
 {
@@ -59,6 +63,7 @@ protected:
     power_pc.MSRUpdated();
 
     power_pc.GetBreakPoints().Clear();
+    System().GetPPCSymbolDB().Clear();
   }
 
   void TearDown() override
@@ -911,5 +916,118 @@ TEST_F(DapControllerTest, GetExceptionInfoReportsRealExceptionAlongsideMemcheckH
   EXPECT_EQ(info->exceptions, static_cast<u32>(EXCEPTION_PROGRAM));
   EXPECT_NE(info->description.find("Program"), std::string::npos);
   EXPECT_EQ(info->description.find("DSI"), std::string::npos);
+}
+
+TEST_F(DapControllerTest, GetLoadedSourcesListsFunctionSymbols)
+{
+  Core::CPUThreadGuard guard(System());
+  System().GetPowerPC().GetSymbolDB().AddKnownSymbol(guard, TEST_ADDRESS, 0x100, "main", "game.elf",
+                                                     Common::Symbol::Type::Function);
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].source_reference, static_cast<int>(TEST_ADDRESS));
+  EXPECT_EQ(sources[0].name, "game.elf");
+  EXPECT_EQ(sources[0].path, "0x00003100");
+}
+
+TEST_F(DapControllerTest, GetSourceReturnsDisassembly)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+
+  DAP::DapDebugController controller(System());
+  const auto source = controller.GetSource(TEST_ADDRESS, 0, 0);
+  ASSERT_TRUE(source.has_value());
+  EXPECT_EQ(source->mime_type, "text/x-disassembly");
+  EXPECT_NE(source->content.find("nop"), std::string::npos);
+}
+
+TEST_F(DapControllerTest, GetSourceRejectsInvalidBase)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.GetSource(INVALID_ADDRESS, 0, 0).has_value());
+}
+
+TEST_F(DapControllerTest, GetBreakpointLocationsStopsAtInvalidMemory)
+{
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::BreakpointLocation> locations =
+      controller.GetBreakpointLocations(TEST_ADDRESS, 0, 3);
+  ASSERT_EQ(locations.size(), 4u);
+  EXPECT_EQ(locations[0].line, 0);
+  EXPECT_EQ(locations[3].line, 3);
+}
+
+TEST_F(DapControllerTest, GetStackTraceIncludesSourceForKnownSymbol)
+{
+  Core::CPUThreadGuard guard(System());
+  System().GetPowerPC().GetSymbolDB().AddKnownSymbol(guard, TEST_ADDRESS, 0x100, "main", "game.elf",
+                                                     Common::Symbol::Type::Function);
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS + 8;
+  LR(ppc_state) = 0;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+  ASSERT_EQ(trace.frames.size(), 1u);
+  ASSERT_TRUE(trace.frames[0].source_base.has_value());
+  EXPECT_EQ(*trace.frames[0].source_base, TEST_ADDRESS);
+  EXPECT_EQ(trace.frames[0].source_line, 2);
+}
+
+TEST_F(DapControllerTest, RestartResetsPpcState)
+{
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS;
+  ppc_state.gpr[3] = 0xdeadbeef;
+
+  DAP::DapDebugController controller(System());
+  controller.Restart();
+
+  EXPECT_NE(ppc_state.pc, TEST_ADDRESS);
+  EXPECT_EQ(ppc_state.gpr[3], 0u);
+}
+
+TEST_F(DapControllerTest, TerminateBreaksCpu)
+{
+  DAP::DapDebugController controller(System());
+  controller.Terminate();
+  EXPECT_TRUE(System().GetCPU().IsStepping());
+}
+
+TEST_F(DapControllerTest, GetStackTraceUsesDwarfSourceLineWhenAvailable)
+{
+  Core::CPUThreadGuard guard(System());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                       DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = DwarfTestFixture::kLineTwoAddress;
+  LR(ppc_state) = 0;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+  ASSERT_EQ(trace.frames.size(), 1u);
+  ASSERT_TRUE(trace.frames[0].source_file.has_value());
+  EXPECT_EQ(*trace.frames[0].source_file, DwarfTestFixture::kCompileUnitName);
+  EXPECT_EQ(trace.frames[0].source_line, 2);
+}
+
+TEST_F(DapControllerTest, GetLoadedSourcesListsDwarfFiles)
+{
+  Core::CPUThreadGuard guard(System());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                       DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, DwarfTestFixture::kCompileUnitName);
+  EXPECT_EQ(sources[0].source_reference, 1);
 }
 }  // namespace

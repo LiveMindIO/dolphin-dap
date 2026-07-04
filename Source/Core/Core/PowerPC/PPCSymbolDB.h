@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/SymbolDB.h"
@@ -18,6 +21,19 @@ class CPUThreadGuard;
 class PPCSymbolDB : public Common::SymbolDB
 {
 public:
+  struct SourceLine
+  {
+    u32 address = 0;
+    std::string file;
+    u32 line = 0;
+  };
+
+  struct LineEntry
+  {
+    u32 file_index = 0;
+    u32 line = 0;
+  };
+
   PPCSymbolDB();
   ~PPCSymbolDB() override;
 
@@ -43,6 +59,18 @@ public:
   bool SaveSymbolMap(const std::string& filename) const;
   bool SaveCodeMap(const Core::CPUThreadGuard& guard, const std::string& filename) const;
 
+  bool Clear(const char* prefix = "");
+
+  // DESNOTE(jbarber, 2026-07-03): Source line info is PPC-scoped (not on Common::Symbol) so
+  // the generic SymbolDB base and DSP symbol maps stay unchanged.
+  u32 AddSourceFile(std::string file);
+  void AddLineEntry(u32 address, u32 file_index, u32 line);
+  void ClearSourceLineInfo();
+  bool HasSourceLineInfo() const;
+  std::optional<SourceLine> GetSourceLine(u32 addr) const;
+  std::optional<u32> GetLineAddress(std::string_view file, u32 line) const;
+  const std::vector<std::string>& GetSourceFiles() const;
+
   void PrintCalls(u32 funcAddr) const;
   void PrintCallers(u32 funcAddr) const;
   void LogFunctionCall(u32 addr);
@@ -58,4 +86,7 @@ private:
 
   static void DetermineNoteLayers(XNoteMap* notes);
   static void FillInCallers(XFuncMap* functions);
+
+  std::vector<std::string> m_source_files;
+  std::map<u32, LineEntry> m_line_table;
 };

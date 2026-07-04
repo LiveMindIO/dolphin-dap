@@ -54,6 +54,13 @@ std::optional<u32> ResolveMemoryReference(const picojson::object& arguments)
     return std::nullopt;
   return Json::ParseHexAddress(*reference);
 }
+
+std::optional<u32> ResolveSourceReference(const picojson::object& arguments)
+{
+  if (const std::optional<s64> reference = ReadNumericFromJson<s64>(arguments, "sourceReference"))
+    return static_cast<u32>(*reference);
+  return ResolveSourceBase(arguments);
+}
 }  // namespace
 
 std::optional<Request> ParseRequest(const picojson::object& message)
@@ -296,6 +303,26 @@ std::optional<GotoArguments> ParseGoto(const picojson::object& arguments)
   GotoArguments result;
   result.thread_id = *thread_id;
   result.target = static_cast<u32>(*target);
+  return result;
+}
+
+SourceRequestArguments ParseSourceRequest(const picojson::object& arguments)
+{
+  SourceRequestArguments result;
+  result.base = ResolveSourceReference(arguments);
+  result.start_line = ReadNumericFromJson<int>(arguments, "startLine").value_or(0);
+  if (const std::optional<int> end_line = ReadNumericFromJson<int>(arguments, "endLine"))
+    result.end_line = *end_line;
+  return result;
+}
+
+BreakpointLocationsArguments ParseBreakpointLocations(const picojson::object& arguments)
+{
+  BreakpointLocationsArguments result;
+  result.base = ResolveSourceBase(arguments);
+  result.start_line = ReadNumericFromJson<int>(arguments, "line").value_or(0);
+  if (const std::optional<int> end_line = ReadNumericFromJson<int>(arguments, "endLine"))
+    result.end_line = *end_line;
   return result;
 }
 

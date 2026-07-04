@@ -453,6 +453,54 @@ TEST(DapProtocol, ParseGotoRejectsMissingTarget)
   EXPECT_FALSE(Protocol::ParseGoto(message).has_value());
 }
 
+TEST(DapProtocol, ParseSourceRequestFromSourceReference)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "sourceReference": 2147487744,
+    "startLine": 2,
+    "endLine": 3
+  })");
+  const auto parsed = Protocol::ParseSourceRequest(message);
+  ASSERT_TRUE(parsed.base.has_value());
+  EXPECT_EQ(*parsed.base, 0x80001000u);
+  EXPECT_EQ(parsed.start_line, 2);
+  EXPECT_EQ(parsed.end_line, 3);
+}
+
+TEST(DapProtocol, ParseSourceRequestFromSourceObject)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "source": {"name": "0x80001000"},
+    "startLine": 1
+  })");
+  const auto parsed = Protocol::ParseSourceRequest(message);
+  ASSERT_TRUE(parsed.base.has_value());
+  EXPECT_EQ(*parsed.base, 0x80001000u);
+  EXPECT_EQ(parsed.start_line, 1);
+  EXPECT_EQ(parsed.end_line, -1);
+}
+
+TEST(DapProtocol, ParseBreakpointLocationsResolvesLineRange)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "source": {"name": "0x80001000"},
+    "line": 1,
+    "endLine": 3
+  })");
+  const auto parsed = Protocol::ParseBreakpointLocations(message);
+  ASSERT_TRUE(parsed.base.has_value());
+  EXPECT_EQ(*parsed.base, 0x80001000u);
+  EXPECT_EQ(parsed.start_line, 1);
+  EXPECT_EQ(parsed.end_line, 3);
+}
+
+TEST(DapProtocol, ParseBreakpointLocationsWithoutSourceIsUnresolved)
+{
+  const auto message = ParseObjectOrDie(R"({"line": 1})");
+  const auto parsed = Protocol::ParseBreakpointLocations(message);
+  EXPECT_FALSE(parsed.base.has_value());
+}
+
 TEST(DapProtocol, DisassemblyInstructionTextIsEscapedOnSerialize)
 {
   // Instruction text with a quote must serialize into valid JSON.

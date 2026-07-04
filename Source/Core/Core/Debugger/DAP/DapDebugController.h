@@ -51,12 +51,36 @@ struct StackFrame
   int id = 0;
   u32 address = 0;
   std::string name;
+  // When DWARF line info is available, source_file holds the path and source_line
+  // is the 1-based source line. Otherwise source_base + source_line map to a
+  // disassembly pseudo-source (instruction index from base).
+  std::optional<std::string> source_file;
+  std::optional<u32> source_base;
+  int source_line = 0;
 };
 
 struct StackTraceResult
 {
   std::vector<StackFrame> frames;
   int total_frames = 0;
+};
+
+struct LoadedSource
+{
+  int source_reference = 0;
+  std::string name;
+  std::string path;
+};
+
+struct SourceContent
+{
+  std::string content;
+  std::string mime_type;
+};
+
+struct BreakpointLocation
+{
+  int line = 0;
 };
 
 struct CodeBreakpointRequest
@@ -118,6 +142,12 @@ public:
                                  std::string_view value);
   std::vector<ThreadInfo> GetThreads();
   StackTraceResult GetStackTrace(int start_frame = 0, int levels = 20);
+  std::vector<LoadedSource> GetLoadedSources();
+  std::optional<SourceContent> GetSource(u32 base_address, int start_line, int end_line);
+  std::vector<BreakpointLocation> GetBreakpointLocations(u32 base_address, int start_line,
+                                                         int end_line);
+  void Restart();
+  void Terminate();
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
   // returns the number written; stops at the first invalid address.

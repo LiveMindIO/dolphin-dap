@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -14,7 +15,10 @@
 #include <fmt/format.h>
 
 #include "Common/Event.h"
+#include "Common/FileUtil.h"
+#include "Common/IOFile.h"
 #include "Common/StringUtil.h"
+#include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/PPCDebugInterface.h"
@@ -24,6 +28,7 @@
 #include "Core/PowerPC/Expression.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/MMU.h"
+#include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
@@ -336,6 +341,26 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
     if (description.empty() || description == "Invalid")
       description = fmt::format("0x{:08x}", address);
     frame.name = std::move(description);
+
+    const Common::Symbol* symbol = power_pc.GetSymbolDB().GetSymbolFromAddr(address);
+    const std::optional<PPCSymbolDB::SourceLine> source_line =
+        power_pc.GetSymbolDB().GetSourceLine(address);
+    if (source_line)
+    {
+      frame.source_file = source_line->file;
+      frame.source_line = static_cast<int>(source_line->line);
+    }
+    else if (symbol != nullptr && symbol->type == Common::Symbol::Type::Function)
+    {
+      frame.source_base = symbol->address;
+      frame.source_line = static_cast<int>((address - symbol->address) / 4);
+    }
+    else
+    {
+      frame.source_base = address;
+      frame.source_line = 0;
+    }
+
     frames.push_back(std::move(frame));
   };
 
@@ -380,6 +405,158 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
 
   result.frames = std::move(frames);
   return result;
+}
+
+std::vector<LoadedSource> DapDebugController::GetLoadedSources()
+{
+  Core::CPUThreadGuard guard(m_system);
+  auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
+
+  std::vector<LoadedSource> sources;
+  if (symbol_db.HasSourceLineInfo())
+  {
+    const auto& files = symbol_db.GetSourceFiles();
+    for (u32 i = 0; i < files.size(); ++i)
+    {
+      LoadedSource source;
+      source.source_reference = static_cast<int>(i + 1);
+      source.path = files[i];
+      source.name = files[i];
+      const size_t slash = source.name.find_last_of("/\\");
+      if (slash != std::string::npos)
+        source.name = source.name.substr(slash + 1);
+      sources.push_back(std::move(source));
+    }
+    return sources;
+  }
+
+  symbol_db.ForEachSymbol([&](const Common::Symbol& symbol) {
+    if (symbol.type != Common::Symbol::Type::Function)
+      return;
+
+    LoadedSource source;
+    source.source_reference = static_cast<int>(symbol.address);
+    source.path = Json::FormatAddress(symbol.address);
+    source.name = symbol.object_name.empty() ? symbol.name : symbol.object_name;
+    if (source.name.empty())
+      source.name = source.path;
+    sources.push_back(std::move(source));
+  });
+  return sources;
+}
+
+std::optional<SourceContent> DapDebugController::GetSource(const u32 base_address,
+                                                           const int start_line, const int end_line)
+{
+  Core::CPUThreadGuard guard(m_system);
+  auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
+
+  const int first_line = std::max(start_line, 0);
+  const int last_line = end_line > first_line ? end_line : first_line + 63;
+  const int line_count = std::min(last_line - first_line + 1, 256);
+
+  if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
+      base_address <= symbol_db.GetSourceFiles().size())
+  {
+    const std::string& path = symbol_db.GetSourceFiles()[base_address - 1];
+    File::IOFile file(path, "r");
+    if (!file)
+      return std::nullopt;
+
+    SourceContent result;
+    result.mime_type = "text/x-c";
+
+    char buffer[4096];
+    const int source_first_line = std::max(first_line, 1);
+    int current_line = 1;
+    while (std::fgets(buffer, sizeof(buffer), file.GetHandle()))
+    {
+      if (current_line > last_line)
+        break;
+      if (current_line >= source_first_line)
+      {
+        if (current_line > source_first_line)
+          result.content += '\n';
+        std::string_view line(buffer);
+        if (!line.empty() && line.back() == '\n')
+          line.remove_suffix(1);
+        if (!line.empty() && line.back() == '\r')
+          line.remove_suffix(1);
+        result.content.append(line);
+      }
+      ++current_line;
+    }
+
+    if (result.content.empty() && current_line == 0)
+      return std::nullopt;
+    return result;
+  }
+
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, base_address))
+    return std::nullopt;
+
+  SourceContent result;
+  result.mime_type = "text/x-disassembly";
+  auto& debug_interface = m_system.GetPowerPC().GetDebugInterface();
+
+  for (int i = 0; i < line_count; ++i)
+  {
+    const u32 addr = base_address + static_cast<u32>((first_line + i) * 4);
+    if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
+      break;
+    if (i > 0)
+      result.content += '\n';
+    result.content += fmt::format("{:08x}: {}", addr, debug_interface.Disassemble(&guard, addr));
+  }
+
+  if (result.content.empty())
+    return std::nullopt;
+  return result;
+}
+
+std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const u32 base_address,
+                                                                           const int start_line,
+                                                                           const int end_line)
+{
+  Core::CPUThreadGuard guard(m_system);
+  std::vector<BreakpointLocation> locations;
+
+  const int first_line = std::max(start_line, 0);
+  const int last_line = end_line >= first_line ? end_line : first_line + 63;
+
+  auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
+  if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
+      base_address <= symbol_db.GetSourceFiles().size())
+  {
+    const std::string& file = symbol_db.GetSourceFiles()[base_address - 1];
+    for (int line = first_line; line <= last_line; ++line)
+    {
+      if (symbol_db.GetLineAddress(file, static_cast<u32>(line)))
+        locations.push_back({line});
+    }
+    return locations;
+  }
+
+  for (int line = first_line; line <= last_line; ++line)
+  {
+    const u32 addr = base_address + static_cast<u32>(line * 4);
+    if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
+      break;
+    locations.push_back({line});
+  }
+  return locations;
+}
+
+void DapDebugController::Restart()
+{
+  Core::CPUThreadGuard guard(m_system);
+  m_system.GetPowerPC().Reset();
+}
+
+void DapDebugController::Terminate()
+{
+  m_system.GetCPU().Break();
+  Core::SetState(m_system, Core::State::Paused);
 }
 
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)

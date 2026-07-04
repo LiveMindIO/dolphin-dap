@@ -148,6 +148,24 @@ struct GotoArguments
 
 std::optional<GotoArguments> ParseGoto(const picojson::object& arguments);
 
+struct SourceRequestArguments
+{
+  std::optional<u32> base;
+  int start_line = 0;
+  int end_line = -1;
+};
+
+SourceRequestArguments ParseSourceRequest(const picojson::object& arguments);
+
+struct BreakpointLocationsArguments
+{
+  std::optional<u32> base;
+  int start_line = 0;
+  int end_line = -1;
+};
+
+BreakpointLocationsArguments ParseBreakpointLocations(const picojson::object& arguments);
+
 // Envelope builders. `seq` is the server's monotonically increasing sequence
 // number; the caller owns its allocation.
 picojson::object MakeResponse(int seq, int request_seq, std::string_view command, bool success,

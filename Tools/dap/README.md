@@ -55,13 +55,34 @@ stack. Conditional breakpoints (`setBreakpoints` `condition`), memory watchpoint
 (`setDataBreakpoints` with hex `dataId`), and `evaluate` for PPC expressions are
 supported.
 
-## Phase 3 (in progress)
+## Phase 3
 
 Execution-control completeness and richer stop semantics:
 `setInstructionBreakpoints` sets code breakpoints from hex `instructionReference`
 values; `gotoTargets`/`goto` move the PC to an address; `stopped` events classify
 the reason (`breakpoint`, `data breakpoint`, `step`) and carry `hitBreakpointIds`;
 `exceptionInfo` reports pending PPC exceptions.
+
+## Phase 4 (in progress)
+
+Source awareness and session lifecycle: `loadedSources` lists real source files
+when DWARF line info is loaded (otherwise hex-address disassembly pseudo-sources);
+`source` returns file contents or disassembly; `breakpointLocations` maps source
+lines to addresses via the line table; stack frames carry `source`/`line` from
+DWARF when available; `terminate` pauses emulation and `restart` resets PPC state.
+
+Import DWARF 1.1 debug info (MWCC `.debug`/`.line`) via **Symbols → Load DWARF/Debug
+Info…** in the Qt UI, booting a debug ELF, or the sidecar path:
+
+```bash
+dolphin-emu-nogui \
+  -C Main.General.DAPPort=5678 \
+  --debug-elf /path/to/main.elf \
+  --exec /path/to/game.iso \
+  --platform headless
+```
+
+(`-C Main.Debug.DwarfElf=...` is equivalent.) See `.ai-doc-reference/dwarf-1.1-format.md`.
 
 Requests are parsed with picojson (the project's JSON library) into typed models
 in `DapProtocol`. `memoryReference` and addresses are hex strings; `readMemory`/
@@ -74,19 +95,22 @@ GDB and DAP are mutually exclusive — do not set `GDBPort`/`GDBSocket` at the s
 ## Automated tests
 
 The DAP server is validated by GoogleTest suites under
-`Source/UnitTests/Core/Debugger/DAP/`. None of them require an ISO, a booted
-game, or the JIT — they follow the same pattern as `PageFaultTest` /
-`PageTableHostMappingTest`: initialize just the memory subsystem, declare the
-test thread as the CPU thread, and drive PPC state directly (with address
-translation off, so effective addresses map straight to physical RAM).
+`Source/UnitTests/Core/Debugger/DAP/` and `Source/UnitTests/Core/Debugger/DWARF/`.
+None of them require an ISO, a booted game, or the JIT — they follow the same
+pattern as `PageFaultTest` / `PageTableHostMappingTest`: initialize just the
+memory subsystem, declare the test thread as the CPU thread, and drive PPC state
+directly (with address translation off, so effective addresses map straight to
+physical RAM).
 
 | Suite | Layer | What it covers |
 |-------|-------|----------------|
 | `DapFramingTest` | transport | `Content-Length` framing encode/decode |
 | `DapJsonTest` | JSON | picojson parsing, hex addresses, base64 |
 | `DapProtocolTest` | protocol | request parsing + response/event building |
-| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read/write, memory read/write (incl. partial/invalid), disassembly, breakpoints |
+| `DapControllerTest` | core integration | `DapDebugController` against a real `Core::System`: register read/write, memory read/write (incl. partial/invalid), disassembly, breakpoints, DWARF source mapping |
 | `DapSessionTest` | end-to-end | full `RunSession` command loop over a `socketpair`: handshake, `setBreakpoints`, `readMemory`, `writeMemory`, `disassemble`, `variables`, `setVariable`, unknown-command error |
+| `DwarfReaderTest` | DWARF parser | DWARF 1.1 `.debug`/`.line` parsing, malformed input |
+| `PPCSymbolDBLineTest` | symbol DB | line table queries, `ImportDwarf`, `Clear` |
 
 `DapSessionTest` connects a `socketpair` to `RunSession` running on a background
 thread (which declares itself the CPU thread, so the controller's
@@ -98,7 +122,7 @@ Build and run:
 
 ```bash
 cmake --build build --target tests
-./build/Binaries/Tests/tests --gtest_filter='Dap*'
+./build/Binaries/Tests/tests --gtest_filter='Dap*:Dwarf*:PPCSymbolDBLine*'
 ```
 
 Note: the tests allocate Dolphin's memory arena via shared memory, so they must

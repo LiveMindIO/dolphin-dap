@@ -24,6 +24,7 @@
 #endif
 
 #include "Common/CommonTypes.h"
+#include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapFraming.h"
 #include "Core/Debugger/DAP/DapJson.h"
@@ -32,6 +33,7 @@
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/Gekko.h"
+#include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
@@ -114,6 +116,7 @@ protected:
     ppc_state.msr.DR = 0;
     power_pc.MSRUpdated();
     power_pc.GetBreakPoints().Clear();
+    power_pc.GetSymbolDB().Clear();
 
     // ori r0,r0,0 (nop) then blr, plus a data pattern for readMemory.
     const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
@@ -207,6 +210,8 @@ TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
   EXPECT_TRUE(caps.at("supportsInstructionBreakpoints").get<bool>());
   EXPECT_TRUE(caps.at("supportsGotoTargetsRequest").get<bool>());
   EXPECT_TRUE(caps.at("supportsExceptionInfoRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsLoadedSourcesRequest").get<bool>());
+  EXPECT_TRUE(caps.at("supportsRestartRequest").get<bool>());
 }
 
 TEST_F(DapSessionTest, SetBreakpointsResolvesAgainstSourceBase)
@@ -786,6 +791,154 @@ TEST_F(DapSessionTest, ExceptionInfoWithoutExceptionFails)
   ASSERT_TRUE(response.has_value());
   EXPECT_EQ(response->at("command").to_str(), "exceptionInfo");
   EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, LoadedSourcesReturnsFunctionSymbol)
+{
+  {
+    Core::CPUThreadGuard guard(Core::System::GetInstance());
+    Core::System::GetInstance().GetPowerPC().GetSymbolDB().AddKnownSymbol(
+        guard, CODE_ADDRESS, 0x100, "main", "game.elf", Common::Symbol::Type::Function);
+  }
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "loadedSources",
+    "arguments": {}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  const auto& sources =
+      response->at("body").get<picojson::object>().at("sources").get<picojson::array>();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].get<picojson::object>().at("name").to_str(), "game.elf");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SourceReturnsDisassembly)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "source",
+    "arguments": {
+      "source": {"name": "0x00003100"},
+      "startLine": 0,
+      "endLine": 0
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto& body = response->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("mimeType").to_str(), "text/x-disassembly");
+  EXPECT_NE(body.at("content").to_str().find("nop"), std::string::npos);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, BreakpointLocationsReturnsInstructionLines)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "breakpointLocations",
+    "arguments": {
+      "source": {"name": "0x00003100"},
+      "line": 0,
+      "endLine": 1
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 2u);
+  EXPECT_EQ(breakpoints[0].get<picojson::object>().at("line").get<double>(), 0.0);
+  EXPECT_EQ(breakpoints[1].get<picojson::object>().at("line").get<double>(), 1.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, RestartEmitsStopped)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "restart",
+    "arguments": {}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("command").to_str(), "restart");
+
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "restart");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, TerminateEmitsTerminated)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "terminate",
+    "arguments": {}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("command").to_str(), "terminate");
+
+  const auto terminated = client.Receive();
+  ASSERT_TRUE(terminated.has_value());
+  EXPECT_EQ(terminated->at("event").to_str(), "terminated");
 
   client.Send(R"({
     "seq": 9,

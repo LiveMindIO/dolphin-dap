@@ -22,7 +22,8 @@ class CommandLineConfigLayerLoader final : public Config::ConfigLayerLoader
 {
 public:
   CommandLineConfigLayerLoader(const std::list<std::string>& args, const std::string& video_backend,
-                               const std::string& audio_backend, bool batch, bool debugger)
+                               const std::string& audio_backend, bool batch, bool debugger,
+                               std::string debug_elf)
       : ConfigLayerLoader(Config::LayerType::CommandLine)
   {
     if (!video_backend.empty())
@@ -41,6 +42,9 @@ public:
 
     if (debugger)
       m_values.emplace_back(Config::MAIN_ENABLE_DEBUGGING.GetLocation(), ValueToString(true));
+
+    if (!debug_elf.empty())
+      m_values.emplace_back(Config::MAIN_DEBUG_DWARF_ELF.GetLocation(), std::move(debug_elf));
 
     // Arguments are in the format of <System>.<Section>.<Key>=Value
     for (const auto& arg : args)
@@ -99,6 +103,11 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
       .metavar("<System>.<Section>.<Key>=<Value>")
       .type("string")
       .help("Set a configuration option");
+  parser->add_option("", "--debug-elf")
+      .action("store")
+      .metavar("<file>")
+      .type("string")
+      .help("Import DWARF 1.1 debug info from a sidecar ELF (e.g. main.elf when booting an ISO)");
   parser->add_option("-s", "--save_state")
       .action("store")
       .metavar("<file>")
@@ -133,10 +142,15 @@ static void AddConfigLayer(const optparse::Values& options)
   if (options.is_set_by_user("config"))
     config_args = options.all("config");
 
+  std::string debug_elf;
+  if (options.is_set("debug_elf"))
+    debug_elf = static_cast<const char*>(options.get("debug_elf"));
+
   Config::AddLayer(std::make_unique<CommandLineConfigLayerLoader>(
       std::move(config_args), static_cast<const char*>(options.get("video_backend")),
       static_cast<const char*>(options.get("audio_emulation")),
-      static_cast<bool>(options.get("batch")), static_cast<bool>(options.get("debugger"))));
+      static_cast<bool>(options.get("batch")), static_cast<bool>(options.get("debugger")),
+      std::move(debug_elf)));
 }
 
 optparse::Values& ParseArguments(optparse::OptionParser* parser, int argc, char** argv)

@@ -248,6 +248,8 @@ private:
     capabilities.emplace("supportsInstructionBreakpoints", true);
     capabilities.emplace("supportsGotoTargetsRequest", true);
     capabilities.emplace("supportsExceptionInfoRequest", true);
+    capabilities.emplace("supportsLoadedSourcesRequest", true);
+    capabilities.emplace("supportsRestartRequest", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -367,6 +369,36 @@ private:
     if (command == "exceptionInfo")
     {
       HandleExceptionInfo(*request);
+      return;
+    }
+
+    if (command == "loadedSources")
+    {
+      HandleLoadedSources(*request);
+      return;
+    }
+
+    if (command == "source")
+    {
+      HandleSource(*request);
+      return;
+    }
+
+    if (command == "breakpointLocations")
+    {
+      HandleBreakpointLocations(*request);
+      return;
+    }
+
+    if (command == "terminate")
+    {
+      HandleTerminate(*request);
+      return;
+    }
+
+    if (command == "restart")
+    {
+      HandleRestart(*request);
       return;
     }
 
@@ -561,6 +593,90 @@ private:
     Respond(request.seq, "exceptionInfo", std::move(body));
   }
 
+  void HandleLoadedSources(const Protocol::Request& request)
+  {
+    picojson::array sources;
+    for (const LoadedSource& source : m_controller.GetLoadedSources())
+    {
+      picojson::object entry;
+      entry.emplace("sourceReference", static_cast<double>(source.source_reference));
+      entry.emplace("name", source.name);
+      entry.emplace("path", source.path);
+      sources.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("sources", std::move(sources));
+    Respond(request.seq, "loadedSources", std::move(body));
+  }
+
+  void HandleSource(const Protocol::Request& request)
+  {
+    const Protocol::SourceRequestArguments arguments =
+        Protocol::ParseSourceRequest(request.arguments);
+    if (!arguments.base)
+    {
+      RespondError(request.seq, "source", "invalid source arguments");
+      return;
+    }
+
+    const std::optional<SourceContent> content =
+        m_controller.GetSource(*arguments.base, arguments.start_line, arguments.end_line);
+    if (!content)
+    {
+      RespondError(request.seq, "source", "source unavailable");
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("content", content->content);
+    body.emplace("mimeType", content->mime_type);
+    Respond(request.seq, "source", std::move(body));
+  }
+
+  void HandleBreakpointLocations(const Protocol::Request& request)
+  {
+    const Protocol::BreakpointLocationsArguments arguments =
+        Protocol::ParseBreakpointLocations(request.arguments);
+    if (!arguments.base)
+    {
+      RespondError(request.seq, "breakpointLocations", "invalid breakpointLocations arguments");
+      return;
+    }
+
+    picojson::array breakpoints;
+    for (const BreakpointLocation& location : m_controller.GetBreakpointLocations(
+             *arguments.base, arguments.start_line, arguments.end_line))
+    {
+      picojson::object entry;
+      entry.emplace("line", static_cast<double>(location.line));
+      breakpoints.emplace_back(std::move(entry));
+    }
+
+    picojson::object body;
+    body.emplace("breakpoints", std::move(breakpoints));
+    Respond(request.seq, "breakpointLocations", std::move(body));
+  }
+
+  void HandleTerminate(const Protocol::Request& request)
+  {
+    m_controller.Terminate();
+    Respond(request.seq, "terminate", picojson::object{});
+
+    picojson::object body;
+    body.emplace("restart", false);
+    QueueEvent("terminated", std::move(body));
+    FlushEvents();
+  }
+
+  void HandleRestart(const Protocol::Request& request)
+  {
+    m_controller.Restart();
+    Respond(request.seq, "restart", picojson::object{});
+    SendStoppedEvent("restart");
+    SyncSteppingBaseline();
+  }
+
   void HandleSetDataBreakpoints(const Protocol::Request& request)
   {
     const Protocol::SetDataBreakpointsArguments arguments =
@@ -677,7 +793,29 @@ private:
       entry.emplace("id", static_cast<double>(frame.id));
       entry.emplace("name", frame.name);
       entry.emplace("instructionPointerReference", Json::FormatAddress(frame.address));
-      entry.emplace("line", 0.0);
+      if (frame.source_file)
+      {
+        picojson::object source;
+        source.emplace("path", *frame.source_file);
+        const size_t slash = frame.source_file->find_last_of("/\\");
+        const std::string name =
+            slash != std::string::npos ? frame.source_file->substr(slash + 1) : *frame.source_file;
+        source.emplace("name", name);
+        entry.emplace("source", std::move(source));
+        entry.emplace("line", static_cast<double>(frame.source_line));
+      }
+      else if (frame.source_base)
+      {
+        picojson::object source;
+        source.emplace("name", Json::FormatAddress(*frame.source_base));
+        source.emplace("path", Json::FormatAddress(*frame.source_base));
+        entry.emplace("source", std::move(source));
+        entry.emplace("line", static_cast<double>(frame.source_line));
+      }
+      else
+      {
+        entry.emplace("line", 0.0);
+      }
       entry.emplace("column", 0.0);
       stack_frames.emplace_back(std::move(entry));
     }

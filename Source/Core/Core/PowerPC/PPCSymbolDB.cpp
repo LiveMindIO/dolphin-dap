@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <sstream>
 #include <string>
@@ -32,6 +33,99 @@
 PPCSymbolDB::PPCSymbolDB() = default;
 
 PPCSymbolDB::~PPCSymbolDB() = default;
+
+bool PPCSymbolDB::Clear(const char* prefix)
+{
+  ClearSourceLineInfo();
+  return Common::SymbolDB::Clear(prefix);
+}
+
+u32 PPCSymbolDB::AddSourceFile(std::string file)
+{
+  std::lock_guard lock(m_mutex);
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (m_source_files[i] == file)
+      return i;
+  }
+  const u32 index = static_cast<u32>(m_source_files.size());
+  m_source_files.push_back(std::move(file));
+  return index;
+}
+
+void PPCSymbolDB::AddLineEntry(u32 address, u32 file_index, u32 line)
+{
+  std::lock_guard lock(m_mutex);
+  m_line_table[address] = LineEntry{file_index, line};
+}
+
+void PPCSymbolDB::ClearSourceLineInfo()
+{
+  std::lock_guard lock(m_mutex);
+  m_source_files.clear();
+  m_line_table.clear();
+}
+
+bool PPCSymbolDB::HasSourceLineInfo() const
+{
+  std::lock_guard lock(m_mutex);
+  return !m_line_table.empty();
+}
+
+std::optional<PPCSymbolDB::SourceLine> PPCSymbolDB::GetSourceLine(u32 addr) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty())
+    return std::nullopt;
+
+  auto it = m_line_table.upper_bound(addr);
+  if (it == m_line_table.begin())
+    return std::nullopt;
+
+  --it;
+  const LineEntry& entry = it->second;
+  if (entry.file_index >= m_source_files.size())
+    return std::nullopt;
+
+  return SourceLine{it->first, m_source_files[entry.file_index], entry.line};
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddress(std::string_view file, u32 line) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty() || m_source_files.empty())
+    return std::nullopt;
+
+  std::optional<u32> file_index;
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (m_source_files[i] == file)
+    {
+      file_index = i;
+      break;
+    }
+  }
+  if (!file_index)
+    return std::nullopt;
+
+  std::optional<u32> best_address;
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (entry.file_index != *file_index)
+      continue;
+    if (entry.line == line)
+      return address;
+    if (entry.line < line)
+      best_address = address;
+  }
+  return best_address;
+}
+
+const std::vector<std::string>& PPCSymbolDB::GetSourceFiles() const
+{
+  std::lock_guard lock(m_mutex);
+  return m_source_files;
+}
 
 // Adds the function to the list, unless it's already there
 const Common::Symbol* PPCSymbolDB::AddFunction(const Core::CPUThreadGuard& guard, u32 start_addr)

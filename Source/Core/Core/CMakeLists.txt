@@ -76,6 +76,10 @@ add_library(core
   Debugger/DAP/DapSession.h
   Debugger/DAP/DapTransport.cpp
   Debugger/DAP/DapTransport.h
+  Debugger/DWARF/DwarfImport.cpp
+  Debugger/DWARF/DwarfImport.h
+  Debugger/DWARF/DwarfReader.cpp
+  Debugger/DWARF/DwarfReader.h
   Debugger/BranchWatch.cpp
   Debugger/BranchWatch.h
   Debugger/CodeTrace.cpp
