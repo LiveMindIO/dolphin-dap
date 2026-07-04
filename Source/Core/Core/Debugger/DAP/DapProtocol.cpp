@@ -319,7 +319,7 @@ SourceRequestArguments ParseSourceRequest(const picojson::object& arguments)
 BreakpointLocationsArguments ParseBreakpointLocations(const picojson::object& arguments)
 {
   BreakpointLocationsArguments result;
-  result.base = ResolveSourceBase(arguments);
+  result.base = ResolveSourceReference(arguments);
   result.start_line = ReadNumericFromJson<int>(arguments, "line").value_or(0);
   if (const std::optional<int> end_line = ReadNumericFromJson<int>(arguments, "endLine"))
     result.end_line = *end_line;

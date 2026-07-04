@@ -501,6 +501,20 @@ TEST(DapProtocol, ParseBreakpointLocationsWithoutSourceIsUnresolved)
   EXPECT_FALSE(parsed.base.has_value());
 }
 
+TEST(DapProtocol, ParseBreakpointLocationsResolvesSourceReference)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "sourceReference": 1,
+    "line": 2,
+    "endLine": 5
+  })");
+  const auto parsed = Protocol::ParseBreakpointLocations(message);
+  ASSERT_TRUE(parsed.base.has_value());
+  EXPECT_EQ(*parsed.base, 1u);
+  EXPECT_EQ(parsed.start_line, 2);
+  EXPECT_EQ(parsed.end_line, 5);
+}
+
 TEST(DapProtocol, DisassemblyInstructionTextIsEscapedOnSerialize)
 {
   // Instruction text with a quote must serialize into valid JSON.

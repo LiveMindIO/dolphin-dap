@@ -9,6 +9,7 @@
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
+#include "Common/SymbolDB.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -86,5 +87,73 @@ TEST_F(PPCSymbolDBLineTest, ImportDwarfPopulatesLineTable)
   ASSERT_TRUE(line);
   EXPECT_EQ(line->file, DwarfTestFixture::kCompileUnitName);
   EXPECT_EQ(line->line, 2U);
+}
+
+TEST_F(PPCSymbolDBLineTest, GetSourceLineReturnsNulloptBeforeFirstEntry)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 1);
+  EXPECT_FALSE(SymbolDB().GetSourceLine(0x00004000).has_value());
+}
+
+TEST_F(PPCSymbolDBLineTest, GetSourceLineAtExactEntryAddress)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 5);
+  const std::optional<PPCSymbolDB::SourceLine> line = SymbolDB().GetSourceLine(0x00004100);
+  ASSERT_TRUE(line);
+  EXPECT_EQ(line->line, 5U);
+  EXPECT_EQ(line->address, 0x00004100U);
+}
+
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNearestPrecedingLine)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 10);
+  SymbolDB().AddLineEntry(0x00004110, file_index, 20);
+
+  const std::optional<u32> address = SymbolDB().GetLineAddress("foo.c", 15);
+  ASSERT_TRUE(address);
+  EXPECT_EQ(*address, 0x00004100U);
+}
+
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptWhenLineBeforeFirstEntry)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 10);
+  EXPECT_FALSE(SymbolDB().GetLineAddress("foo.c", 5).has_value());
+}
+
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 1);
+  EXPECT_FALSE(SymbolDB().GetLineAddress("missing.c", 1).has_value());
+}
+
+TEST_F(PPCSymbolDBLineTest, AddSourceFileDeduplicatesPaths)
+{
+  const u32 first = SymbolDB().AddSourceFile("foo.c");
+  const u32 second = SymbolDB().AddSourceFile("foo.c");
+  EXPECT_EQ(first, second);
+  EXPECT_EQ(SymbolDB().GetSourceFiles().size(), 1U);
+}
+
+TEST_F(PPCSymbolDBLineTest, ImportDwarfReturnsFalseForEmptyDebugSection)
+{
+  Core::CPUThreadGuard guard(Core::System::GetInstance());
+  const std::vector<u8> empty;
+  EXPECT_FALSE(Core::Debug::ImportDwarf(guard, SymbolDB(), empty, empty));
+}
+
+TEST_F(PPCSymbolDBLineTest, ImportDwarfAddsFunctionSymbol)
+{
+  Core::CPUThreadGuard guard(Core::System::GetInstance());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, SymbolDB(), DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+  const Common::Symbol* symbol =
+      SymbolDB().GetSymbolFromAddr(DwarfTestFixture::kFunctionAddress);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(symbol->name, DwarfTestFixture::kFunctionName);
 }
 }  // namespace

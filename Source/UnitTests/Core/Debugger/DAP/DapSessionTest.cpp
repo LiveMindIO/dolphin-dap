@@ -30,12 +30,14 @@
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/DAP/DapSession.h"
 #include "Core/Debugger/DAP/DapTransport.h"
+#include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "../DWARF/DwarfTestFixture.h"
 
 #ifndef _WIN32
 namespace
@@ -884,6 +886,121 @@ TEST_F(DapSessionTest, BreakpointLocationsReturnsInstructionLines)
   ASSERT_EQ(breakpoints.size(), 2u);
   EXPECT_EQ(breakpoints[0].get<picojson::object>().at("line").get<double>(), 0.0);
   EXPECT_EQ(breakpoints[1].get<picojson::object>().at("line").get<double>(), 1.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, LoadedSourcesReturnsDwarfFileAfterImport)
+{
+  {
+    Core::CPUThreadGuard guard(Core::System::GetInstance());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard,
+                                        Core::System::GetInstance().GetPowerPC().GetSymbolDB(),
+                                        DwarfTestFixture::kDebugSection,
+                                        DwarfTestFixture::kLineSection));
+  }
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "loadedSources",
+    "arguments": {}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  const auto& sources =
+      response->at("body").get<picojson::object>().at("sources").get<picojson::array>();
+  ASSERT_EQ(sources.size(), 1u);
+  const auto& source = sources[0].get<picojson::object>();
+  EXPECT_EQ(source.at("path").to_str(), DwarfTestFixture::kCompileUnitName);
+  EXPECT_EQ(source.at("sourceReference").get<double>(), 1.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, BreakpointLocationsWithDwarfSourceReference)
+{
+  {
+    Core::CPUThreadGuard guard(Core::System::GetInstance());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard,
+                                        Core::System::GetInstance().GetPowerPC().GetSymbolDB(),
+                                        DwarfTestFixture::kDebugSection,
+                                        DwarfTestFixture::kLineSection));
+  }
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "breakpointLocations",
+    "arguments": {
+      "sourceReference": 1,
+      "line": 1,
+      "endLine": 2
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 2u);
+  EXPECT_EQ(breakpoints[0].get<picojson::object>().at("line").get<double>(), 1.0);
+  EXPECT_EQ(breakpoints[1].get<picojson::object>().at("line").get<double>(), 2.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, StackTraceWithDwarfSourceLine)
+{
+  {
+    Core::CPUThreadGuard guard(Core::System::GetInstance());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard,
+                                        Core::System::GetInstance().GetPowerPC().GetSymbolDB(),
+                                        DwarfTestFixture::kDebugSection,
+                                        DwarfTestFixture::kLineSection));
+    Core::System::GetInstance().GetPPCState().pc = DwarfTestFixture::kLineTwoAddress;
+    LR(Core::System::GetInstance().GetPPCState()) = 0;
+  }
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "stackTrace",
+    "arguments": {"threadId": 1}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  const auto& frames =
+      response->at("body").get<picojson::object>().at("stackFrames").get<picojson::array>();
+  ASSERT_EQ(frames.size(), 1u);
+  const auto& frame = frames[0].get<picojson::object>();
+  EXPECT_EQ(frame.at("line").get<double>(), 2.0);
+  EXPECT_EQ(frame.at("source").get<picojson::object>().at("path").to_str(),
+            DwarfTestFixture::kCompileUnitName);
 
   client.Send(R"({
     "seq": 9,

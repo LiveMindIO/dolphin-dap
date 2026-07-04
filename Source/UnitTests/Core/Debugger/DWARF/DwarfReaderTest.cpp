@@ -49,4 +49,30 @@ TEST(DwarfReaderTest, ParseHandlesMissingLineSectionWithFunctionsOnly)
   EXPECT_EQ(result->functions.size(), 1U);
   EXPECT_TRUE(result->lines.empty());
 }
+
+TEST(DwarfReaderTest, ParseRejectsUnknownAttributeForm)
+{
+  std::vector<u8> corrupted(DwarfTestFixture::kDebugSection.begin(),
+                            DwarfTestFixture::kDebugSection.end());
+  corrupted[7] = 0x3F;
+  EXPECT_FALSE(Core::Debug::Dwarf::Parse(corrupted, DwarfTestFixture::kLineSection, true));
+}
+
+TEST(DwarfReaderTest, ParseIgnoresLineTableWhenStmtListOutOfBounds)
+{
+  std::vector<u8> short_line(4, 0);
+  const std::optional<Core::Debug::Dwarf::ParseResult> result =
+      Core::Debug::Dwarf::Parse(DwarfTestFixture::kDebugSection, short_line, true);
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->functions.size(), 1U);
+  EXPECT_TRUE(result->lines.empty());
+}
+
+TEST(DwarfReaderTest, ParseReturnsNulloptWhenNoFunctionsOrLines)
+{
+  const std::vector<u8> padding_only = {
+      0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+  };
+  EXPECT_FALSE(Core::Debug::Dwarf::Parse(padding_only, {}, true));
+}
 }  // namespace

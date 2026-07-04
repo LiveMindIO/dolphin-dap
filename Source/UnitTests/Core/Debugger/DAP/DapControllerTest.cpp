@@ -1030,4 +1030,78 @@ TEST_F(DapControllerTest, GetLoadedSourcesListsDwarfFiles)
   EXPECT_EQ(sources[0].path, DwarfTestFixture::kCompileUnitName);
   EXPECT_EQ(sources[0].source_reference, 1);
 }
+
+TEST_F(DapControllerTest, GetLoadedSourcesStripsPathToBasename)
+{
+  Core::CPUThreadGuard guard(System());
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile("src/melee/gm/gm_1BA8.c");
+  symbol_db.AddLineEntry(DwarfTestFixture::kFunctionAddress, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, "src/melee/gm/gm_1BA8.c");
+  EXPECT_EQ(sources[0].name, "gm_1BA8.c");
+}
+
+TEST_F(DapControllerTest, GetStackTraceUsesNearestPrecedingDwarfLine)
+{
+  Core::CPUThreadGuard guard(System());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                       DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+
+  auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = DwarfTestFixture::kFunctionAddress + 2;
+  ppc_state.gpr[1] = 0;
+  LR(ppc_state) = 0;
+
+  DAP::DapDebugController controller(System());
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+  ASSERT_EQ(trace.frames.size(), 1u);
+  ASSERT_TRUE(trace.frames[0].source_file.has_value());
+  EXPECT_EQ(*trace.frames[0].source_file, DwarfTestFixture::kCompileUnitName);
+  EXPECT_EQ(trace.frames[0].source_line, 1);
+}
+
+TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfMapsResolvableLines)
+{
+  Core::CPUThreadGuard guard(System());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                       DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::BreakpointLocation> locations =
+      controller.GetBreakpointLocations(1, 1, 3);
+  ASSERT_EQ(locations.size(), 3u);
+  EXPECT_EQ(locations[0].line, 1);
+  EXPECT_EQ(locations[1].line, 2);
+  EXPECT_EQ(locations[2].line, 3);
+}
+
+TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfSkipsLinesBeforeFirstEntry)
+{
+  Core::CPUThreadGuard guard(System());
+  ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                       DwarfTestFixture::kDebugSection,
+                                       DwarfTestFixture::kLineSection));
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::BreakpointLocation> locations =
+      controller.GetBreakpointLocations(1, 0, 0);
+  EXPECT_TRUE(locations.empty());
+}
+
+TEST_F(DapControllerTest, GetSourceRejectsMissingDwarfFileOnDisk)
+{
+  Core::CPUThreadGuard guard(System());
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile("/nonexistent/source.c");
+  symbol_db.AddLineEntry(DwarfTestFixture::kFunctionAddress, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.GetSource(1, 1, 1).has_value());
+}
 }  // namespace
