@@ -92,6 +92,11 @@ when only part of the range is writable.
 
 GDB and DAP are mutually exclusive — do not set `GDBPort`/`GDBSocket` at the same time.
 
+## Neovim (lazy.nvim)
+
+See [`nvim/README.md`](nvim/README.md) for `nvim-dap` + `nvim-dap-ui` setup, `.dolphin-dap.lua`
+per-project config, and keymaps.
+
 ## Automated tests
 
 The DAP server is validated by GoogleTest suites under
