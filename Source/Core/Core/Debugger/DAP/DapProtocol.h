@@ -190,6 +190,39 @@ struct RealtimeWatchCancelArguments
 std::optional<RealtimeWatchCancelArguments>
 ParseRealtimeWatchCancel(const picojson::object& arguments);
 
+// Arguments of a `dolphin_freeze` custom request. Two forms:
+//
+//   1. Standalone freeze: `memoryReference` (hex) + `count` + `data` (base64).
+//      Creates a new frozen subscription at [address, address+count) and
+//      returns its watchId. `data` must decode to exactly `count` bytes.
+//
+//   2. Freeze an existing watch: `watchId` + `data` (base64). The watch must
+//      already exist (from `dolphin_realtimeWatch` or a prior `dolphin_freeze`);
+//      `data` must decode to the watch's `count` bytes.
+//
+// `value` carries the bytes to hold the cell at; `address`/`count`/`watch_id`
+// are populated by ParseFreeze depending on which form was supplied.
+struct FreezeArguments
+{
+  // Set when form 2 (existing watch) is used; nullopt for form 1.
+  std::optional<int> watch_id;
+  // Set when form 1 (standalone) is used; nullopt for form 2.
+  std::optional<u32> address;
+  std::optional<u32> count;
+  // Frozen canon. Always populated on success.
+  std::vector<u8> value;
+};
+
+std::optional<FreezeArguments> ParseFreeze(const picojson::object& arguments);
+
+// Arguments of a `dolphin_unfreeze` custom request.
+struct UnfreezeArguments
+{
+  int watch_id = 0;
+};
+
+std::optional<UnfreezeArguments> ParseUnfreeze(const picojson::object& arguments);
+
 // Arguments of a `launch`/`attach` request. `stop_on_entry` is nullopt when
 // the client omitted the field; the session resolves the effective policy
 // against the `Dolphin.General.DAPStopOnEntry` config default. When present

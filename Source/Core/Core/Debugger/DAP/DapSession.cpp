@@ -394,6 +394,11 @@ private:
     capabilities.emplace("supportsExceptionInfoRequest", true);
     capabilities.emplace("supportsLoadedSourcesRequest", true);
     capabilities.emplace("supportsRestartRequest", true);
+    // Dolphin-specific custom capabilities. Clients can probe these to decide
+    // whether to use the realtime memory watch / freeze extensions or fall
+    // back to standard DAP readMemory/writeMemory polling.
+    capabilities.emplace("supportsDolphinRealtimeWatch", true);
+    capabilities.emplace("supportsDolphinFreeze", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -659,6 +664,18 @@ private:
     if (command == "dolphin_realtimeWatchCancel")
     {
       HandleRealtimeWatchCancel(*request);
+      return;
+    }
+
+    if (command == "dolphin_freeze")
+    {
+      HandleFreeze(*request);
+      return;
+    }
+
+    if (command == "dolphin_unfreeze")
+    {
+      HandleUnfreeze(*request);
       return;
     }
 
@@ -1173,6 +1190,99 @@ private:
     }
 
     Respond(request.seq, "dolphin_realtimeWatchCancel", picojson::object{});
+  }
+
+  void HandleFreeze(const Protocol::Request& request)
+  {
+    // DESNOTE(jbarber, 2026-07-21): `dolphin_freeze` holds a memory region at
+    // a fixed value: the sampler writes the frozen bytes back into memory
+    // every field where it observes drift, instead of dispatching a
+    // `dolphin_memoryChanged` event. Two forms are accepted (see
+    // ParseFreeze): a standalone `memoryReference + count + data` that
+    // creates a new frozen subscription, or `watchId + data` that freezes an
+    // existing watch in place. The former's address/count are echoed back in
+    // the response so a client that doesn't track the subscription can still
+    // correlate freezes with addresses.
+    const std::optional<Protocol::FreezeArguments> arguments =
+        Protocol::ParseFreeze(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_freeze", "invalid dolphin_freeze arguments");
+      return;
+    }
+
+    int watch_id = 0;
+    u32 address = 0;
+    u32 count = 0;
+    if (arguments->watch_id)
+    {
+      // Form 2: freeze an existing watch. Address/count come from the
+      // subscription itself; we can't trust anything the client supplied.
+      watch_id = *arguments->watch_id;
+      if (!m_watch_sampler->Freeze(watch_id, std::move(arguments->value)))
+      {
+        RespondError(request.seq, "dolphin_freeze",
+                     "no such watch_id or value size mismatch");
+        return;
+      }
+      // Reuse the address/count from the subscription so the response can
+      // echo them; for this we lean on ParseFreeze not populating them in
+      // form 2. The response below does not include them in form 2.
+    }
+    else
+    {
+      // Form 1: standalone freeze. Create the subscription and freeze it.
+      // AddSubscription seeds last_seen with the current memory contents;
+      // Freeze then overwrites last_seen with the frozen canon so the next
+      // Tick() treats the canon as the baseline and only writes back when
+      // the cell drifts. We pre-create the subscription under our own
+      // thread (no Tick contention because we hold no CPU-thread guard
+      // here -- AddSubscription takes its own).
+      address = *arguments->address;
+      count = *arguments->count;
+      watch_id = m_watch_sampler->AddSubscription(address, count);
+      if (watch_id == DAP::kInvalidWatchId)
+      {
+        RespondError(request.seq, "dolphin_freeze", "rejected address/count (overflow?)");
+        return;
+      }
+      if (!m_watch_sampler->Freeze(watch_id, std::move(arguments->value)))
+      {
+        // Should be unreachable: AddSubscription just succeeded at this
+        // count, so Freeze's size check must pass. Defensively roll back.
+        m_watch_sampler->RemoveSubscription(watch_id);
+        RespondError(request.seq, "dolphin_freeze", "internal error: freeze-after-add failed");
+        return;
+      }
+    }
+
+    picojson::object body;
+    body.emplace("watchId", static_cast<double>(watch_id));
+    if (!arguments->watch_id)
+    {
+      body.emplace("address", Json::FormatAddress(address));
+      body.emplace("count", static_cast<double>(count));
+    }
+    Respond(request.seq, "dolphin_freeze", std::move(body));
+  }
+
+  void HandleUnfreeze(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::UnfreezeArguments> arguments =
+        Protocol::ParseUnfreeze(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_unfreeze", "invalid dolphin_unfreeze arguments");
+      return;
+    }
+
+    if (!m_watch_sampler->Unfreeze(arguments->watch_id))
+    {
+      RespondError(request.seq, "dolphin_unfreeze", "no such watch");
+      return;
+    }
+
+    Respond(request.seq, "dolphin_unfreeze", picojson::object{});
   }
 
   static picojson::object MakeScope(std::string_view name, int variables_reference)

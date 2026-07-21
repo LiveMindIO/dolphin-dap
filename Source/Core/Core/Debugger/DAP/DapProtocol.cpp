@@ -3,6 +3,8 @@
 
 #include "Core/Debugger/DAP/DapProtocol.h"
 
+#include <limits>
+
 #include "Common/JsonUtil.h"
 #include "Core/Debugger/DAP/DapJson.h"
 
@@ -354,6 +356,71 @@ ParseRealtimeWatchCancel(const picojson::object& arguments)
     return std::nullopt;
 
   RealtimeWatchCancelArguments result;
+  result.watch_id = *watch_id;
+  return result;
+}
+
+std::optional<FreezeArguments> ParseFreeze(const picojson::object& arguments)
+{
+  // DESNOTE(jbarber, 2026-07-21): `data` is base64-encoded per the DAP
+  // `writeMemory` convention; `memoryReference` is the hex address. Two
+  // mutually exclusive forms:
+  //   - `watchId` present: freeze an existing watch (size will be checked
+  //     against the subscription's `count` by RealtimeWatchSampler::Freeze).
+  //   - `memoryReference` + `count` present: standalone freeze that creates
+  //     a new subscription.
+  // The `data` field is required in both forms.
+  const std::optional<std::string> data = ReadStringFromJson(arguments, "data");
+  if (!data)
+    return std::nullopt;
+  const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
+  if (!decoded)
+    return std::nullopt;
+
+  const std::optional<int> watch_id = ReadNumericFromJson<int>(arguments, "watchId");
+  const std::optional<u32> address = ResolveMemoryReference(arguments);
+  const std::optional<u32> count = ReadNumericFromJson<u32>(arguments, "count");
+
+  FreezeArguments result;
+  result.value = std::move(*decoded);
+  if (watch_id)
+  {
+    // Form 2: freeze existing. address/count must be absent; the sampler
+    // authoritative source for the watch's width is its existing
+    // subscription. We do allow them to be ignored if present (some clients
+    // echo them back), but fail loudly if `data` doesn't match the watch.
+    if (!address && !count)
+    {
+      result.watch_id = *watch_id;
+      return result;
+    }
+    // Mixed form: address/count present alongside watchId. Reject -- the
+    // client should pick one form or the other.
+    return std::nullopt;
+  }
+
+  // Form 1: standalone freeze. Requires both address and count, and `data`
+  // length must equal `count` exactly so the frozen canon covers the whole
+  // watched region.
+  if (!address || !count)
+    return std::nullopt;
+  if (result.value.size() != *count)
+    return std::nullopt;
+  if (*count == 0 || *address > std::numeric_limits<u32>::max() - *count)
+    return std::nullopt;
+
+  result.address = *address;
+  result.count = *count;
+  return result;
+}
+
+std::optional<UnfreezeArguments> ParseUnfreeze(const picojson::object& arguments)
+{
+  const std::optional<int> watch_id = ReadNumericFromJson<int>(arguments, "watchId");
+  if (!watch_id)
+    return std::nullopt;
+
+  UnfreezeArguments result;
   result.watch_id = *watch_id;
   return result;
 }

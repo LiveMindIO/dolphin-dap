@@ -52,6 +52,8 @@ DAP spec — clients must opt in):
 |---------|---------|
 | `dolphin_realtimeWatch` | Subscribe to realtime memory-region changes. The adapter pushes a `dolphin_memoryChanged` event each frame whenever any byte in the watched region changes — **without pausing the debugger**. ~60 Hz (NTSC) / ~50 Hz (PAL). |
 | `dolphin_realtimeWatchCancel` | Cancels a realtime watch subscription by `watchId`. |
+| `dolphin_freeze` | Holds a memory region at a fixed value. Every field, if the cell drifted from the frozen canon, the adapter writes the canon back and suppresses the `dolphin_memoryChanged` event. Two forms: `{memoryReference, count, data}` creates a new frozen subscription; `{watchId, data}` freezes an existing watch in place. |
+| `dolphin_unfreeze` | Clears the freeze layer on an existing watch. The watch keeps running and dispatching change events normally; idempotent. |
 
 ### Running the DAP server
 
@@ -136,6 +138,13 @@ declares itself the CPU thread and drives it over a `socketpair`.
   the session loop's 50 ms poll, so a change is flushed to the socket within
   ~50 ms of being observed. Burst changes within a single frame are coalesced
   to one event per region.
+- **Freeze is field-rate, not atomic.** `dolphin_freeze` writes the frozen
+  value back at the next `vi_end_field_event` after the game drifts. For up to
+  one field (~16 ms NTSC) the game's value is visible in memory before the
+  restore. The canonical use cases (health/ammo/coins/timer) tolerate this
+  window; for atomicity you'd need an MMU write-hook, which isn't implemented.
+  Freeze is a layer on top of a watch subscription — clearing the freeze via
+  `dolphin_unfreeze` leaves the watch running and dispatching events normally.
 
 ### Request / response payload reference
 
@@ -165,8 +174,10 @@ the server for responses/events.
    "supportsEvaluateForHovers": true,
    "supportsExceptionInfoRequest": true,
    "supportsLoadedSourcesRequest": true,
-   "supportsRestartRequest": true
- }}}
+   "supportsRestartRequest": true,
+   "supportsDolphinRealtimeWatch": true,
+   "supportsDolphinFreeze": true
+  }}}
 
 // ← then an "initialized" event (means "ready for setBreakpoints / launch")
 {"seq": 3, "type": "event", "event": "initialized", "body": {}}
@@ -448,6 +459,49 @@ never changes never emits.
 
 After cancellation the region is no longer sampled; no further
 `dolphin_memoryChanged` events are emitted for that `watchId`.
+
+#### `dolphin_freeze` — hold a memory region at a fixed value
+
+Two mutually exclusive forms, both base64-encode the value as `data` (matching
+the DAP `writeMemory` convention).
+
+**Form 1 — standalone freeze** (creates a new frozen subscription):
+
+```jsonc
+{"command": "dolphin_freeze",
+ "arguments": {"memoryReference": "0x803ce4e8", "count": 4, "data": "AAAAAQ=="}}
+//  → {"watchId": 2, "address": "0x803ce4e8", "count": 4}   on success
+//  → error response  if data does not decode to exactly count bytes,
+//                     count is 0, or address+count wraps past u32 max
+```
+
+**Form 2 — freeze an existing watch in place** (the watch was previously
+created via `dolphin_realtimeWatch` or `dolphin_freeze`):
+
+```jsonc
+{"command": "dolphin_freeze",
+ "arguments": {"watchId": 3, "data": "AAAAAQ=="}}
+//  → {"watchId": 3}                                        on success
+//  → error response  if watchId is unknown or data length != watch count
+```
+
+The frozen canon (`data`) must always be exactly `count` bytes long. The
+adapter writes the canon back to memory at each video field where the
+watched region drifts from it; `dolphin_memoryChanged` events are suppressed
+for frozen subscriptions (the freeze *is* the response). One field is the
+worst-case window in which the game's value is briefly visible (~16 ms NTSC).
+
+#### `dolphin_unfreeze` — clear the freeze layer on a watch
+
+```jsonc
+{"command": "dolphin_unfreeze", "arguments": {"watchId": 3}}
+//  → {}            on success
+//  → error response with message "no such watch" if watchId is unknown
+```
+
+The watch itself stays subscribed and resumes dispatching `dolphin_memoryChanged`
+events normally. Idempotent — calling on a watch that wasn't frozen still
+succeeds.
 
 ### Source awareness (DWARF 1.1 + entrypoints)
 

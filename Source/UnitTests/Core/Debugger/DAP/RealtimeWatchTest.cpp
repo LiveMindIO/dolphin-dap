@@ -168,4 +168,166 @@ TEST_F(RealtimeWatchTest, MultipleWatchesIndependent)
   EXPECT_EQ(captured[0][0].watch_id, id_b);
   EXPECT_EQ(captured[0][0].bytes, (std::vector<u8>{0x00, 0x00}));
 }
+
+// Reads back the bytes currently at [address, address+count) from MEM1.
+static std::vector<u8> ReadBack(u32 address, u32 count)
+{
+  std::vector<u8> out(count);
+  Core::System::GetInstance().GetMemory().CopyFromEmu(out.data(), address, count);
+  return out;
+}
+
+TEST_F(RealtimeWatchTest, FreezeRejectsSizeMismatch)
+{
+  DAP::RealtimeWatchSampler sampler(System(), [](const auto&) {});
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_GT(watch_id, 0);
+  // Value smaller than count must be rejected so a partial freeze can't
+  // leave bytes outside `value` unprotected.
+  EXPECT_FALSE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02}));
+  // Value larger than count also rejected.
+  EXPECT_FALSE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02, 0x03, 0x04}));
+  // Exact match accepted.
+  EXPECT_TRUE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02, 0x03}));
+}
+
+TEST_F(RealtimeWatchTest, FreezeOnUnknownWatchIdFails)
+{
+  DAP::RealtimeWatchSampler sampler(System(), [](const auto&) {});
+  EXPECT_FALSE(sampler.Freeze(999, {0x00, 0x01}));
+}
+
+TEST_F(RealtimeWatchTest, FreezeWritesBackOnDriftAndSuppressesEvent)
+{
+  std::vector<std::vector<DAP::RealtimeWatchChange>> captured;
+  DAP::RealtimeWatchSampler sampler(System(), Capture(captured));
+
+  // Subscribe to a region, then freeze it to its current value. Memory at
+  // TEST_ADDRESS is seeded with {0x00..0x07}, so the frozen four-byte canon
+  // at TEST_ADDRESS+0 is {0x00, 0x01, 0x02, 0x03}.
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_GT(watch_id, 0);
+  ASSERT_TRUE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02, 0x03}));
+
+  // Game writes a different value (the canonical "freeze health at 99"
+  // scenario -- the game writes, and we restore).
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, std::array<u8, 4>{{0xde, 0xad, 0xbe, 0xef}}.data(),
+                                 4);
+
+  sampler.Tick();
+
+  // No change event: the freeze suppresses dispatch when it writes back.
+  EXPECT_TRUE(captured.empty());
+  // Memory was restored to the frozen canon.
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0x00, 0x01, 0x02, 0x03}));
+
+  // Tick again with no drift: must still not dispatch and must not write.
+  sampler.Tick();
+  EXPECT_TRUE(captured.empty());
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0x00, 0x01, 0x02, 0x03}));
+}
+
+TEST_F(RealtimeWatchTest, FreezeWritesBackOnlyDifferingBytes)
+{
+  // DESNOTE(jbarber, 2026-07-21): The Tick() fast-path skips WriteU8 calls
+  // for bytes that already match the canon -- a micro-optimization that
+  // halves the page-table walks on the typical "r0 changed" case. We can't
+  // observe the call count directly without instrumenting the accessor, so
+  // this test asserts the externally observable contract: bytes that didn't
+  // drift are left untouched, and bytes that drifted are restored.
+  std::vector<std::vector<DAP::RealtimeWatchChange>> captured;
+  DAP::RealtimeWatchSampler sampler(System(), Capture(captured));
+
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_GT(watch_id, 0);
+  ASSERT_TRUE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02, 0x03}));
+
+  // Drift only bytes 0 and 3; bytes 1 and 2 are already at the canon.
+  System().GetMemory().CopyToEmu(TEST_ADDRESS,
+                                 std::array<u8, 4>{{0xff, 0x01, 0x02, 0xee}}.data(), 4);
+  sampler.Tick();
+
+  EXPECT_TRUE(captured.empty());
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0x00, 0x01, 0x02, 0x03}));
+}
+
+TEST_F(RealtimeWatchTest, UnfreezeStopsWritebackAndResumesEventDispatch)
+{
+  std::vector<std::vector<DAP::RealtimeWatchChange>> captured;
+  DAP::RealtimeWatchSampler sampler(System(), Capture(captured));
+
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_GT(watch_id, 0);
+  ASSERT_TRUE(sampler.Freeze(watch_id, {0x00, 0x01, 0x02, 0x03}));
+
+  // Game drifts; Tick restores; no event.
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, std::array<u8, 4>{{0xde, 0xad, 0xbe, 0xef}}.data(),
+                                 4);
+  sampler.Tick();
+  EXPECT_TRUE(captured.empty());
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0x00, 0x01, 0x02, 0x03}));
+
+  // Unfreeze: subsequent drifts must NOT be written back, and the change
+  // event must fire normally.
+  EXPECT_TRUE(sampler.Unfreeze(watch_id));
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, std::array<u8, 4>{{0xaa, 0xbb, 0xcc, 0xdd}}.data(),
+                                 4);
+  sampler.Tick();
+
+  ASSERT_EQ(captured.size(), 1u);
+  ASSERT_EQ(captured[0].size(), 1u);
+  EXPECT_EQ(captured[0][0].watch_id, watch_id);
+  EXPECT_EQ(captured[0][0].bytes, (std::vector<u8>{0xaa, 0xbb, 0xcc, 0xdd}));
+  // Memory at the cell is whatever the game wrote -- we did not restore it.
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0xaa, 0xbb, 0xcc, 0xdd}));
+}
+
+TEST_F(RealtimeWatchTest, UnfreezeIsIdempotentOnAlreadyUnfrozenWatch)
+{
+  DAP::RealtimeWatchSampler sampler(System(), [](const auto&) {});
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_GT(watch_id, 0);
+  // Never frozen -- Unfreeze must still succeed and be a no-op.
+  EXPECT_TRUE(sampler.Unfreeze(watch_id));
+  // A second unfreeze is also fine.
+  EXPECT_TRUE(sampler.Unfreeze(watch_id));
+}
+
+TEST_F(RealtimeWatchTest, UnfreezeOnUnknownWatchIdFails)
+{
+  DAP::RealtimeWatchSampler sampler(System(), [](const auto&) {});
+  EXPECT_FALSE(sampler.Unfreeze(999));
+}
+
+TEST_F(RealtimeWatchTest, FreezeDoesNotAffectUnfrozenSubscriptions)
+{
+  // Two watches on the same region -- one frozen, one not. The frozen one
+  // writes back and suppresses dispatch; the unfrozen one sees the drift
+  // and dispatches normally. The write-back from the frozen watch happens
+  // first in iteration order, so the unfrozen watch sees the canon in
+  // memory and reports no change.
+  std::vector<std::vector<DAP::RealtimeWatchChange>> captured;
+  DAP::RealtimeWatchSampler sampler(System(), Capture(captured));
+
+  const int frozen_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  const int watch_id = sampler.AddSubscription(TEST_ADDRESS, 4);
+  ASSERT_NE(frozen_id, watch_id);
+
+  ASSERT_TRUE(sampler.Freeze(frozen_id, {0x00, 0x01, 0x02, 0x03}));
+  // The second subscription sees the canon as its baseline (it was seeded
+  // at AddSubscription from the same memory state). Freeze on the first
+  // subscription wrote the canon into memory before the second one was
+  // added, so its baseline already matches.
+
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, std::array<u8, 4>{{0xde, 0xad, 0xbe, 0xef}}.data(),
+                                 4);
+  sampler.Tick();
+
+  // The frozen subscription restored the canon and suppressed dispatch.
+  // The unfrozen subscription's `last_seen` was seeded at the canon, and
+  // Tick read the canon (because the frozen write-back ran before its read
+  // in the iteration), so it also dispatches nothing. Both are quiet.
+  EXPECT_TRUE(captured.empty());
+  EXPECT_EQ(ReadBack(TEST_ADDRESS, 4), (std::vector<u8>{0x00, 0x01, 0x02, 0x03}));
+}
 }  // namespace

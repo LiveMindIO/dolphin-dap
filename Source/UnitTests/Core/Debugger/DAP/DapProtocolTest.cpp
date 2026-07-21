@@ -591,4 +591,123 @@ TEST(DapProtocol, ParseLaunchStopOnEntryTrue)
   ASSERT_TRUE(parsed->stop_on_entry.has_value());
   EXPECT_TRUE(*parsed->stop_on_entry);
 }
+
+TEST(DapProtocol, ParseFreezeStandaloneFormResolvesAddressCountAndValue)
+{
+  // DESNOTE(jbarber, 2026-07-21): `data` is base64-encoded per the DAP
+  // `writeMemory` convention. "AAAAAQ==" decodes to {0x00, 0x00, 0x00, 0x01}
+  // (4 bytes). This form creates a new frozen subscription at the resolved
+  // address.
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x00003100",
+    "count": 4,
+    "data": "AAAAAQ=="
+  })");
+  const auto parsed = Protocol::ParseFreeze(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_FALSE(parsed->watch_id.has_value());
+  ASSERT_TRUE(parsed->address.has_value());
+  EXPECT_EQ(*parsed->address, 0x00003100u);
+  ASSERT_TRUE(parsed->count.has_value());
+  EXPECT_EQ(*parsed->count, 4u);
+  EXPECT_EQ(parsed->value, (std::vector<u8>{0x00, 0x00, 0x00, 0x01}));
+}
+
+TEST(DapProtocol, ParseFreezeExistingWatchForm)
+{
+  const auto args = ParseObjectOrDie(R"({
+    "watchId": 7,
+    "data": "AAAAAQ=="
+  })");
+  const auto parsed = Protocol::ParseFreeze(args);
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->watch_id.has_value());
+  EXPECT_EQ(*parsed->watch_id, 7);
+  EXPECT_FALSE(parsed->address.has_value());
+  EXPECT_FALSE(parsed->count.has_value());
+  EXPECT_EQ(parsed->value, (std::vector<u8>{0x00, 0x00, 0x00, 0x01}));
+}
+
+TEST(DapProtocol, ParseFreezeRejectsValueLengthMismatchWithCount)
+{
+  // DESNOTE(jbarber, 2026-07-21): "AA==" decodes to one byte (0x00). count
+  // is 4 -- the frozen canon must cover the entire watched region.
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x00003100",
+    "count": 4,
+    "data": "AA=="
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseFreezeRejectsMissingData)
+{
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x00003100",
+    "count": 4
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseFreezeRejectsInvalidBase64)
+{
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x00003100",
+    "count": 4,
+    "data": "this is not base64!!!"
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseFreezeRejectsMixedWatchIdAndAddress)
+{
+  // Form 1 and form 2 are mutually exclusive; the sampler can't tell which
+  // width the client wants if both `watchId` and `memoryReference`+`count`
+  // are present, so the parser rejects.
+  const auto args = ParseObjectOrDie(R"({
+    "watchId": 7,
+    "memoryReference": "0x00003100",
+    "count": 4,
+    "data": "AAAAAAE="
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseFreezeRejectsCountZero)
+{
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0x00003100",
+    "count": 0,
+    "data": ""
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseFreezeRejectsAddressCountOverflow)
+{
+  // address + count wraps past u32 max -- the sampler would compute
+  // out-of-range addresses in Tick(); reject at parse time.
+  const auto args = ParseObjectOrDie(R"({
+    "memoryReference": "0xfffffff0",
+    "count": 32,
+    "data": "AAAAAAE="
+  })");
+  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+}
+
+TEST(DapProtocol, ParseUnfreezeExtractsWatchId)
+{
+  const auto args = ParseObjectOrDie(R"({"watchId": 42})");
+  const auto parsed = Protocol::ParseUnfreeze(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->watch_id, 42);
+}
+
+TEST(DapProtocol, ParseUnfreezeRejectsMissingWatchId)
+{
+  const auto args = ParseObjectOrDie(R"({})");
+  EXPECT_FALSE(Protocol::ParseUnfreeze(args).has_value());
+}
+
+
 }  // namespace
