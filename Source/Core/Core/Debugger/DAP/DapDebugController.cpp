@@ -529,6 +529,15 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
     return !addr || !PowerPC::MMU::HostIsRAMAddress(guard, addr);
   };
 
+  // DESNOTE(jbarber, 2026-07-21): The innermost frame is the current PC --
+  // it's where execution actually stopped. The previous form only pushed the
+  // PC when the frame list was otherwise empty, so a typical `stackTrace`
+  // response started at LR-4 / stack-walked callers and omitted the
+  // instruction the user actually cares about. Walking up first, then
+  // prepending the PC, would shuffle addresses past DAP frame ids; instead
+  // push the PC first so the rest of the walk appends in declaration order.
+  push_frame(ppc_state.pc);
+
   if (LR(ppc_state) != 0)
     push_frame(LR(ppc_state) - 4);
 
@@ -542,9 +551,6 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
       addr = PowerPC::MMU::HostRead<u32>(guard, addr);
     }
   }
-
-  if (frames.empty())
-    push_frame(ppc_state.pc);
 
   StackTraceResult result;
   result.total_frames = static_cast<int>(frames.size());

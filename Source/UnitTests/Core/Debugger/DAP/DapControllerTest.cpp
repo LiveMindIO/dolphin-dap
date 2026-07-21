@@ -172,6 +172,7 @@ TEST_F(DapControllerTest, GetStackTraceUsesLrAndWalksStackChain)
   const u32 parent = TEST_ADDRESS + 0x600;
 
   auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS + 0x100;
   ppc_state.gpr[1] = sp;
   LR(ppc_state) = 0x80001004;
 
@@ -185,10 +186,15 @@ TEST_F(DapControllerTest, GetStackTraceUsesLrAndWalksStackChain)
   DAP::DapDebugController controller(System());
   const DAP::StackTraceResult trace = controller.GetStackTrace();
 
-  ASSERT_EQ(trace.total_frames, 2);
-  ASSERT_EQ(trace.frames.size(), 2u);
-  EXPECT_EQ(trace.frames[0].address, 0x80001000u);
-  EXPECT_EQ(trace.frames[1].address, 0x80002000u);
+  // PC sits innermost; LR-4 and the stack-walked parent LR-4 follow as
+  // outer frames. Previously the PC was omitted whenever any frame was
+  // collected, so a typical `stackTrace` response lacked the actually-stopped
+  // instruction.
+  ASSERT_EQ(trace.total_frames, 3);
+  ASSERT_EQ(trace.frames.size(), 3u);
+  EXPECT_EQ(trace.frames[0].address, TEST_ADDRESS + 0x100u);
+  EXPECT_EQ(trace.frames[1].address, 0x80001000u);
+  EXPECT_EQ(trace.frames[2].address, 0x80002000u);
 }
 
 TEST_F(DapControllerTest, GetStackTraceFallsBackToPcWhenEmpty)
@@ -212,6 +218,7 @@ TEST_F(DapControllerTest, GetStackTraceHonorsStartFrameAndLevels)
   const u32 parent = TEST_ADDRESS + 0x600;
 
   auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS + 0x100;
   ppc_state.gpr[1] = sp;
   LR(ppc_state) = 0x80001004;
 
@@ -223,12 +230,14 @@ TEST_F(DapControllerTest, GetStackTraceHonorsStartFrameAndLevels)
   System().GetMemory().CopyToEmu(parent + 4, saved_lr.data(), saved_lr.size());
 
   DAP::DapDebugController controller(System());
+  // Three frames total (PC + LR + stack-walked LR); start at index 1 and take
+  // 1 frame -- the LR-4 caller is returned with id=1.
   const DAP::StackTraceResult trace = controller.GetStackTrace(1, 1);
 
-  ASSERT_EQ(trace.total_frames, 2);
+  ASSERT_EQ(trace.total_frames, 3);
   ASSERT_EQ(trace.frames.size(), 1u);
   EXPECT_EQ(trace.frames[0].id, 1);
-  EXPECT_EQ(trace.frames[0].address, 0x80002000u);
+  EXPECT_EQ(trace.frames[0].address, 0x80001000u);
 }
 
 TEST_F(DapControllerTest, GetStackTraceLevelsZeroReturnsAllFrames)
@@ -237,6 +246,7 @@ TEST_F(DapControllerTest, GetStackTraceLevelsZeroReturnsAllFrames)
   const u32 parent = TEST_ADDRESS + 0x600;
 
   auto& ppc_state = System().GetPPCState();
+  ppc_state.pc = TEST_ADDRESS + 0x100;
   ppc_state.gpr[1] = sp;
   LR(ppc_state) = 0x80001004;
 
@@ -251,10 +261,12 @@ TEST_F(DapControllerTest, GetStackTraceLevelsZeroReturnsAllFrames)
   // levels == 0 means "all frames" per the DAP spec, not "no frames".
   const DAP::StackTraceResult trace = controller.GetStackTrace(0, 0);
 
-  ASSERT_EQ(trace.total_frames, 2);
-  ASSERT_EQ(trace.frames.size(), 2u);
-  EXPECT_EQ(trace.frames[0].address, 0x80001000u);
-  EXPECT_EQ(trace.frames[1].address, 0x80002000u);
+  // PC sits innermost; LR and stack-walked LR follow.
+  ASSERT_EQ(trace.total_frames, 3);
+  ASSERT_EQ(trace.frames.size(), 3u);
+  EXPECT_EQ(trace.frames[0].address, TEST_ADDRESS + 0x100u);
+  EXPECT_EQ(trace.frames[1].address, 0x80001000u);
+  EXPECT_EQ(trace.frames[2].address, 0x80002000u);
 }
 
 TEST_F(DapControllerTest, GetStackTraceStartFramePastEndReturnsNoFramesButFullTotal)

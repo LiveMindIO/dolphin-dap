@@ -140,6 +140,18 @@ picojson::object MakeVariable(std::string_view name, u32 value)
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
+  // DESNOTE(jbarber, 2026-07-21): The step-out worker captures a
+  // shared_ptr<Session>, so this destructor only runs after that worker has
+  // exited (the captured shared_ptr is what keeps *this alive past
+  // RunSession's stack-frame release). join() at that stage just reaps the
+  // OS thread; it will never block. Without this, std::thread's destructor
+  // would terminate the process on a still-joinable handle.
+  ~Session()
+  {
+    if (m_step_out_thread.joinable())
+      m_step_out_thread.join();
+  }
+
   Session(DapTransport& transport, Core::System& system)
       : m_transport(transport), m_controller(system), m_system(system),
         m_stop_on_entry(Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY))
@@ -248,6 +260,20 @@ private:
 
   void SendStoppedEvent(std::string_view reason)
   {
+    // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason so a later
+    // spontaneous stop (e.g. data watchpoint hit after `continue`) can't
+    // accidentally reuse a stale CodeBreakpoint classification from before
+    // this explicit pause/step/goto/restart. The state hook repopulates
+    // m_pending_stop_info on the next Paused transition with fresh info
+    // captured while exceptions are still set, so SendClassifiedStoppedEvent
+    // will always see an up-to-date stash. Without this clear, a pause
+    // while the PC sits on a code breakpoint would leave the stash holding
+    // "CodeBreakpoint" and a later SendClassifiedStoppedEvent would
+    // mis-report the watchpoint stop as a breakpoint hit.
+    {
+      std::lock_guard lock(m_stop_info_mutex);
+      m_pending_stop_info.reset();
+    }
     picojson::object body;
     body.emplace("reason", std::string(reason));
     body.emplace("threadId", 1.0);
@@ -337,6 +363,20 @@ private:
 
   void PollBreakpointStop()
   {
+    // Async step-out completion: the worker signals via m_step_out_done once
+    // DapDebugController::StepOut has returned. Join and emit the
+    // stopped/step event here, on the session thread, so the client still
+    // sees them in command order. This replaces the previous synchronous
+    // inline call that blocked HandleMessage for up to the 5s step-out
+    // timeout.
+    if (m_step_out_thread.joinable() && m_step_out_done.load())
+    {
+      m_step_out_thread.join();
+      SendStoppedEvent("step");
+      SyncSteppingBaseline();
+      return;
+    }
+
     const bool stepping = m_system.GetCPU().IsStepping();
     if (!m_was_stepping && stepping)
       SendClassifiedStoppedEvent();
@@ -521,10 +561,29 @@ private:
     {
       if (!m_system.GetCPU().IsStepping())
         m_controller.Pause();
-      m_controller.StepOut();
+      // DESNOTE(jbarber, 2026-07-21): Run StepOut on a worker thread so the
+      // session loop keeps polling the socket for disconnect / new requests
+      // and keeps flushing realtime-watch events while the interpreter
+      // single-steps toward the next return. PollBreakpointStop joins the
+      // worker when it signals completion and emits the stopped/step event.
+      // A previous step-out is still in flight only if the client reissued
+      // step-out within one 50ms poll window -- in that pathological case we
+      // wait for the in-flight worker so only one step-out runs at a time.
+      if (m_step_out_thread.joinable())
+      {
+        if (!m_step_out_done.load())
+          return;  // still stepping from a prior stepOut; ignore the reissue
+        m_step_out_thread.join();
+      }
+      m_step_out_done.store(false);
+      m_step_out_thread = std::thread([self = shared_from_this()]() {
+        self->m_controller.StepOut();
+        self->m_step_out_done.store(true);
+      });
       Respond(request->seq, command, picojson::object{});
-      SendStoppedEvent("step");
-      SyncSteppingBaseline();
+      // Don't emit stopped/step here -- PollBreakpointStop will, once the
+      // worker signals completion. SyncSteppingBaseline is also deferred to
+      // the join site so the polling baseline matches the post-step state.
       return;
     }
 
@@ -1554,6 +1613,19 @@ private:
 
   std::mutex m_event_mutex;
   std::vector<std::string> m_pending_events;
+
+  // DESNOTE(jbarber, 2026-07-21): Asynchronous step-out worker. The previous
+  // form ran DapDebugController::StepOut inline on the session thread, which
+  // holds a CPUThreadGuard for up to its full 5s timeout while single-stepping
+  // the interpreter. That blocked `HandleMessage` from polling the socket, so
+  // disconnect, new requests, and realtime-watch event dispatch stalled until
+  // the step completed. We now run StepOut on a worker thread so the session
+  // loop keeps draining its 50ms `WaitForReadable` poll, and `PollBreakpointStop`
+  // joins the worker and emits the `stopped`/`step` event when it completes.
+  // The worker captures a shared_ptr<Session> (rather than `this`) so a late
+  // tear-down can't free the Session while the worker still holds the guard.
+  std::thread m_step_out_thread;
+  std::atomic<bool> m_step_out_done{true};
 };
 }  // namespace
 
