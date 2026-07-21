@@ -435,17 +435,20 @@ private:
     return it->second;
   }
 
-  // DESNOTE(jbarber, 2026-07-21): Each authoritative setBreakpoints /
-  // setInstructionBreakpoints call REPLACES the previously-installed set
-  // (Dolphin keeps a single code-breakpoint list). Drop the (address->id)
-  // mappings for the previously-installed sites so a future stop at one of
-  // those addresses doesn't match a stale id; the response below will
-  // mint fresh ids for the new set.
-  void ClearBreakpointIds()
-  {
-    std::lock_guard lock(m_bp_id_mutex);
-    m_bp_id_by_address.clear();
-  }
+  // DESNOTE(jbarber, 2026-07-21): Removed the per-set `ClearBreakpointIds`
+  // call. The previous form wiped the whole (address -> id) map on each
+  // authoritative setBreakpoints / setInstructionBreakpoints call, which
+  // also discarded ids for breakpoints of the OTHER kind (source BPs from
+  // other files coexisting with instruction BPs in Dolphin's single
+  // code-breakpoint list). A subsequent stop for one of those still-
+  // installed sites then had no id to echo back in hitBreakpointIds,
+  // breaking client correlation. Stale entries (addresses no longer
+  // installed as breakpoints) are harmless: GetStopInfo only sets
+  // hit_breakpoint_address when an actual breakpoint exists at the PC,
+  // so a stale map entry can't be looked up against a fabricated hit.
+  // AssignBreakpointId reuses an existing id when the client re-installs
+  // an address, keeping client-side id correlation stable across
+  // refreshes.
 
   void PollBreakpointStop()
   {
@@ -617,15 +620,21 @@ private:
       if (m_step_out_thread.joinable() && !m_step_out_done.load())
       {
         m_pending_continue.store(true);
-        // DESNOTE(jbarber, 2026-07-21): Mirror the body the synchronous
-        // continue path emits. DAP clients that read the response (rather
-        // than waiting for the later `continued` event) treat a missing
-        // allThreadsContinued as incomplete/malformed, so include it here
-        // too -- the resume semantics are the same, just deferred until
-        // the step-out worker joins.
-        picojson::object body;
-        body.emplace("allThreadsContinued", true);
-        Respond(request->seq, command, std::move(body));
+        // DESNOTE(jbarber, 2026-07-21): Ack the request with an empty body
+        // and NO allThreadsContinued flag. The core is still stepping out
+        // (the worker holds the CPUThreadGuard for up to its 5s timeout),
+        // so claiming all threads have been continued would lie to the
+        // client -- it would transition its UI to "running" while the
+        // emulator is still single-stepping toward the next return. The
+        // earlier form mirrored the synchronous path's
+        // allThreadsContinued: true here, which Bugbot flagged as
+        // "Continue deferred during step-out". Continue() actually runs
+        // in PollBreakpointStop once the worker joins; that fires the
+        // state hook which queues the `continued` event with
+        // allThreadsContinued: true at that point. The client treats the
+        // immediate response as "request acknowledged, resume pending"
+        // and waits for the `continued` event before flipping to running.
+        Respond(request->seq, command, picojson::object{});
         return;
       }
       m_controller.Continue();
@@ -1038,14 +1047,6 @@ private:
     const std::vector<std::optional<u32>> addresses =
         m_controller.UpdateSourceBreakpoints(source_key, context, specs);
 
-    // DESNOTE(jbarber, 2026-07-21): Each authoritative setBreakpoints call
-    // REPLACES the previously-installed source breakpoints (Dolphin keeps
-    // a single code-breakpoint list), so drop the previously-assigned DAP
-    // ids and mint fresh ones for the sites installed by this call. The
-    // ids are echoed back in the response so the client can correlate
-    // future stopped-event hitBreakpointIds back to these entries.
-    ClearBreakpointIds();
-
     picojson::array breakpoints;
     for (size_t i = 0; i < specs.size(); ++i)
     {
@@ -1072,10 +1073,6 @@ private:
 
     std::vector<CodeBreakpointRequest> breakpoint_requests;
     picojson::array breakpoints;
-    // DESNOTE(jbarber, 2026-07-21): setInstructionBreakpoints also replaces
-    // the whole installed list (and shares storage with source breakpoints),
-    // so reset the id map before assigning fresh ids below.
-    ClearBreakpointIds();
     for (const Protocol::RequestedInstructionBreakpoint& breakpoint : arguments.breakpoints)
     {
       picojson::object entry;
