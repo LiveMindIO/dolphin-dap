@@ -4,6 +4,7 @@
 #include "Core/Debugger/DAP/DapRealtimeWatch.h"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "Core/Core.h"
@@ -28,6 +29,13 @@ RealtimeWatchSampler::~RealtimeWatchSampler() = default;
 
 int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
 {
+  // DESNOTE(jbarber, 2026-07-21): Reject ranges that wrap past u32 max so later
+  // `address + i` arithmetic in Tick() can't silently read from low memory.
+  // A subscription of count == 0 is meaningless and would make the change
+  // detector noisy without producing useful bytes.
+  if (count == 0 || address > std::numeric_limits<u32>::max() - count)
+    return kInvalidWatchId;
+
   // Seed the last-seen snapshot with the current region contents so the first
   // Tick() after subscribe doesn't echo the initial value back to the client
   // as a spurious "change".

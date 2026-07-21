@@ -193,11 +193,14 @@ bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
   if (m_line_table.empty() || size == 0)
     return false;
 
-  const u32 end = start + size;
+  // DESNOTE(jbarber, 2026-07-21): Compute the exclusive end in u64 so a range
+  // spanning the very top of the 32-bit address space doesn't wrap to 0 and
+  // erroneously match low-memory line entries.
+  const u64 end = static_cast<u64>(start) + static_cast<u64>(size);
   std::set<u32> distinct_lines;
   for (const auto& [address, entry] : m_line_table)
   {
-    if (address < start || address >= end)
+    if (static_cast<u64>(address) < start || static_cast<u64>(address) >= end)
       continue;
 
     distinct_lines.insert(entry.line);

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <errno.h>
 #include <memory>
 #include <mutex>
@@ -227,11 +228,24 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
 #ifndef _WIN32
 void InitLocal(const char* socket_path)
 {
+  // DESNOTE(jbarber, 2026-07-21): Bound the path against sun_path's capacity
+  // (108 on Linux, 104 on macOS, varies elsewhere). A path longer than
+  // sizeof(sun_un::sun_path) - 1 would silently truncate / overflow, so reject
+  // it up front with an error and leave DAP disabled.
+  const size_t path_len = std::strlen(socket_path);
+  if (path_len >= sizeof(sockaddr_un::sun_path))
+  {
+    ERROR_LOG_FMT(CONSOLE,
+                  "DAP: unix socket path too long ({} chars, max {}): {}",
+                  path_len, sizeof(sockaddr_un::sun_path) - 1, socket_path);
+    return;
+  }
+
   unlink(socket_path);
 
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
-  strcpy(addr.sun_path, socket_path);
+  std::strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
   InitGeneric(PF_LOCAL, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
   INFO_LOG_FMT(CONSOLE, "DAP: listening on unix socket {}", socket_path);

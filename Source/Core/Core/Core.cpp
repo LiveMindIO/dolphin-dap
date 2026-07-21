@@ -385,8 +385,15 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
         std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
         if (!dap_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
         {
-          debugger_enabled = true;
+          // DESNOTE(jbarber, 2026-07-21): Only mark the debugger as enabled
+          // after the listener is actually bound. InitLocal can fail (e.g.
+          // sun_path overflow, permission, port in use); setting
+          // debugger_enabled=true unconditionally would force
+          // CPUSetInitialExecutionState below to pause the core with no DAP
+          // server to ever resume it, hanging emulation on a bad config.
           DAP::InitLocal(dap_socket.data());
+          if (DAP::IsActive())
+            debugger_enabled = true;
         }
         else
 #endif
@@ -394,8 +401,9 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
           int dap_port = Config::Get(Config::MAIN_DAP_PORT);
           if (dap_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
           {
-            debugger_enabled = true;
             DAP::Init(dap_port);
+            if (DAP::IsActive())
+              debugger_enabled = true;
           }
         }
       }

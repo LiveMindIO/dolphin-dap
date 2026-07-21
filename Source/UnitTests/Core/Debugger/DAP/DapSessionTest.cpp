@@ -153,7 +153,8 @@ protected:
     system.GetMemory().Shutdown();
   }
 
-  // Runs the initialize/configurationDone handshake and consumes the entry stop.
+  // Runs the initialize/launch/configurationDone handshake and consumes the
+  // entry stop.
   void Handshake(TestClient& client)
   {
     client.Send(R"({
@@ -170,6 +171,20 @@ protected:
     const auto initialized = client.Receive();
     ASSERT_TRUE(initialized.has_value());
     EXPECT_EQ(initialized->at("event").to_str(), "initialized");
+
+    // DESNOTE(jbarber, 2026-07-21): launch before configurationDone so the
+    // entry-stop gate (which waits on both) fires the entry stop here. With
+    // the deferred-policy fix, configurationDone without a prior launch would
+    // no longer fire the stop immediately.
+    client.Send(R"({
+      "seq": 5,
+      "type": "request",
+      "command": "launch",
+      "arguments": {}
+    })");
+    const auto launch_resp = client.Receive();
+    ASSERT_TRUE(launch_resp.has_value());
+    EXPECT_EQ(launch_resp->at("command").to_str(), "launch");
 
     client.Send(R"({
       "seq": 2,
@@ -1251,6 +1266,16 @@ TEST_F(DapSessionTest, LaunchStopOnEntryFalseContinuesInsteadOfStopping)
   EXPECT_EQ(response->at("command").to_str(), "launch");
   EXPECT_TRUE(response->at("success").get<bool>());
 
+  // DESNOTE(jbarber, 2026-07-21): entry-stop is gated on configurationDone;
+  // send it here so MaybeFireEntryStop runs. With stopOnEntry:false it should
+  // NOT emit a stopped/entry event (the controller is told to Continue).
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "configurationDone"
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
+
   client.Send(R"({
     "seq": 3,
     "type": "request",
@@ -1293,6 +1318,14 @@ TEST_F(DapSessionTest, LaunchStopOnEntryTrueEmitsStoppedEntry)
   ASSERT_TRUE(response.has_value());
   EXPECT_TRUE(response->at("success").get<bool>());
 
+  // Entry-stop gate waits for configurationDone before firing.
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "configurationDone"
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
+
   const auto stopped = client.Receive();
   ASSERT_TRUE(stopped.has_value());
   EXPECT_EQ(stopped->at("event").to_str(), "stopped");
@@ -1328,6 +1361,13 @@ TEST_F(DapSessionTest, LaunchDefaultsToStoppedEntry)
   })");
   ASSERT_TRUE(client.Receive().has_value());
 
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "configurationDone"
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
+
   const auto stopped = client.Receive();
   ASSERT_TRUE(stopped.has_value());
   EXPECT_EQ(stopped->at("event").to_str(), "stopped");
@@ -1345,8 +1385,9 @@ TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchDoesNotDuplicateEntryStop)
 {
   // Regression: a client that sends configurationDone before launch/attach used
   // to emit a `stopped`/entry from configurationDone AND a second one from
-  // launch. The m_entry_stop_sent guard now ensures entry/attach stop fires
-  // exactly once regardless of the configurationDone/launch ordering.
+  // launch. The entry-stop is now deferred until BOTH configurationDone and
+  // launch/attach are seen, so it fires exactly once on the second of the two
+  // (here: launch), regardless of the ordering.
   TestClient client(m_client_fd());
 
   client.Send(R"({
@@ -1358,21 +1399,18 @@ TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchDoesNotDuplicateEntryStop)
   ASSERT_TRUE(client.Receive().has_value());  // initialize response
   ASSERT_TRUE(client.Receive().has_value());  // initialized event
 
-  // configurationDone before launch — this emits the entry stop and marks it sent.
+  // configurationDone before launch — under the deferred-entry-stop policy this
+  // does NOT yet fire the entry stop; we wait for launch so any `stopOnEntry`
+  // override on launch is honored.
   client.Send(R"({
     "seq": 2,
     "type": "request",
     "command": "configurationDone"
   })");
   ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
-  const auto first_stop = client.Receive();
-  ASSERT_TRUE(first_stop.has_value());
-  EXPECT_EQ(first_stop->at("event").to_str(), "stopped");
-  EXPECT_EQ(first_stop->at("body").get<picojson::object>().at("reason").to_str(), "entry");
 
-  // launch must NOT emit a second entry stop — verify by sending a probe
-  // request (threads) and confirming its response is the very next message
-  // (no stale stopped event queued ahead of it).
+  // launch is the second gate; with no stopOnEntry override, default-true fires
+  // the entry stop exactly once.
   client.Send(R"({
     "seq": 3,
     "type": "request",
@@ -1380,7 +1418,13 @@ TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchDoesNotDuplicateEntryStop)
     "arguments": {}
   })");
   ASSERT_TRUE(client.Receive().has_value());  // launch response
+  const auto first_stop = client.Receive();
+  ASSERT_TRUE(first_stop.has_value());
+  EXPECT_EQ(first_stop->at("event").to_str(), "stopped");
+  EXPECT_EQ(first_stop->at("body").get<picojson::object>().at("reason").to_str(), "entry");
 
+  // A probe request (threads) must not see a stale second stop queued ahead of
+  // its response.
   client.Send(R"({
     "seq": 4,
     "type": "request",
@@ -1390,6 +1434,71 @@ TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchDoesNotDuplicateEntryStop)
   ASSERT_TRUE(next.has_value());
   EXPECT_EQ(next->at("type").to_str(), "response");
   EXPECT_EQ(next->at("command").to_str(), "threads");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchHonorsLaunchStopOnEntryFalse)
+{
+  // Regression: Bugbot flagged that configurationDone before launch used to
+  // commit the entry-stop policy immediately, silently dropping a later
+  // `launch` `stopOnEntry:false` override. With the deferred gate, launch's
+  // override is applied before MaybeFireEntryStop fires, so the override
+  // takes effect: no `stopped` event is emitted and the core is told to
+  // continue.
+  TestClient client(m_client_fd());
+
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // initialize response
+  ASSERT_TRUE(client.Receive().has_value());  // initialized event
+
+  client.Send(R"({
+    "seq": 2,
+    "type": "request",
+    "command": "configurationDone"
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "launch",
+    "arguments": {"stopOnEntry": false}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // launch response
+
+  // No `stopped` event should follow; the only thing queued is the core
+  // state hook's `continued` (the controller was told to Continue). Verify by
+  // probing with threads and asserting the next received message is its
+  // response (or the continued event), but NOT a stopped/entry event.
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "threads"
+  })");
+  // Drain any continued event from the controller.Continue() path.
+  while (true)
+  {
+    const auto msg = client.Receive();
+    ASSERT_TRUE(msg.has_value());
+    if (msg->at("type").to_str() == "response")
+    {
+      EXPECT_EQ(msg->at("command").to_str(), "threads");
+      break;
+    }
+    ASSERT_EQ(msg->at("type").to_str(), "event");
+    EXPECT_NE(msg->at("event").to_str(), "stopped");
+  }
 
   client.Send(R"({
     "seq": 9,

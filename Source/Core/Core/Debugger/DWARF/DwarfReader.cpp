@@ -242,7 +242,18 @@ bool ParseDie(const u8* die_start, const u8* section_end, bool big_endian, DieIn
       break;
     }
     default:
-      return false;
+      // DESNOTE(jbarber, 2026-07-21): We don't know this attribute's encoded
+      // size, so we can't safely advance past it to read subsequent attributes.
+      // Bail out of the attribute loop for this DIE rather than the entire CU
+      // walk: ParseDie still succeeds (the length/tag/already-read fields are
+      // valid), and the caller advances via `info->length` / `info->sibling`
+      // to the next DIE. Previously `return false` here propagated up through
+      // ParseCompileUnits as a `break`, aborting parsing of subsequent CUs and
+      // losing their functions/line info.
+      WARN_LOG_FMT(SYMBOLS, "DWARF 1.1: unknown attribute form 0x{:04x} in DIE tag 0x{:04x}; "
+                            "skipping remaining attributes",
+                   attr, info->tag);
+      return true;
     }
   }
 

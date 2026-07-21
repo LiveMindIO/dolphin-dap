@@ -242,6 +242,32 @@ private:
     FlushEvents();
   }
 
+  // DESNOTE(jbarber, 2026-07-21): Fires the entry/attach stop exactly once,
+  // gated on BOTH `launch`/`attach` and `configurationDone` having arrived.
+  // This lets a `stopOnEntry` override on a `launch` that comes in after
+  // `configurationDone` actually take effect -- previously configurationDone
+  // would fire the entry stop immediately with the config-default policy and
+  // silently drop the later override. Honors m_stop_on_entry (overridden or
+  // config-seeded) at decision time, so the override wins.
+  void MaybeFireEntryStop(std::string_view command)
+  {
+    if (!m_launch_seen || !m_config_done || m_entry_stop_sent)
+      return;
+    (void)command;
+    m_entry_stop_sent = true;
+    if (m_stop_on_entry)
+    {
+      SendStoppedEvent(m_launch_kind == "attach" ? "attach" : "entry");
+    }
+    else
+    {
+      // Core starts paused while a debugger is attached (see
+      // CPUSetInitialExecutionState in Core.cpp); resume it so the game runs
+      // immediately. The state hook queues a `continued` event.
+      m_controller.Continue();
+    }
+  }
+
   // Emits a `stopped` event whose reason is classified from the current PC
   // (code breakpoint, data watchpoint, or step) and carries `hitBreakpointIds`
   // when a breakpoint at the PC caused the stop.
@@ -590,21 +616,13 @@ private:
     if (command == "configurationDone")
     {
       Respond(request->seq, command, picojson::object{});
-      // DESNOTE(jbarber, 2026-07-21): configurationDone is the canonical
-      // "setup complete" signal when a client uses initialize->launch->done
-      // without passing stopOnEntry to launch. If launch/attach already set
-      // the stop-on-entry policy (m_stop_on_entry), honor it; otherwise (e.g.
-      // a bare attach with no prior launch) default to stopping. The
-      // m_entry_stop_sent guard ensures the entry/attach stop fires exactly
-      // once even if a client sends configurationDone before launch/attach.
-      if (!m_debugging_started && !m_entry_stop_sent)
-      {
-        m_entry_stop_sent = true;
-        if (m_stop_on_entry)
-          SendStoppedEvent("entry");
-        else
-          m_controller.Continue();
-      }
+      // DESNOTE(jbarber, 2026-07-21): Don't commit the entry-stop policy yet
+      // if `launch`/`attach` hasn't been seen -- a configDone-before-launch
+      // ordering would otherwise freeze the client's later `stopOnEntry=false`
+      // override. MaybeFireEntryStop gates on both m_launch_seen and
+      // m_config_done, so the deferred fire picks up the override.
+      m_config_done = true;
+      MaybeFireEntryStop(command);
       SyncSteppingBaseline();
       return;
     }
@@ -625,21 +643,9 @@ private:
 
       Respond(request->seq, command, picojson::object{});
       m_debugging_started = true;
-      if (!m_entry_stop_sent)
-      {
-        m_entry_stop_sent = true;
-        if (m_stop_on_entry)
-        {
-          SendStoppedEvent(command == "launch" ? "entry" : "attach");
-        }
-        else
-        {
-          // Core starts paused while a debugger is attached (see
-          // CPUSetInitialExecutionState in Core.cpp); resume it so the game
-          // runs immediately. The state hook queues a `continued` event.
-          m_controller.Continue();
-        }
-      }
+      m_launch_seen = true;
+      m_launch_kind = command;
+      MaybeFireEntryStop(command);
       SyncSteppingBaseline();
       return;
     }
@@ -1229,11 +1235,26 @@ private:
   // Stop-on-entry policy. Seeded from `Dolphin.General.DAPStopOnEntry` at
   // construction (so it can be configured at dolphin launch without a
   // per-session request); an explicit `stopOnEntry` on `launch`/`attach`
-  // overrides it for the session. Consulted by `configurationDone`.
+  // overrides it for the session. Consulted by `MaybeFireEntryStop`.
   bool m_stop_on_entry = true;
+  // DESNOTE(jbarber, 2026-07-21): Entry-stop decision is deferred until BOTH
+  // sides of the protocol have signaled readiness: the `launch`/`attach`
+  // request (which may carry a `stopOnEntry` override) AND the
+  // `configurationDone` request. Previously configurationDone fired the
+  // entry stop immediately when it arrived before launch, which silently
+  // dropped any later `launch` `stopOnEntry=false` override. With the gate
+  // below, a configDone-before-launch ordering waits for launch to apply
+  // its override before committing the policy.
+  bool m_launch_seen = false;
+  bool m_config_done = false;
+  // DESNOTE(jbarber, 2026-07-21): Remember whether the session was started
+  // via `launch` or `attach`; the deferred entry-stop fires from whichever
+  // of {launch, configurationDone} arrives second, and the event reason
+  // ("entry" vs "attach") must reflect the original launch/attach kind, not
+  // the gate that triggered the fire.
+  std::string m_launch_kind = "launch";
   // Guards the entry-stop so it fires exactly once across launch/attach and
-  // configurationDone, even when a client sends configurationDone before
-  // launch (or otherwise interleaves them).
+  // configurationDone, even when a client interleaves them.
   bool m_entry_stop_sent = false;
 
   // Stop reason captured synchronously by the state hook at break time (on the

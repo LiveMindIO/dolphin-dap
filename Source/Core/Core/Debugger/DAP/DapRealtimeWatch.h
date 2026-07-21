@@ -18,6 +18,10 @@ class System;
 
 namespace DAP
 {
+// Return value of AddSubscription when the (address, count) arguments are
+// rejected (count == 0 or address + count would wrap past u32 max).
+inline constexpr int kInvalidWatchId = 0;
+
 // A single region whose change is reported to the dispatch callback.
 struct RealtimeWatchChange
 {

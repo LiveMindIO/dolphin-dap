@@ -607,7 +607,12 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
       ++current_line;
     }
 
-    if (result.content.empty() && current_line == 0)
+    // DESNOTE(jbarber, 2026-07-21): Previous form `... && current_line == 0`
+    // was unreachable -- current_line starts at 1 and only increments. The
+    // real signal is "we went through the file but extracted no lines" (e.g.
+    // file shorter than source_first_line), in which case empty content
+    // already encodes it.
+    if (result.content.empty())
       return std::nullopt;
     return result;
   }

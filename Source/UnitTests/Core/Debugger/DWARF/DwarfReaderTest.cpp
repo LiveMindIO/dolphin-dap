@@ -50,12 +50,29 @@ TEST(DwarfReaderTest, ParseHandlesMissingLineSectionWithFunctionsOnly)
   EXPECT_TRUE(result->lines.empty());
 }
 
-TEST(DwarfReaderTest, ParseRejectsUnknownAttributeForm)
+TEST(DwarfReaderTest, ParseToleratesUnknownAttributeFormAndContinues)
 {
+  // DESNOTE(jbarber, 2026-07-21): An unknown DWARF 1.1 attribute form used
+  // to abort the entire CU walk via `return false` -> caller `break`,
+  // losing functions/line info from subsequent DIEs. The parser now logs a
+  // warning, skips the rest of that DIE's attributes, and continues the CU
+  // walk (advancing via the already-read length/sibling). Corrupting byte 7
+  // (the CU's first attribute) yields an unknown form; the CU's own
+  // name/stmt_list are lost, but the CU walk still descends into children
+  // via `length` and the function DIE -- whose attributes are uncorrupted --
+  // is still extracted.
   std::vector<u8> corrupted(DwarfTestFixture::kDebugSection.begin(),
                             DwarfTestFixture::kDebugSection.end());
   corrupted[7] = 0x3F;
-  EXPECT_FALSE(Core::Debug::Dwarf::Parse(corrupted, DwarfTestFixture::kLineSection, true));
+  const std::optional<Core::Debug::Dwarf::ParseResult> result =
+      Core::Debug::Dwarf::Parse(corrupted, DwarfTestFixture::kLineSection, true);
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->functions.size(), 1U);
+  EXPECT_EQ(result->functions[0].name, DwarfTestFixture::kFunctionName);
+  EXPECT_EQ(result->functions[0].low_pc, DwarfTestFixture::kFunctionAddress);
+  // The CU header's AT_name was unreadable (we bailed out of its attribute
+  // loop early), so no file entry is recorded for it.
+  EXPECT_TRUE(result->files.empty());
 }
 
 TEST(DwarfReaderTest, ParseIgnoresLineTableWhenStmtListOutOfBounds)
