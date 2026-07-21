@@ -1130,6 +1130,14 @@ private:
       return;
     }
 
+    // DESNOTE(jbarber, 2026-07-21): Pause before SetPC so the post-goto
+    // stopped event is truthful. Without this, if the client called goto
+    // while emulation was running, the CPU would keep executing at the new
+    // PC while the adapter told the client emulation halted -- the same
+    // desync Restart previously had. Pause mirrors what Restart/Terminate
+    // do before emitting a stopped event.
+    if (!m_system.GetCPU().IsStepping())
+      m_controller.Pause();
     m_controller.SetPC(arguments->target);
     Respond(request.seq, "goto", picojson::object{});
     SendStoppedEvent("goto");

@@ -1070,7 +1070,18 @@ std::string DapDebugController::Disassemble(u32 address, int instruction_count)
   std::string result;
   for (int i = 0; i < instruction_count; ++i)
   {
-    const u32 addr = address + static_cast<u32>(i * 4);
+    // DESNOTE(jbarber, 2026-07-21): Compute the byte offset in u64 and
+    // bounds-check against u32 max before the cast. The previous form
+    // did `address + static_cast<u32>(i * 4)` which silently wrapped on
+    // a high base address paired with a large instructionCount (up to
+    // 65536 from the protocol parser cap), so a request near the top of
+    // MEM1 wrapped around to disassemble low RAM instead of failing
+    // safely. Bail out when the offset would exceed u32 max rather than
+    // produce nonsense output for the wrapped tail.
+    const u64 offset = static_cast<u64>(i) * 4u;
+    if (offset > static_cast<u64>(std::numeric_limits<u32>::max()) - address)
+      break;
+    const u32 addr = address + static_cast<u32>(offset);
     if (i > 0)
       result.push_back('\n');
     result += debug_interface.Disassemble(&guard, addr);

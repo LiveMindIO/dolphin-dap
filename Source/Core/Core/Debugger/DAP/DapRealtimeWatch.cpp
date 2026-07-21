@@ -124,6 +124,31 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   // cell already at the frozen value (no-op) or restores it and continues
   // without surfacing a spurious change event to the client.
   std::memcpy(it->last_seen.data(), it->frozen_value->data(), it->count);
+
+  // DESNOTE(jbarber, 2026-07-21): Write the canon into guest RAM immediately
+  // so the freeze takes effect at once, not on the next vi_end_field_event
+  // Tick. The Tick path only runs at field rate while the core is running;
+  // when paused (typical right after attach), Tick is never called and the
+  // watched bytes would stay at the game value until the user continued.
+  // Mirror the per-byte HostWrite path Tick uses: IsValidAddress per byte
+  // (a shrunken readable tail can't slip a write through), and WriteU8
+  // routes through MMU::HostWrite which bypasses Memcheck (the freeze back-
+  // write is not an emulated watchpoint trap). Done under CPUThreadGuard so
+  // the writes are atomic with respect to the stepping CPU.
+  if (it->count > 0)
+  {
+    Core::CPUThreadGuard guard(m_system);
+    AddressSpace::Accessors* accessors =
+        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    const u8* frozen = it->frozen_value->data();
+    for (u32 i = 0; i < it->count; ++i)
+    {
+      const u32 addr = it->address + i;
+      if (!accessors->IsValidAddress(guard, addr))
+        break;
+      accessors->WriteU8(guard, addr, frozen[i]);
+    }
+  }
   return true;
 }
 
