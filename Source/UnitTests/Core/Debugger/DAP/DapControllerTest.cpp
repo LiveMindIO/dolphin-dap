@@ -467,6 +467,38 @@ TEST_F(DapControllerTest, SetDataBreakpointsReplacesPreviousWatchpoints)
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 4), nullptr);
 }
 
+TEST_F(DapControllerTest, SetDataBreakpointsRangedInstallsIsRangedMemcheck)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .length = 0x100, .read = false, .write = true}});
+
+  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->is_ranged);
+  EXPECT_EQ(check->start_address, TEST_ADDRESS);
+  EXPECT_EQ(check->end_address, TEST_ADDRESS + 0x100 - 1);
+  EXPECT_FALSE(check->is_break_on_read);
+  EXPECT_TRUE(check->is_break_on_write);
+}
+
+TEST_F(DapControllerTest, SetDataBreakpointsSingleByteIsNotRanged)
+{
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = TEST_ADDRESS, .length = 1, .read = true, .write = true}});
+
+  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_FALSE(check->is_ranged);
+  EXPECT_EQ(check->start_address, TEST_ADDRESS);
+  EXPECT_EQ(check->end_address, TEST_ADDRESS);
+}
+
 TEST_F(DapControllerTest, SetDataBreakpointsEmptyClearsExisting)
 {
   auto& memchecks = System().GetPowerPC().GetMemChecks();

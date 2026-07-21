@@ -12,6 +12,7 @@ target_sources(DapControllerTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
 add_dolphin_test(DapSessionTest Debugger/DAP/DapSessionTest.cpp)
 
 target_sources(DapSessionTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+add_dolphin_test(RealtimeWatchTest Debugger/DAP/RealtimeWatchTest.cpp)
 
 add_dolphin_test(DwarfReaderTest Debugger/DWARF/DwarfReaderTest.cpp)
 add_dolphin_test(PPCSymbolDBLineTest Debugger/DWARF/PPCSymbolDBLineTest.cpp)

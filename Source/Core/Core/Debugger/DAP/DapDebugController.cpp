@@ -318,8 +318,11 @@ void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> b
   {
     TMemCheck check;
     check.start_address = request.address;
-    check.end_address = request.address;
-    check.is_ranged = false;
+    check.end_address = request.address + (request.length == 0 ? 1 : request.length) - 1;
+    // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck distinguishes single-
+    // byte vs ranged checks; DAP data breakpoints default to one byte, but a
+    // client may pass `length` (a Dolphin extension) to watch a region.
+    check.is_ranged = (request.length > 1);
     check.is_break_on_read = request.read;
     check.is_break_on_write = request.write;
     check.break_on_hit = true;

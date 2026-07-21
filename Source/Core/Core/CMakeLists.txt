@@ -72,6 +72,8 @@ add_library(core
   Debugger/DAP/DapJson.h
   Debugger/DAP/DapProtocol.cpp
   Debugger/DAP/DapProtocol.h
+  Debugger/DAP/DapRealtimeWatch.cpp
+  Debugger/DAP/DapRealtimeWatch.h
   Debugger/DAP/DapSession.cpp
   Debugger/DAP/DapSession.h
   Debugger/DAP/DapTransport.cpp

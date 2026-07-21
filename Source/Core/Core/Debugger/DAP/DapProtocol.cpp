@@ -203,6 +203,13 @@ SetDataBreakpointsArguments ParseSetDataBreakpoints(const picojson::object& argu
         breakpoint.address = *address;
     }
 
+    // DESNOTE(jbarber, 2026-07-21): `length` is a Dolphin-specific extension to
+    // DAP data breakpoints; spec-compliant clients omit it and get length 1
+    // (single-byte watch). When present and > 1, the controller installs a
+    // ranged watchpoint over the whole region.
+    if (const std::optional<u32> length = ReadNumericFromJson<u32>(entry_obj, "length"))
+      breakpoint.length = *length == 0 ? 1 : *length;
+
     if (const std::optional<std::string> access_type = ReadStringFromJson(entry_obj, "accessType"))
     {
       if (*access_type == "read")
@@ -323,6 +330,42 @@ BreakpointLocationsArguments ParseBreakpointLocations(const picojson::object& ar
   result.start_line = ReadNumericFromJson<int>(arguments, "line").value_or(0);
   if (const std::optional<int> end_line = ReadNumericFromJson<int>(arguments, "endLine"))
     result.end_line = *end_line;
+  return result;
+}
+
+std::optional<RealtimeWatchArguments> ParseRealtimeWatch(const picojson::object& arguments)
+{
+  const std::optional<u32> address = ResolveMemoryReference(arguments);
+  const std::optional<u32> count = ReadNumericFromJson<u32>(arguments, "count");
+  if (!address || !count || *count == 0)
+    return std::nullopt;
+
+  RealtimeWatchArguments result;
+  result.address = *address;
+  result.count = *count;
+  return result;
+}
+
+std::optional<RealtimeWatchCancelArguments>
+ParseRealtimeWatchCancel(const picojson::object& arguments)
+{
+  const std::optional<int> watch_id = ReadNumericFromJson<int>(arguments, "watchId");
+  if (!watch_id)
+    return std::nullopt;
+
+  RealtimeWatchCancelArguments result;
+  result.watch_id = *watch_id;
+  return result;
+}
+
+std::optional<LaunchArguments> ParseLaunch(const picojson::object& arguments)
+{
+  // DESNOTE(jbarber, 2026-07-21): `stopOnEntry` is optional; nullopt means
+  // "client didn't say" so the session can fall back to the
+  // `Dolphin.General.DAPStopOnEntry` config default. A client explicitly
+  // writing true/false overrides the config for this session.
+  LaunchArguments result;
+  result.stop_on_entry = ReadBoolFromJson(arguments, "stopOnEntry");
   return result;
 }
 

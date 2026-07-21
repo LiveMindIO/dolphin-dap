@@ -94,6 +94,10 @@ std::optional<SetVariableArguments> ParseSetVariable(const picojson::object& arg
 struct RequestedDataBreakpoint
 {
   std::optional<u32> address;
+  // Dolphin extension: number of bytes to watch starting at `address`.
+  // Defaults to 1 (standard DAP single-byte data breakpoint). When > 1 the
+  // controller installs a ranged PPC memcheck over [address, address+length-1].
+  u32 length = 1;
   bool read = true;
   bool write = true;
   std::optional<std::string> condition;
@@ -165,6 +169,37 @@ struct BreakpointLocationsArguments
 };
 
 BreakpointLocationsArguments ParseBreakpointLocations(const picojson::object& arguments);
+
+// Arguments of a `dolphin_realtimeWatch` custom request. `address` is resolved
+// from the hex `memoryReference`; `count` is the number of bytes to watch
+// starting at `address`.
+struct RealtimeWatchArguments
+{
+  u32 address = 0;
+  u32 count = 0;
+};
+
+std::optional<RealtimeWatchArguments> ParseRealtimeWatch(const picojson::object& arguments);
+
+// Arguments of a `dolphin_realtimeWatchCancel` custom request.
+struct RealtimeWatchCancelArguments
+{
+  int watch_id = 0;
+};
+
+std::optional<RealtimeWatchCancelArguments>
+ParseRealtimeWatchCancel(const picojson::object& arguments);
+
+// Arguments of a `launch`/`attach` request. `stop_on_entry` is nullopt when
+// the client omitted the field; the session resolves the effective policy
+// against the `Dolphin.General.DAPStopOnEntry` config default. When present
+// (true or false) it overrides the config for this session.
+struct LaunchArguments
+{
+  std::optional<bool> stop_on_entry;
+};
+
+std::optional<LaunchArguments> ParseLaunch(const picojson::object& arguments);
 
 // Envelope builders. `seq` is the server's monotonically increasing sequence
 // number; the caller owns its allocation.

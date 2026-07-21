@@ -4,6 +4,7 @@
 #include "Core/Debugger/DAP/DapSession.h"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -23,10 +24,12 @@
 #include "Common/JsonUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/Version.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/DAP/DapProtocol.h"
+#include "Core/Debugger/DAP/DapRealtimeWatch.h"
 #include "Core/Debugger/DAP/DapTransport.h"
 #include "Core/HW/CPU.h"
 #include "Core/System.h"
@@ -125,7 +128,8 @@ class Session
 {
 public:
   Session(DapTransport& transport, Core::System& system)
-      : m_transport(transport), m_controller(system), m_system(system)
+      : m_transport(transport), m_controller(system), m_system(system),
+        m_stop_on_entry(Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY))
   {
     m_state_hook = Core::AddOnStateChangedCallback([this](const Core::State state) {
       if (state == Core::State::Running)
@@ -136,6 +140,30 @@ public:
         QueueEvent("continued", std::move(body));
       }
     });
+
+    // DESNOTE(jbarber, 2026-07-20): The realtime-watch sampler hooks
+    // vi_end_field_event (CPU thread) and, on a region change, enqueues a
+    // `dolphin_memoryChanged` event per change. The dispatch runs on the CPU
+    // thread; QueueEvent is mutex-guarded and uses an atomic seq, so it is
+    // safe to call cross-thread. The Run() loop flushes queued events to the
+    // socket on each 50ms poll iteration -- so a change observed at frame rate
+    // is delivered to the client within ~50ms. Constructed in the ctor body so
+    // the lambda captures a fully-formed `this` (the other members it touches
+    // -- m_event_mutex, m_pending_events, m_next_seq -- are already live by
+    // this point and are not touched before Run() begins).
+    m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
+        m_system,
+        [this](const std::vector<RealtimeWatchChange>& changes) {
+          for (const RealtimeWatchChange& change : changes)
+          {
+            picojson::object body;
+            body.emplace("watchId", static_cast<double>(change.watch_id));
+            body.emplace("address", Json::FormatAddress(change.address));
+            body.emplace("count", static_cast<double>(change.count));
+            body.emplace("data", Json::Base64Encode(change.bytes));
+            QueueEvent("dolphin_memoryChanged", std::move(body));
+          }
+        });
   }
 
   void Run()
@@ -511,18 +539,62 @@ private:
     if (command == "configurationDone")
     {
       Respond(request->seq, command, picojson::object{});
+      // DESNOTE(jbarber, 2026-07-21): configurationDone is the canonical
+      // "setup complete" signal when a client uses initialize->launch->done
+      // without passing stopOnEntry to launch. If launch/attach already set
+      // the stop-on-entry policy (m_stop_on_entry), honor it; otherwise (e.g.
+      // a bare attach with no prior launch) default to stopping.
       if (!m_debugging_started)
-        SendStoppedEvent("entry");
+      {
+        if (m_stop_on_entry)
+          SendStoppedEvent("entry");
+        else
+          m_controller.Continue();
+      }
       SyncSteppingBaseline();
       return;
     }
 
     if (command == "launch" || command == "attach")
     {
+      // DESNOTE(jbarber, 2026-07-21): `stopOnEntry` is the standard DAP field
+      // for "should we break at entry". When the client omits it, we fall back
+      // to the `Dolphin.General.DAPStopOnEntry` config (set at dolphin launch
+      // via `-C Dolphin.General.DAPStopOnEntry=false`), which the ctor seeded
+      // into m_stop_on_entry. An explicit true/false overrides the config for
+      // this session. Default true preserves the historical always-paused
+      // behavior when neither the config nor the request says otherwise.
+      const std::optional<Protocol::LaunchArguments> launch_args =
+          Protocol::ParseLaunch(request->arguments);
+      if (launch_args && launch_args->stop_on_entry.has_value())
+        m_stop_on_entry = *launch_args->stop_on_entry;
+
       Respond(request->seq, command, picojson::object{});
       m_debugging_started = true;
-      SendStoppedEvent(command == "launch" ? "entry" : "attach");
+      if (m_stop_on_entry)
+      {
+        SendStoppedEvent(command == "launch" ? "entry" : "attach");
+      }
+      else
+      {
+        // Core starts paused while a debugger is attached (see
+        // CPUSetInitialExecutionState in Core.cpp); resume it so the game
+        // runs immediately. The state hook queues a `continued` event.
+        m_controller.Continue();
+      }
       SyncSteppingBaseline();
+      return;
+    }
+
+    if (command == "dolphin_realtimeWatch")
+    {
+      HandleRealtimeWatch(*request);
+      return;
+    }
+
+    if (command == "dolphin_realtimeWatchCancel")
+    {
+      HandleRealtimeWatchCancel(*request);
       return;
     }
 
@@ -774,6 +846,7 @@ private:
       {
         DataBreakpointRequest bp;
         bp.address = *breakpoint.address;
+        bp.length = breakpoint.length;
         bp.read = breakpoint.read;
         bp.write = breakpoint.write;
         bp.condition = breakpoint.condition;
@@ -995,6 +1068,49 @@ private:
     Respond(request.seq, "disassemble", std::move(body));
   }
 
+  void HandleRealtimeWatch(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::RealtimeWatchArguments> arguments =
+        Protocol::ParseRealtimeWatch(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_realtimeWatch", "invalid dolphin_realtimeWatch arguments");
+      return;
+    }
+
+    // DESNOTE(jbarber, 2026-07-20): Subscribe-and-seed happens synchronously
+    // here on the session thread; Tick() later runs on the CPU thread. The
+    // client uses the returned watchId to correlate the asynchronous
+    // `dolphin_memoryChanged` events and to cancel the subscription.
+    const int watch_id = m_watch_sampler->AddSubscription(arguments->address, arguments->count);
+
+    picojson::object body;
+    body.emplace("watchId", static_cast<double>(watch_id));
+    body.emplace("address", Json::FormatAddress(arguments->address));
+    body.emplace("count", static_cast<double>(arguments->count));
+    Respond(request.seq, "dolphin_realtimeWatch", std::move(body));
+  }
+
+  void HandleRealtimeWatchCancel(const Protocol::Request& request)
+  {
+    const std::optional<Protocol::RealtimeWatchCancelArguments> arguments =
+        Protocol::ParseRealtimeWatchCancel(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_realtimeWatchCancel",
+                   "invalid dolphin_realtimeWatchCancel arguments");
+      return;
+    }
+
+    if (!m_watch_sampler->RemoveSubscription(arguments->watch_id))
+    {
+      RespondError(request.seq, "dolphin_realtimeWatchCancel", "no such watch");
+      return;
+    }
+
+    Respond(request.seq, "dolphin_realtimeWatchCancel", picojson::object{});
+  }
+
   static picojson::object MakeScope(std::string_view name, int variables_reference)
   {
     picojson::object scope;
@@ -1044,6 +1160,7 @@ private:
   DapDebugController m_controller;
   Core::System& m_system;
   Common::EventHook m_state_hook;
+  std::unique_ptr<RealtimeWatchSampler> m_watch_sampler;
   std::atomic<bool> m_running{true};
   // Sequence numbers are handed out from both the session loop (responses) and
   // the core state-changed callback (the "continued" event), which may run on
@@ -1051,6 +1168,11 @@ private:
   std::atomic<int> m_next_seq{1};
   bool m_was_stepping = false;
   bool m_debugging_started = false;
+  // Stop-on-entry policy. Seeded from `Dolphin.General.DAPStopOnEntry` at
+  // construction (so it can be configured at dolphin launch without a
+  // per-session request); an explicit `stopOnEntry` on `launch`/`attach`
+  // overrides it for the session. Consulted by `configurationDone`.
+  bool m_stop_on_entry = true;
 
   std::mutex m_event_mutex;
   std::vector<std::string> m_pending_events;

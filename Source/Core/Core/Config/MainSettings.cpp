@@ -344,6 +344,7 @@ const Info<std::string> MAIN_GDB_SOCKET{{System::Main, "General", "GDBSocket"}, 
 const Info<int> MAIN_GDB_PORT{{System::Main, "General", "GDBPort"}, -1};
 const Info<std::string> MAIN_DAP_SOCKET{{System::Main, "General", "DAPSocket"}, ""};
 const Info<int> MAIN_DAP_PORT{{System::Main, "General", "DAPPort"}, -1};
+const Info<bool> MAIN_DAP_STOP_ON_ENTRY{{System::Main, "General", "DAPStopOnEntry"}, true};
 const Info<int> MAIN_ISO_PATH_COUNT{{System::Main, "General", "ISOPaths"}, 0};
 const Info<std::string> MAIN_SKYLANDERS_PATH{{System::Main, "General", "SkylandersCollectionPath"},
                                              ""};

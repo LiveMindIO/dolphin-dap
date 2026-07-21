@@ -273,6 +273,37 @@ TEST(DapProtocol, ParseSetDataBreakpointsExtractsCondition)
   EXPECT_EQ(*parsed.breakpoints[0].condition, "r3 == 1");
 }
 
+TEST(DapProtocol, ParseSetDataBreakpointsReadsLengthExtension)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100", "accessType": "write", "length": 256}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
+  EXPECT_EQ(parsed.breakpoints[0].length, 256u);
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsLengthDefaultsToOne)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100"}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_EQ(parsed.breakpoints[0].length, 1u);
+}
+
+TEST(DapProtocol, ParseSetDataBreakpointsZeroLengthBecomesOne)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "breakpoints": [{"dataId": "0x80003100", "length": 0}]
+  })");
+  const auto parsed = Protocol::ParseSetDataBreakpoints(message);
+  ASSERT_EQ(parsed.breakpoints.size(), 1u);
+  EXPECT_EQ(parsed.breakpoints[0].length, 1u);
+}
+
 TEST(DapProtocol, ParseEvaluateRejectsMissingExpression)
 {
   const auto message = ParseObjectOrDie(R"({"context": "watch"})");
@@ -533,5 +564,31 @@ TEST(DapProtocol, DisassemblyInstructionTextIsEscapedOnSerialize)
       reparsed->at("body").get<picojson::object>().at("instructions").get<picojson::array>();
   ASSERT_EQ(out.size(), 1u);
   EXPECT_EQ(out[0].get<picojson::object>().at("instruction").to_str(), R"(li r3, "x")");
+}
+
+TEST(DapProtocol, ParseLaunchOmitsStopOnEntryByDefault)
+{
+  const auto args = ParseObjectOrDie(R"({})");
+  const auto parsed = Protocol::ParseLaunch(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_FALSE(parsed->stop_on_entry.has_value());
+}
+
+TEST(DapProtocol, ParseLaunchStopOnEntryFalse)
+{
+  const auto args = ParseObjectOrDie(R"({"stopOnEntry": false})");
+  const auto parsed = Protocol::ParseLaunch(args);
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->stop_on_entry.has_value());
+  EXPECT_FALSE(*parsed->stop_on_entry);
+}
+
+TEST(DapProtocol, ParseLaunchStopOnEntryTrue)
+{
+  const auto args = ParseObjectOrDie(R"({"stopOnEntry": true})");
+  const auto parsed = Protocol::ParseLaunch(args);
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->stop_on_entry.has_value());
+  EXPECT_TRUE(*parsed->stop_on_entry);
 }
 }  // namespace

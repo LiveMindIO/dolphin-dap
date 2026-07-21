@@ -350,6 +350,57 @@ TEST_F(DapSessionTest, DisassembleReturnsInstructions)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, RealtimeWatchSubscribeAndCancelRoundTrip)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_realtimeWatch",
+    "arguments": {"memoryReference": "0x00004000", "count": 4}
+  })");
+  const auto sub = client.Receive();
+  ASSERT_TRUE(sub.has_value());
+  ASSERT_TRUE(sub->at("success").get<bool>());
+  EXPECT_EQ(sub->at("command").to_str(), "dolphin_realtimeWatch");
+  const auto& sub_body = sub->at("body").get<picojson::object>();
+  const double watch_id = sub_body.at("watchId").get<double>();
+  EXPECT_GT(watch_id, 0.0);
+  EXPECT_EQ(sub_body.at("address").to_str(), "0x00004000");
+  EXPECT_EQ(sub_body.at("count").get<double>(), 4.0);
+
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "dolphin_realtimeWatchCancel",
+    "arguments": {"watchId": 999}
+  })");
+  const auto cancel_miss = client.Receive();
+  ASSERT_TRUE(cancel_miss.has_value());
+  EXPECT_FALSE(cancel_miss->at("success").get<bool>());
+
+  client.Send(std::string(R"({
+    "seq": 5,
+    "type": "request",
+    "command": "dolphin_realtimeWatchCancel",
+    "arguments": { "watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) + R"( }
+  })");
+  const auto cancel = client.Receive();
+  ASSERT_TRUE(cancel.has_value());
+  ASSERT_TRUE(cancel->at("success").get<bool>());
+  EXPECT_EQ(cancel->at("command").to_str(), "dolphin_realtimeWatchCancel");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
 TEST_F(DapSessionTest, VariablesReturnsRegisters)
 {
   Core::System::GetInstance().GetPPCState().gpr[3] = 0x12345678;
@@ -547,6 +598,41 @@ TEST_F(DapSessionTest, SetDataBreakpointsInstallsWatchpoint)
   EXPECT_TRUE(response->at("success").get<bool>());
   EXPECT_NE(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(CODE_ADDRESS),
             nullptr);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetDataBreakpointsRangedLengthInstallsRangedWatchpoint)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // `length` is a Dolphin extension to the standard DAP data-breakpoint args.
+  // When present and > 1 the controller installs a ranged PPC memcheck over
+  // [address, address+length-1].
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "0x00003100", "accessType": "write", "length": 256}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+
+  const TMemCheck* check =
+      Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(CODE_ADDRESS);
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->is_ranged);
+  EXPECT_EQ(check->start_address, CODE_ADDRESS);
+  EXPECT_EQ(check->end_address, CODE_ADDRESS + 256u - 1u);
 
   client.Send(R"({
     "seq": 9,
@@ -1124,6 +1210,128 @@ TEST_F(DapSessionTest, UnknownCommandReturnsError)
   ASSERT_TRUE(response.has_value());
   EXPECT_EQ(response->at("command").to_str(), "frobnicate");
   EXPECT_FALSE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, LaunchStopOnEntryFalseContinuesInsteadOfStopping)
+{
+  TestClient client(m_client_fd());
+
+  // initialize handshake (no configurationDone yet)
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // initialize response
+  ASSERT_TRUE(client.Receive().has_value());  // initialized event
+
+  // launch with stopOnEntry: false -> the core should be told to continue
+  // rather than emit a "stopped"/"entry" event. In the un-booted test harness
+  // Core::SetState is a no-op (s_state != Running), so the state hook doesn't
+  // fire a "continued" -- what we can assert is that NO "stopped"/"entry"
+  // arrives. We prove that by sending a follow-up request and confirming its
+  // response is the first thing we receive (no stale stopped event queued
+  // ahead of it, unlike the stopOnEntry:true case).
+  client.Send(R"({
+    "seq": 2,
+    "type": "request",
+    "command": "launch",
+    "arguments": {"stopOnEntry": false}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("command").to_str(), "launch");
+  EXPECT_TRUE(response->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "threads"
+  })");
+  const auto next = client.Receive();
+  ASSERT_TRUE(next.has_value());
+  // If a "stopped"/"entry" had been queued, it would arrive here instead.
+  EXPECT_EQ(next->at("type").to_str(), "response");
+  EXPECT_EQ(next->at("command").to_str(), "threads");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, LaunchStopOnEntryTrueEmitsStoppedEntry)
+{
+  TestClient client(m_client_fd());
+
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());
+  ASSERT_TRUE(client.Receive().has_value());
+
+  client.Send(R"({
+    "seq": 2,
+    "type": "request",
+    "command": "launch",
+    "arguments": {"stopOnEntry": true}
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "entry");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, LaunchDefaultsToStoppedEntry)
+{
+  // Omitting stopOnEntry must preserve the historical always-paused behavior.
+  TestClient client(m_client_fd());
+
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());
+  ASSERT_TRUE(client.Receive().has_value());
+
+  client.Send(R"({
+    "seq": 2,
+    "type": "request",
+    "command": "launch",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());
+
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "entry");
 
   client.Send(R"({
     "seq": 9,

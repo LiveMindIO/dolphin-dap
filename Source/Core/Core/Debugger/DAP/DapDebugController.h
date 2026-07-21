@@ -106,6 +106,10 @@ struct SourceBreakpointSpec
 struct DataBreakpointRequest
 {
   u32 address = 0;
+  // Number of bytes to watch starting at `address`. Defaults to 1 (a single-
+  // byte DAP data breakpoint). length > 1 installs a ranged PPC memcheck
+  // ([address, address+length-1]).
+  u32 length = 1;
   bool read = false;
   bool write = false;
   std::optional<std::string> condition;
