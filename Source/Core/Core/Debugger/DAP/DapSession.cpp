@@ -399,6 +399,9 @@ private:
     // back to standard DAP readMemory/writeMemory polling.
     capabilities.emplace("supportsDolphinRealtimeWatch", true);
     capabilities.emplace("supportsDolphinFreeze", true);
+    capabilities.emplace("supportsDolphinFindFreeMemory", true);
+    capabilities.emplace("supportsDolphinInjectCode", true);
+    capabilities.emplace("supportsDolphinDetour", true);
 
     picojson::object server_info;
     server_info.emplace("name", std::string("Dolphin DAP"));
@@ -676,6 +679,24 @@ private:
     if (command == "dolphin_unfreeze")
     {
       HandleUnfreeze(*request);
+      return;
+    }
+
+    if (command == "dolphin_findFreeMemory")
+    {
+      HandleFindFreeMemory(*request);
+      return;
+    }
+
+    if (command == "dolphin_injectCode")
+    {
+      HandleInjectCode(*request);
+      return;
+    }
+
+    if (command == "dolphin_detour")
+    {
+      HandleDetour(*request);
       return;
     }
 
@@ -1283,6 +1304,97 @@ private:
     }
 
     Respond(request.seq, "dolphin_unfreeze", picojson::object{});
+  }
+
+  void HandleFindFreeMemory(const Protocol::Request& request)
+  {
+    // DESNOTE(jbarber, 2026-07-21): Scans MEM1 for the smallest 4-byte-aligned
+    // zero-run >= `count` and returns its address. Integrators that want a
+    // code cave but don't know the game's memory layout use this to let the
+    // server pick a safe address.
+    const std::optional<Protocol::FindFreeMemoryArguments> arguments =
+        Protocol::ParseFindFreeMemory(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_findFreeMemory",
+                   "invalid dolphin_findFreeMemory arguments");
+      return;
+    }
+    const std::optional<u32> address = m_controller.FindFreeMemory(arguments->count);
+    if (!address)
+    {
+      RespondError(request.seq, "dolphin_findFreeMemory", "no free region of that size");
+      return;
+    }
+    picojson::object body;
+    body.emplace("address", Json::FormatAddress(*address));
+    body.emplace("count", static_cast<double>(arguments->count));
+    Respond(request.seq, "dolphin_findFreeMemory", std::move(body));
+  }
+
+  void HandleInjectCode(const Protocol::Request& request)
+  {
+    // DESNOTE(jbarber, 2026-07-21): Writes PPC machine code at an
+    // explicitly-provided or server-allocated address. The integrator
+    // supplies raw bytes (base64-encoded); the server doesn't assemble.
+    // WriteMemory's iCache+JIT invalidation ensures the injected bytes are
+    // observed by the next fetch in both interpreter and JIT modes.
+    const std::optional<Protocol::InjectCodeArguments> arguments =
+        Protocol::ParseInjectCode(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_injectCode", "invalid dolphin_injectCode arguments");
+      return;
+    }
+    if (!arguments->address && !m_controller.FindFreeMemory(static_cast<u32>(arguments->code.size())))
+    {
+      RespondError(request.seq, "dolphin_injectCode", "no free region of that size");
+      return;
+    }
+    const u32 address = m_controller.InjectCode(arguments->address, arguments->code);
+    if (address == 0)
+    {
+      RespondError(request.seq, "dolphin_injectCode", "write failed (invalid address?)");
+      return;
+    }
+    picojson::object body;
+    body.emplace("address", Json::FormatAddress(address));
+    body.emplace("count", static_cast<double>(arguments->code.size()));
+    Respond(request.seq, "dolphin_injectCode", std::move(body));
+  }
+
+  void HandleDetour(const Protocol::Request& request)
+  {
+    // DESNOTE(jbarber, 2026-07-21): Transparent-detour pattern. The server:
+    //   1. Allocates detour_address + trampoline_address (if detour_address
+    //      is omitted, finds free memory big enough for both).
+    //   2. Writes detour_body at detour_address, appends `b trampoline`.
+    //   3. Writes trampoline: original_instruction + `b target+4`.
+    //   4. Patches target_address with `b detour_address`.
+    // The detour body should end with `b trampoline_address` (or fall
+    // through to the implicit appended one) to transparently resume the
+    // patched-out instruction and continue after the patch site.
+    const std::optional<Protocol::DetourArguments> arguments =
+        Protocol::ParseDetour(request.arguments);
+    if (!arguments)
+    {
+      RespondError(request.seq, "dolphin_detour", "invalid dolphin_detour arguments");
+      return;
+    }
+    auto result = m_controller.Detour(arguments->target_address, arguments->detour_address,
+                                      arguments->detour_body);
+    if (!result)
+    {
+      RespondError(request.seq, "dolphin_detour",
+                   "detour failed (invalid target or no free memory?)");
+      return;
+    }
+    picojson::object body;
+    body.emplace("targetAddress", Json::FormatAddress(result->target_address));
+    body.emplace("detourAddress", Json::FormatAddress(result->detour_address));
+    body.emplace("trampolineAddress", Json::FormatAddress(result->trampoline_address));
+    body.emplace("originalInstruction", Json::Base64Encode(result->original_instruction));
+    Respond(request.seq, "dolphin_detour", std::move(body));
   }
 
   static picojson::object MakeScope(std::string_view name, int variables_reference)

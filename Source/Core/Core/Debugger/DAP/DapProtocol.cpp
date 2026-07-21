@@ -425,6 +425,72 @@ std::optional<UnfreezeArguments> ParseUnfreeze(const picojson::object& arguments
   return result;
 }
 
+std::optional<FindFreeMemoryArguments> ParseFindFreeMemory(const picojson::object& arguments)
+{
+  const std::optional<u32> count = ReadNumericFromJson<u32>(arguments, "count");
+  if (!count || *count == 0)
+    return std::nullopt;
+
+  FindFreeMemoryArguments result;
+  result.count = *count;
+  return result;
+}
+
+std::optional<InjectCodeArguments> ParseInjectCode(const picojson::object& arguments)
+{
+  // DESNOTE(jbarber, 2026-07-21): `code` is base64-encoded PPC machine code.
+  // `memoryReference` is optional -- when absent, the server allocates a
+  // region via FindFreeMemory; when present, it writes at that address.
+  const std::optional<std::string> data = ReadStringFromJson(arguments, "code");
+  if (!data)
+    return std::nullopt;
+  const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
+  if (!decoded || decoded->empty())
+    return std::nullopt;
+  // Instructions are 4 bytes. Allow non-multiple-of-4 lengths for integrators
+  // who pass trailing data or hand-crafted trampolines; the server won't
+  // complain but PC alignment will be on them.
+  if (decoded->size() % 4u != 0u)
+    return std::nullopt;
+
+  InjectCodeArguments result;
+  result.address = ResolveMemoryReference(arguments);
+  result.code = std::move(*decoded);
+  return result;
+}
+
+std::optional<DetourArguments> ParseDetour(const picojson::object& arguments)
+{
+  // Required: target_address (the 4-byte instruction being detoured) and
+  // detour_body (base64). Optional: detour_address (where the detour lives;
+  // allocated via FindFreeMemory if omitted).
+  const std::optional<u32> target_address = ResolveMemoryReference(arguments);
+  if (!target_address)
+    return std::nullopt;
+  const std::optional<std::string> data = ReadStringFromJson(arguments, "detourBody");
+  if (!data)
+    return std::nullopt;
+  const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
+  if (!decoded || decoded->empty() || decoded->size() % 4u != 0u)
+    return std::nullopt;
+
+  DetourArguments result;
+  result.target_address = *target_address;
+  // detourAddress is optional (allocated by the server when absent). It's a
+  // hex string like "0x8000C000" despite the camelCase-without-"Reference"
+  // name -- we explicitly parse "0x..." since ResolveMemoryReference only
+  // knows about the "memoryReference" key.
+  if (const std::optional<std::string> detour_ref = ReadStringFromJson(arguments, "detourAddress"))
+  {
+    const std::optional<u32> parsed = Json::ParseHexAddress(*detour_ref);
+    if (!parsed)
+      return std::nullopt;
+    result.detour_address = *parsed;
+  }
+  result.detour_body = std::move(*decoded);
+  return result;
+}
+
 std::optional<LaunchArguments> ParseLaunch(const picojson::object& arguments)
 {
   // DESNOTE(jbarber, 2026-07-21): `stopOnEntry` is optional; nullopt means

@@ -1507,5 +1507,208 @@ TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchHonorsLaunchStopOnEntryFalse
   })");
   (void)client.Receive();
 }
+
+// ---------------------------------------------------------------------------
+// Code injection + detour (Dolphin extensions).
+// ---------------------------------------------------------------------------
+
+TEST_F(DapSessionTest, InitializeAdvertisesInjectionAndDetourCapabilities)
+{
+  // DESNOTE(jbarber, 2026-07-21): Mirror the bare-`initialize` pattern of
+  // InitializeAdvertisesCapabilities above (no Handshake). The session
+  // responds with its capability set; we only assert the Dolphin-specific
+  // injection/detour/findFreeMemory flags are present and true.
+  TestClient client(m_client_fd());
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto& caps =
+      response->at("body").get<picojson::object>().at("capabilities").get<picojson::object>();
+  EXPECT_TRUE(caps.at("supportsDolphinFindFreeMemory").get<bool>());
+  EXPECT_TRUE(caps.at("supportsDolphinInjectCode").get<bool>());
+  EXPECT_TRUE(caps.at("supportsDolphinDetour").get<bool>());
+}
+
+TEST_F(DapSessionTest, InjectCodeAtExplicitAddressWritesBytes)
+{
+  // DESNOTE(jbarber, 2026-07-21): InjectCode at a bare physical address works
+  // in DR=0 test mode. "AAAAAQ==" base64-decodes to {0x00,0x00,0x00,0x01},
+  // a 4-byte PPC instruction word aligned to the instruction boundary.
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_injectCode",
+    "arguments": {"memoryReference": "0x00009000", "code": "AAAAAQ=="}
+  })");
+  const auto resp = client.Receive();
+  ASSERT_TRUE(resp.has_value());
+  EXPECT_EQ(resp->at("command").to_str(), "dolphin_injectCode");
+  ASSERT_TRUE(resp->at("success").get<bool>());
+  const auto& body = resp->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("address").to_str(), "0x00009000");
+  EXPECT_EQ(body.at("count").get<double>(), 4.0);
+
+  // Verify the bytes landed in RAM by reading them back via DAP readMemory.
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "readMemory",
+    "arguments": {"memoryReference": "0x00009000", "count": 4}
+  })");
+  const auto read_resp = client.Receive();
+  ASSERT_TRUE(read_resp.has_value());
+  ASSERT_TRUE(read_resp->at("success").get<bool>());
+  const std::string data_str =
+      read_resp->at("body").get<picojson::object>().at("data").to_str();
+  EXPECT_EQ(data_str, "AAAAAQ==");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, InjectCodeRejectsNonMultipleOfFourBytes)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // "AAE=" decodes to a single byte -- not a 4-byte instruction word.
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_injectCode",
+    "arguments": {"memoryReference": "0x00009000", "code": "AAE="}
+  })");
+  const auto resp = client.Receive();
+  ASSERT_TRUE(resp.has_value());
+  EXPECT_FALSE(resp->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, DetourPatchesTargetAndReturnsAddresses)
+{
+  // DESNOTE(jbarber, 2026-07-21): End-to-end detour at the protocol surface.
+  // Byte-level correctness (target patched with `b detour`, trampoline holding
+  // original + `b target+4`, detour body + appended tail branch) is exercised
+  // in DapControllerTest.DetourPatchesTargetAndInstallsTrampoline. Here we
+  // only verify the protocol surface: the response reports the resolved
+  // target/detour/trampoline addresses and originalInstruction is non-empty
+  // base64 of the 4 patched-out bytes. DR=0 mode, all addresses are bare
+  // physical offsets.
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // Pre-load a no-op (ori 0,0,0 = 0x60000000) at the target via writeMemory.
+  // "YAAAAA==" is base64 of {0x60, 0x00, 0x00, 0x00}.
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "writeMemory",
+    "arguments": {"memoryReference": "0x00008000", "data": "YAAAAA==",
+                  "count": 4}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());
+
+  // Issue the detour. detourBody `mr r3,r3` (0x7C631B78) -> base64 "fGMbeA==".
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "dolphin_detour",
+    "arguments": {"memoryReference": "0x00008000",
+                  "detourAddress": "0x0000c000",
+                  "detourBody": "fGMbeA=="}
+  })");
+  const auto resp = client.Receive();
+  ASSERT_TRUE(resp.has_value());
+  ASSERT_TRUE(resp->at("success").get<bool>())
+      << resp->at("message").to_str();
+  const auto& body = resp->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("targetAddress").to_str(), "0x00008000");
+  EXPECT_EQ(body.at("detourAddress").to_str(), "0x0000c000");
+  // Trampoline sits right after detour body (4 bytes) + appended tail branch
+  // (4 bytes), so at detour_address + 8.
+  EXPECT_EQ(body.at("trampolineAddress").to_str(), "0x0000c008");
+  // originalInstruction echoes the 4 bytes we pre-loaded (the no-op).
+  EXPECT_EQ(body.at("originalInstruction").to_str(), "YAAAAA==");
+
+  // Verify the target was patched: readMemory at 0x8000 must NOT be the
+  // original no-op anymore.
+  client.Send(R"({
+    "seq": 5,
+    "type": "request",
+    "command": "readMemory",
+    "arguments": {"memoryReference": "0x00008000", "count": 4}
+  })");
+  const auto target_read = client.Receive();
+  ASSERT_TRUE(target_read.has_value());
+  ASSERT_TRUE(target_read->at("success").get<bool>());
+  const std::string target_str =
+      target_read->at("body").get<picojson::object>().at("data").to_str();
+  EXPECT_NE(target_str, "YAAAAA==");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, FindFreeMemoryReturnsCanonicalAlignedAddress)
+{
+  // DESNOTE(jbarber, 2026-07-21): FindFreeMemory scans MEM1 RAM directly
+  // (not via the address-space accessors) so it succeeds under DR=0 even
+  // though the returned canonical address can't be written there. We just
+  // assert the response shape: success, an "address" field that looks like
+  // a canonical MEM1 address (high bit set), 4-byte aligned, and "count"
+  // echoing the request.
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_findFreeMemory",
+    "arguments": {"count": 16}
+  })");
+  const auto resp = client.Receive();
+  ASSERT_TRUE(resp.has_value());
+  ASSERT_TRUE(resp->at("success").get<bool>())
+      << resp->at("message").to_str();
+  const auto& body = resp->at("body").get<picojson::object>();
+  // Parse the returned hex string and verify it's canonical + aligned.
+  const std::string addr_str = body.at("address").to_str();
+  const auto parsed_addr = DAP::Json::ParseHexAddress(addr_str);
+  ASSERT_TRUE(parsed_addr.has_value());
+  EXPECT_GE(*parsed_addr, 0x80000000u);
+  EXPECT_EQ(*parsed_addr % 4u, 0u);
+  EXPECT_EQ(body.at("count").get<double>(), 16.0);
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
 }  // namespace
 #endif  // _WIN32

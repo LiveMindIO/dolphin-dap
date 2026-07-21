@@ -709,5 +709,117 @@ TEST(DapProtocol, ParseUnfreezeRejectsMissingWatchId)
   EXPECT_FALSE(Protocol::ParseUnfreeze(args).has_value());
 }
 
+// --- findFreeMemory / injectCode / detour parsers ---
+
+TEST(DapProtocol, ParseFindFreeMemoryExtractsCount)
+{
+  const auto args = ParseObjectOrDie(R"({"count": 64})");
+  const auto parsed = Protocol::ParseFindFreeMemory(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->count, 64u);
+}
+
+TEST(DapProtocol, ParseFindFreeMemoryRejectsMissingCount)
+{
+  const auto args = ParseObjectOrDie(R"({})");
+  EXPECT_FALSE(Protocol::ParseFindFreeMemory(args).has_value());
+}
+
+TEST(DapProtocol, ParseFindFreeMemoryRejectsZeroCount)
+{
+  const auto args = ParseObjectOrDie(R"({"count": 0})");
+  EXPECT_FALSE(Protocol::ParseFindFreeMemory(args).has_value());
+}
+
+TEST(DapProtocol, ParseInjectCodeStandaloneFormResolvesCode)
+{
+  // "AAAAAQ==" base64-decodes to {0x00,0x00,0x00,0x01}.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "code": "AAAAAQ=="})");
+  const auto parsed = Protocol::ParseInjectCode(args);
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->address.has_value());
+  EXPECT_EQ(*parsed->address, 0x80001000u);
+  ASSERT_EQ(parsed->code.size(), 4u);
+  EXPECT_EQ(parsed->code, (std::vector<u8>{0x00, 0x00, 0x00, 0x01}));
+}
+
+TEST(DapProtocol, ParseInjectCodeAllowsMissingAddress)
+{
+  // Server allocates via FindFreeMemory when `memoryReference` is omitted.
+  const auto args = ParseObjectOrDie(R"({"code": "AAAAAQ=="})");
+  const auto parsed = Protocol::ParseInjectCode(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_FALSE(parsed->address.has_value());
+  EXPECT_EQ(parsed->code.size(), 4u);
+}
+
+TEST(DapProtocol, ParseInjectCodeRejectsMissingData)
+{
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000"})");
+  EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
+}
+
+TEST(DapProtocol, ParseInjectCodeRejectsInvalidBase64)
+{
+  // "AAAA" is missing padding; reject the parse (strict base64).
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "code": "AAAA"})");
+  EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
+}
+
+TEST(DapProtocol, ParseInjectCodeRejectsNonMultipleOfFourLength)
+{
+  // "AAE=" base64-decodes to a single byte (0x01) -- not a 4-byte instruction.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "code": "AAE="})");
+  EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
+}
+
+TEST(DapProtocol, ParseDetourExtractsTargetAddressAndBody)
+{
+  // detourBody: "fGMbeA==" base64-decodes to {0x7C,0x63,0x1B,0x78}
+  // (`mr r3,r3`). target via memoryReference.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "detourBody": "fGMbeA=="})");
+  const auto parsed = Protocol::ParseDetour(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->target_address, 0x80001000u);
+  EXPECT_FALSE(parsed->detour_address.has_value());
+  ASSERT_EQ(parsed->detour_body.size(), 4u);
+  EXPECT_EQ(parsed->detour_body, (std::vector<u8>{0x7C, 0x63, 0x1B, 0x78}));
+}
+
+TEST(DapProtocol, ParseDetourAcceptsExplicitDetourAddress)
+{
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "detourAddress": "0x8000C000",
+        "detourBody": "fGMbeA=="})");
+  const auto parsed = Protocol::ParseDetour(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->target_address, 0x80001000u);
+  ASSERT_TRUE(parsed->detour_address.has_value());
+  EXPECT_EQ(*parsed->detour_address, 0x8000C000u);
+}
+
+TEST(DapProtocol, ParseDetourRejectsMissingTargetAddress)
+{
+  const auto args = ParseObjectOrDie(R"({"detourBody": "fGMbeA=="})");
+  EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
+}
+
+TEST(DapProtocol, ParseDetourRejectsMissingBody)
+{
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000"})");
+  EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
+}
+
+TEST(DapProtocol, ParseDetourRejectsNonMultipleOfFourBodyLength)
+{
+  // "AAE=" decodes to one byte -- not a 4-byte aligned instruction sequence.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "detourBody": "AAE="})");
+  EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
+}
 
 }  // namespace

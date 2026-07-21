@@ -172,8 +172,53 @@ public:
   void Terminate();
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
-  // returns the number written; stops at the first invalid address.
+  // returns the number written; stops at the first invalid address. After
+  // the bytes land, invalidates the iCache and JIT block cache for every
+  // 32-byte cacheline the write touched so interpreter and JIT fetches see
+  // the new bytes (MMU::WriteToHardware bypasses the icbi path).
   std::size_t WriteMemory(u32 address, std::span<const u8> data);
+  // Invalidates the L1 iCache and JIT block cache for every 32-byte
+  // cacheline overlapping [address, address+length). Mirrors the icbi path
+  // (InstructionCache::Invalidate) per cacheline so callers that write code
+  // directly via AddressSpace (which has no icbi hook) stay consistent with
+  // the icbi-cleared state.
+  void InvalidateCodeRange(u32 address, std::size_t length);
+  // Scans MEM1 RAM for the smallest 4-byte-aligned zero-run >= `count` and
+  // returns its canonical effective address (0x80000000+offset). Returns
+  // nullopt when no such region exists. Used by clients that need a code
+  // cave but don't know the game's memory layout.
+  std::optional<u32> FindFreeMemory(u32 count);
+  // Writes PPC machine code at `address` (when provided) or at an
+  // auto-allocated region (via FindFreeMemory). Returns the address the
+  // code was written to, or 0 on failure (invalid address, no free region,
+  // or a short WriteMemory). The caller can `goto` the returned address or
+  // set a breakpoint at its entry. WriteMemory handles iCache/JIT
+  // invalidation so the injected bytes are live immediately.
+  u32 InjectCode(std::optional<u32> address, std::vector<u8> code);
+  // Result of a transparent detour. `original_instruction` are the 4 bytes
+  // that lived at `target_address` before patching; the trampoline replays
+  // them so the patched-out instruction still executes.
+  struct DetourResult
+  {
+    u32 target_address = 0;
+    u32 detour_address = 0;
+    u32 trampoline_address = 0;
+    std::vector<u8> original_instruction;
+  };
+  // Installs a transparent detour at `target_address`:
+  //   1. If `detour_address` is nullopt, allocates a region large enough for
+  //      detour_body + appended `b trampoline` + trampoline (original + `b
+  //      target+4`) via FindFreeMemory.
+  //   2. Writes detour_body at detour_address.
+  //   3. Appends `b trampoline_address` to the detour so control resumes at
+  //      the trampoline after the body.
+  //   4. Writes the trampoline at trampoline_address: original_instruction
+  //      followed by `b target+4`.
+  //   5. Patches target_address with `b detour_address`.
+  // Returns nullopt when the target address can't be read or no free region
+  // of the required size exists. All writes invalidate the iCache/JIT.
+  std::optional<DetourResult> Detour(u32 target_address, std::optional<u32> detour_address,
+                                     std::vector<u8> detour_body);
   std::string Disassemble(u32 address, int instruction_count);
 
   u32 GetPC();

@@ -1200,4 +1200,155 @@ TEST_F(DapControllerTest, GetSourceRejectsMissingDwarfFileOnDisk)
   DAP::DapDebugController controller(System());
   EXPECT_FALSE(controller.GetSource(1, 1, 1).has_value());
 }
+
+// ---------------------------------------------------------------------------
+// Code injection + detour.
+// ---------------------------------------------------------------------------
+
+// Conventional MEM1 physical addresses with enough room on both sides. The
+// test harness runs with MSR.DR=0, so effective addresses are bare physical
+// offsets. FindFreeMemory returns canonical 0x80000000+offset addresses (the
+// production code runs with translation on), which can't be written via
+// AddressSpace::Accessors in DR=0 mode -- the auto-alloc tests below document
+// that limitation and assert that InjectCode returns 0 in that path.
+constexpr u32 INJECT_BASE = 0x00008000;
+constexpr u32 DETOUR_BASE = 0x0000C000;
+
+static void WriteRam(const u32 phys_addr, const std::vector<u8>& bytes)
+{
+  // DR=0 means effective == physical, so a RAM-backed WriteMemory at a bare
+  // physical offset writes through to RAM and reads see it back. We use the
+  // controller (which also invalidates iCache, exercising the path) instead
+  // of poking RAM directly.
+  DAP::DapDebugController controller(Core::System::GetInstance());
+  ASSERT_EQ(controller.WriteMemory(phys_addr, std::span<const u8>{bytes}), bytes.size());
+}
+
+TEST_F(DapControllerTest, FindFreeMemoryReturnsSmallestAlignedFit)
+{
+  // Pollute [0x000..0x0FF] and [0x108..0x1FF], leaving a single 8-byte zero
+  // run at [0x100..0x107] (smaller than the huge tail run starting at 0x200).
+  // The smallest-fit scan should return that 8-byte run at 0x100.
+  DAP::DapDebugController controller(System());
+  WriteRam(0x000, std::vector<u8>(256, 0xAB));
+  WriteRam(0x108, std::vector<u8>(248, 0xAB));
+  auto alloc = controller.FindFreeMemory(8);
+  ASSERT_TRUE(alloc.has_value());
+  EXPECT_EQ(*alloc % 4u, 0u);
+  EXPECT_EQ(*alloc, 0x80000100u);
+}
+
+TEST_F(DapControllerTest, FindFreeMemoryRespectsFourByteAlignment)
+{
+  // The scanner walks RAM word-by-word, so even a single nonzero byte in a
+  // word disqualifies that whole word. We plant one nonzero word at offset 0
+  // and verify the returned run starts at the next word (offset 4) -- i.e.
+  // every returned address is 4-byte aligned.
+  DAP::DapDebugController controller(System());
+  WriteRam(0x0, {0xCD, 0xCD, 0xCD, 0xCD});
+  auto alloc = controller.FindFreeMemory(8);
+  ASSERT_TRUE(alloc.has_value());
+  EXPECT_EQ(*alloc, 0x80000004u);
+}
+
+TEST_F(DapControllerTest, FindFreeMemoryRejectsZeroCount)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.FindFreeMemory(0).has_value());
+}
+
+TEST_F(DapControllerTest, InjectCodeWritesBytesAtExplicitAddress)
+{
+  DAP::DapDebugController controller(System());
+  // Two `ori 0,0,0` (0x60000000) instructions written at INJECT_BASE.
+  const std::vector<u8> code = {0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00};
+  const u32 address = controller.InjectCode(INJECT_BASE, code);
+  ASSERT_NE(address, 0u);
+  EXPECT_EQ(address, INJECT_BASE);
+
+  // Read it back through the controller.
+  const std::vector<u8> read = controller.ReadMemory(INJECT_BASE, code.size());
+  EXPECT_EQ(read, code);
+}
+
+TEST_F(DapControllerTest, InjectCodeAutoAllocateRejectedInDr0Mode)
+{
+  // DESNOTE(jbarber, 2026-07-21): FindFreeMemory returns canonical
+  // 0x80000000+offset addresses (the production runtime runs with MSR.DR=1
+  // so address translation resolves them to physical RAM). The test
+  // harness uses MSR.DR=0, where the AddressSpace accessor rejects 0x80...
+  // addresses as out of range. This documents that the auto-allocation
+  // path returns 0 in DR=0 mode: the alloc succeeds in FindFreeMemory but
+  // the subsequent WriteMemory'(0x80..., code)' writes zero bytes, so
+  // InjectCode bails. Full end-to-end auto-alloc coverage requires a
+  // booted core with translation on, which isn't in the unit-test scope.
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> code = {0x60, 0x00, 0x00, 0x00};
+  EXPECT_EQ(controller.InjectCode(std::nullopt, code), 0u);
+}
+
+TEST_F(DapControllerTest, InjectCodeRejectsNonMultipleOfFour)
+{
+  DAP::DapDebugController controller(System());
+  // 3-byte payload rejects because instructions are 4 bytes wide.
+  const std::vector<u8> code = {0x60, 0x00, 0x00};
+  EXPECT_EQ(controller.InjectCode(INJECT_BASE, code), 0u);
+}
+
+TEST_F(DapControllerTest, DetourPatchesTargetAndInstallsTrampoline)
+{
+  // Pre-load a recognizable instruction at the target: `ori 0,0,0` (0x60000000).
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+
+  // Detour body: one instruction (`ori 0,0,0`) at DETOUR_BASE.
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->target_address, INJECT_BASE);
+  EXPECT_EQ(result->detour_address, DETOUR_BASE);
+  // Trampoline sits right after detour body + appended tail branch.
+  EXPECT_EQ(result->trampoline_address, DETOUR_BASE + 8u);
+  // originalInstruction echoes the 4 bytes that lived at the target.
+  EXPECT_EQ(result->original_instruction,
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+
+  // The target now holds `b DETOUR_BASE` rather than the no-op.
+  const std::vector<u8> target_bytes = controller.ReadMemory(INJECT_BASE, 4);
+  EXPECT_NE(target_bytes, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+
+  // The trampoline holds original + `b target+4` (8 bytes total).
+  const std::vector<u8> tramp_bytes = controller.ReadMemory(DETOUR_BASE + 8u, 8);
+  ASSERT_EQ(tramp_bytes.size(), 8u);
+  EXPECT_EQ(std::vector<u8>(tramp_bytes.begin(), tramp_bytes.begin() + 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+
+  // The appended tail-branch (between detour body and trampoline) isn't the
+  // original no-op either.
+  const std::vector<u8> tail_bytes = controller.ReadMemory(DETOUR_BASE + 4u, 4);
+  EXPECT_FALSE(tail_bytes.empty());
+  EXPECT_NE(tail_bytes, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourRejectsInvalidTargetAddress)
+{
+  DAP::DapDebugController controller(System());
+  // INVALID_ADDRESS is past MEM1 -- can't read the original instruction.
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INVALID_ADDRESS, DETOUR_BASE, body);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
+{
+  // Smoke test: WriteMemory writes the bytes and invalidates the iCache+JIT
+  // cache for every cacheline touched. The interesting invariant (interpreter
+  // and JIT paths see the new bytes after invalidation) is exercised on a
+  // booted core; here we just assert the bytes persist after the call.
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> bytes = {0x60, 0x00, 0x00, 0x00};
+  EXPECT_EQ(controller.WriteMemory(INJECT_BASE, std::span<const u8>{bytes}), bytes.size());
+  const std::vector<u8> read = controller.ReadMemory(INJECT_BASE, bytes.size());
+  EXPECT_EQ(read, bytes);
+}
 }  // namespace

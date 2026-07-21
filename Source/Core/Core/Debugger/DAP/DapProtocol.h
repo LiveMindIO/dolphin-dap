@@ -223,6 +223,45 @@ struct UnfreezeArguments
 
 std::optional<UnfreezeArguments> ParseUnfreeze(const picojson::object& arguments);
 
+// Arguments of a `dolphin_findFreeMemory` custom request. The server scans
+// MEM1 for the smallest 4-byte-aligned zero-run >= `count` and returns its
+// address. Used by clients that need a code cave but don't know the game's
+// memory layout.
+struct FindFreeMemoryArguments
+{
+  u32 count = 0;
+};
+
+std::optional<FindFreeMemoryArguments> ParseFindFreeMemory(const picojson::object& arguments);
+
+// Arguments of a `dolphin_injectCode` custom request. `code` is base64-encoded
+// PPC machine code (big-endian, 4-byte aligned). When `address` is omitted the
+// server allocates a region via FindFreeMemory; otherwise it writes at the
+// given address. Returns the address at which the code was injected so the
+// client can `goto` it or set a breakpoint at its entry.
+struct InjectCodeArguments
+{
+  std::optional<u32> address;
+  std::vector<u8> code;
+};
+
+std::optional<InjectCodeArguments> ParseInjectCode(const picojson::object& arguments);
+
+// Arguments of a `dolphin_detour` custom request. Patches the 4-byte
+// instruction at `target_address` with `b detour_address`, installs a
+// trampoline at detour_address + detour_body.size that runs the original
+// instruction and `b target+4`. `detour_body` is the detour function's
+// machine code (base64). If `detour_address` is omitted the server
+// allocates a region of sufficient size via FindFreeMemory.
+struct DetourArguments
+{
+  u32 target_address = 0;
+  std::optional<u32> detour_address;
+  std::vector<u8> detour_body;
+};
+
+std::optional<DetourArguments> ParseDetour(const picojson::object& arguments);
+
 // Arguments of a `launch`/`attach` request. `stop_on_entry` is nullopt when
 // the client omitted the field; the session resolves the effective policy
 // against the `Dolphin.General.DAPStopOnEntry` config default. When present

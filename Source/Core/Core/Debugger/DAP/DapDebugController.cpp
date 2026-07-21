@@ -25,10 +25,13 @@
 #include "Core/Debugger/PPCDebugInterface.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
+#include "Core/HW/Memmap.h"
 #include "Core/PowerPC/BreakPoints.h"
 #include "Core/PowerPC/Expression.h"
 #include "Core/PowerPC/Gekko.h"
+#include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/MMU.h"
+#include "Core/PowerPC/PPCCache.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -37,6 +40,28 @@ namespace DAP
 {
 namespace
 {
+// Encodes a PPC `b target` instruction relative to `pc`. PPC b: opcode 18
+// (bits 0-5), LI is the 24-bit signed word-aligned offset (bits 6-29), AA=0
+// (relative, bit 30), LK=0 (no link, bit 31). Because `target - pc` is always
+// word-aligned (low 2 bits clear), masking to 0x03FFFFFCu places the offset
+// directly into the LI field with AA and LK zeroed.
+constexpr u32 MakeBranchInstruction(u32 pc, u32 target)
+{
+  return 0x48000000u | ((target - pc) & 0x03FFFFFCu);
+}
+
+constexpr std::array<u8, 4> BigEndianBytes(u32 word)
+{
+  return {static_cast<u8>(word >> 24), static_cast<u8>(word >> 16),
+          static_cast<u8>(word >> 8), static_cast<u8>(word)};
+}
+
+constexpr u32 ReadBigEndianU32(std::span<const u8> bytes)
+{
+  return (static_cast<u32>(bytes[0]) << 24) | (static_cast<u32>(bytes[1]) << 16) |
+         (static_cast<u32>(bytes[2]) << 8) | static_cast<u32>(bytes[3]);
+}
+
 bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
 {
   if (inst.hex == 0x4C000064u)
@@ -715,7 +740,167 @@ std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> dat
     accessors->WriteU8(guard, addr, byte);
     ++written;
   }
+  // DESNOTE(jbarber, 2026-07-21): MMU::WriteToHardware copies bytes into RAM
+  // with no icbi/JIT hook, so writes that patch code leave the L1 iCache and
+  // JIT block cache pointing at stale bytes. Invalidate every cacheline we
+  // touched so interpreter and JIT fetch paths both see the new bytes the
+  // next time control reaches this address. Without this, an injected
+  // detour or code patch can be silently ignored.
+  InvalidateCodeRange(address, written);
   return written;
+}
+
+void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
+{
+  if (length == 0)
+    return;
+  Core::CPUThreadGuard guard(m_system);
+  auto& ppc_state = m_system.GetPPCState();
+  auto& memory = m_system.GetMemory();
+  auto& jit_interface = m_system.GetJitInterface();
+  // PPC L1 iCache lines are 32 bytes (CACHE_BLOCK_SIZE * 4). Round the range
+  // out to the cacheline boundaries it overlaps and walk every line through
+  // the icbi path -- same loop GeckoCode.cpp uses to flush its installer.
+  const u32 end_addr = address + static_cast<u32>(length);
+  const u32 start_line = address & ~u32{31u};
+  const u32 end_line = (end_addr + 31u) & ~u32{31u};
+  for (u32 line = start_line; line < end_line; line += 32)
+    ppc_state.iCache.Invalidate(memory, jit_interface, line);
+}
+
+std::optional<u32> DapDebugController::FindFreeMemory(u32 count)
+{
+  if (count == 0)
+    return std::nullopt;
+  Core::CPUThreadGuard guard(m_system);
+  auto& memory = m_system.GetMemory();
+  const u32 ram_size = memory.GetRamSize();
+  if (ram_size == 0)
+    return std::nullopt;
+  const u8* ram = memory.GetRAM();
+  const u32 ram_words = ram_size / 4u;
+  // Scan RAM word-by-word for runs of zero words. We want the smallest run
+  // that satisfies `count` (rounding up to a word) and starts at a
+  // 4-byte-aligned offset, mirroring what a real allocator would return
+  // for a code-cave request. Iterating by word keeps the start address
+  // naturally 4-byte-aligned.
+  const u32 need_words = (count + 3u) / 4u;
+  std::optional<u32> best_addr;
+  std::optional<u32> best_bytes;
+  u32 run_start = 0;
+  bool in_run = false;
+  for (u32 w = 0; w < ram_words; ++w)
+  {
+    u32 word = 0;
+    std::memcpy(&word, ram + w * 4, 4);
+    if (word == 0)
+    {
+      if (!in_run)
+      {
+        run_start = w;
+        in_run = true;
+      }
+    }
+    else if (in_run)
+    {
+      const u32 run_bytes = (w - run_start) * 4;
+      if (run_bytes >= count && (!best_bytes || run_bytes < *best_bytes))
+      {
+        best_bytes = run_bytes;
+        best_addr = 0x80000000u + run_start * 4;
+      }
+      in_run = false;
+    }
+  }
+  if (in_run)
+  {
+    const u32 run_bytes = (ram_words - run_start) * 4;
+    if (run_bytes >= count && (!best_bytes || run_bytes < *best_bytes))
+      best_addr = 0x80000000u + run_start * 4;
+  }
+  return best_addr;
+}
+
+u32 DapDebugController::InjectCode(std::optional<u32> address, std::vector<u8> code)
+{
+  if (code.empty() || code.size() % 4u != 0u)
+    return 0;
+  u32 target = address.value_or(0);
+  if (!address)
+  {
+    auto alloc = FindFreeMemory(static_cast<u32>(code.size()));
+    if (!alloc)
+      return 0;
+    target = *alloc;
+  }
+  const std::size_t written = WriteMemory(target, std::span<const u8>{code});
+  if (written != code.size())
+    return 0;
+  return target;
+}
+
+std::optional<DapDebugController::DetourResult>
+DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address,
+                            std::vector<u8> detour_body)
+{
+  if (detour_body.empty() || detour_body.size() % 4u != 0u)
+    return std::nullopt;
+  // Snapshot the original instruction we're about to patch out. The
+  // detour is transparent: the trampoline replays this instruction and
+  // then branches back to `target + 4`.
+  const std::vector<u8> original_bytes = ReadMemory(target_address, 4);
+  if (original_bytes.size() != 4u)
+    return std::nullopt;  // Target address couldn't be read.
+
+  // Region layout: [detour body][b trampoline][trampoline: original + b target+4]
+  const u32 body_size = static_cast<u32>(detour_body.size());
+  const u32 detour_size = body_size + 12u;  // body + tail branch + 8-byte trampoline
+  u32 detour_addr = detour_address.value_or(0);
+  if (!detour_address)
+  {
+    auto alloc = FindFreeMemory(detour_size);
+    if (!alloc)
+      return std::nullopt;
+    detour_addr = *alloc;
+  }
+  const u32 tail_branch_addr = detour_addr + body_size;
+  const u32 trampoline_addr = tail_branch_addr + 4u;
+  // Build branches:
+  //   - tail_branch: at end of body, branches to the trampoline.
+  //   - detour_branch: replaces the target, branches to the detour.
+  //   - trampoline_return: after the replayed original, branches back to
+  //     `target + 4` to resume execution after the patch site.
+  const u32 tail_branch = MakeBranchInstruction(tail_branch_addr, trampoline_addr);
+  const u32 detour_branch = MakeBranchInstruction(target_address, detour_addr);
+  const u32 trampoline_return = MakeBranchInstruction(trampoline_addr + 4u, target_address + 4u);
+
+  // Order matters for live emulation: install the detour body and
+  // trampoline FIRST, then patch the target. A CPU that hits the target
+  // before the trampoline is in place would `b detour` -> fall through to
+  // garbage after body. Even though tests don't run the CPU, this is the
+  // correct ordering for production.
+  if (WriteMemory(detour_addr, std::span<const u8>{detour_body}) != detour_body.size())
+    return std::nullopt;
+  const auto tail_bytes = BigEndianBytes(tail_branch);
+  if (WriteMemory(tail_branch_addr, std::span<const u8>{tail_bytes}) != tail_bytes.size())
+    return std::nullopt;
+  const auto original_bytes_span = std::span<const u8>{original_bytes};
+  if (WriteMemory(trampoline_addr, original_bytes_span) != original_bytes.size())
+    return std::nullopt;
+  const auto return_bytes = BigEndianBytes(trampoline_return);
+  if (WriteMemory(trampoline_addr + 4u, std::span<const u8>{return_bytes}) != return_bytes.size())
+    return std::nullopt;
+  // Finally patch the target with `b detour_addr`.
+  const auto patch_bytes = BigEndianBytes(detour_branch);
+  if (WriteMemory(target_address, std::span<const u8>{patch_bytes}) != patch_bytes.size())
+    return std::nullopt;
+
+  DetourResult result;
+  result.target_address = target_address;
+  result.detour_address = detour_addr;
+  result.trampoline_address = trampoline_addr;
+  result.original_instruction = original_bytes;
+  return result;
 }
 
 std::string DapDebugController::Disassemble(u32 address, int instruction_count)
