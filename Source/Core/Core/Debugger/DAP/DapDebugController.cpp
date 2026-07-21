@@ -628,7 +628,15 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   // responses bounded; clients paging past it just send another request.
   const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
                      (end_line > first_line ? end_line : first_line + 63);
-  const int line_count = std::min(last_line - first_line + 1, 256);
+  // DESNOTE(jbarber, 2026-07-21): For the disassembly case below we bound
+  // the result at 256 lines via `line_count`. The DWARF source-file path
+  // above reads lines from disk in a `while (fgets)` loop -- the only
+  // bound there is `current_line > last_line`, which is INT_MAX when the
+  // client sent no endLine, so a multi-GB source file would stall the
+  // session (or OOM the response). Cap the file-read pass at the same
+  // 256-line budget so a pathological source can't hang the session.
+  constexpr int kMaxResponseLines = 256;
+  const int line_count = std::min(last_line - first_line + 1, kMaxResponseLines);
 
   if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
       base_address <= symbol_db.GetSourceFiles().size())
@@ -644,9 +652,10 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
     char buffer[4096];
     const int source_first_line = std::max(first_line, 1);
     int current_line = 1;
+    int emitted_lines = 0;
     while (std::fgets(buffer, sizeof(buffer), file.GetHandle()))
     {
-      if (current_line > last_line)
+      if (current_line > last_line || emitted_lines >= kMaxResponseLines)
         break;
       if (current_line >= source_first_line)
       {
@@ -658,6 +667,7 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
         if (!line.empty() && line.back() == '\r')
           line.remove_suffix(1);
         result.content.append(line);
+        ++emitted_lines;
       }
       ++current_line;
     }
@@ -705,16 +715,20 @@ std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const
   // DESNOTE(jbarber, 2026-07-21): DAP's `endLine` defaults to -1 meaning
   // "through end". Treat negative end_line as unbounded so we enumerate
   // every instruction slot / line entry in the range rather than stopping
-  // at first_line + 63.
+  // at first_line + 63. Cap the iteration at 65536 lines regardless so a
+  // pathological end_line (or an omitted one defaulting to INT_MAX)
+  // doesn't spin the session thread for billions of GetLineAddress calls.
+  constexpr int kMaxLocationEnumerations = 65536;
   const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
                      (end_line >= first_line ? end_line : first_line + 63);
+  const int capped_last = std::min(last_line, first_line + kMaxLocationEnumerations - 1);
 
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
   if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
       base_address <= symbol_db.GetSourceFiles().size())
   {
     const std::string& file = symbol_db.GetSourceFiles()[base_address - 1];
-    for (int line = first_line; line <= last_line; ++line)
+    for (int line = first_line; line <= capped_last; ++line)
     {
       if (symbol_db.GetLineAddress(file, static_cast<u32>(line)))
         locations.push_back({line});
@@ -722,7 +736,7 @@ std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const
     return locations;
   }
 
-  for (int line = first_line; line <= last_line; ++line)
+  for (int line = first_line; line <= capped_last; ++line)
   {
     const u32 addr = base_address + static_cast<u32>(line * 4);
     if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))

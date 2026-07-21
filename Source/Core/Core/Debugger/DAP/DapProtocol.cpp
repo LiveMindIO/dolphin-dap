@@ -60,7 +60,17 @@ std::optional<u32> ResolveMemoryReference(const picojson::object& arguments)
 std::optional<u32> ResolveSourceReference(const picojson::object& arguments)
 {
   if (const std::optional<s64> reference = ReadNumericFromJson<s64>(arguments, "sourceReference"))
+  {
+    // DESNOTE(jbarber, 2026-07-21): Reject negative or > u32-max reference
+    // values outright -- the previous form `static_cast<u32>(*reference)`
+    // wrapped an out-of-range s64 to a nonsense address, which `source` and
+    // `breakpointLocations` would then dereference as a code base. A negative
+    // sourceReference is also a DAP-protocol error (references are non-
+    // negative integers), so failing cleanly is correct.
+    if (*reference < 0 || *reference > static_cast<s64>(std::numeric_limits<u32>::max()))
+      return std::nullopt;
     return static_cast<u32>(*reference);
+  }
   return ResolveSourceBase(arguments);
 }
 }  // namespace

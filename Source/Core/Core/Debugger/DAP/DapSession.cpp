@@ -296,6 +296,14 @@ private:
     m_entry_stop_sent = true;
     if (m_stop_on_entry)
     {
+      // DESNOTE(jbarber, 2026-07-21): Force the core into Paused before
+      // emitting the stop event. CPUSetInitialExecutionState already pauses
+      // when DAP is active, but a previous launch/attach with stopOnEntry
+      // false (or the client continuing the core out-of-band) leaves State
+      // at Running -- telling the client execution stopped while the game
+      // kept running would lie. PauseAndLock is re-entrant so this is safe
+      // even if the state hook fires on the resulting Paused transition.
+      m_controller.Pause();
       SendStoppedEvent(m_launch_kind == "attach" ? "attach" : "entry");
     }
     else
@@ -375,6 +383,27 @@ private:
     if (m_step_out_thread.joinable() && m_step_out_done.load())
     {
       m_step_out_thread.join();
+      // DESNOTE(jbarber, 2026-07-21): If a continue/pause was deferred
+      // during the step-out (because the worker held the stepping lock
+      // for the whole interpreter loop), apply it now that the lock is
+      // free. Continue pre-empts the stopped event; pause synthesizes a
+      // "pause" stop instead of the step-out's classified one. Without
+      // this deferral, m_controller.Continue/Pause would block the
+      // session thread on the stepping lock until the worker's 5s
+      // timeout elapsed.
+      if (m_pending_continue.exchange(false))
+      {
+        m_controller.Continue();
+        SyncSteppingBaseline();
+        return;
+      }
+      if (m_pending_pause.exchange(false))
+      {
+        m_controller.Pause();
+        SendClassifiedStoppedEvent();
+        SyncSteppingBaseline();
+        return;
+      }
       SendClassifiedStoppedEvent();
       SyncSteppingBaseline();
       return;
@@ -494,6 +523,19 @@ private:
 
     if (command == "continue")
     {
+      // DESNOTE(jbarber, 2026-07-21): An in-flight async step-out holds the
+      // CPU stepping_lock via its CPUThreadGuard for the whole interpreter
+      // loop (up to the configured 5s timeout). Directly calling
+      // m_controller.Continue() here would block the session thread waiting
+      // on that lock -- stallong socket reads, realtime-watch flushing, and
+      // disconnect. Respond success immediately and remember the continue
+      // request; PollBreakpointStop picks it up once the worker has joined.
+      if (m_step_out_thread.joinable() && !m_step_out_done.load())
+      {
+        m_pending_continue.store(true);
+        Respond(request->seq, command, picojson::object{});
+        return;
+      }
       m_controller.Continue();
       SyncSteppingBaseline();
       picojson::object body;
@@ -504,6 +546,15 @@ private:
 
     if (command == "pause")
     {
+      // Same deferred-execution rationale as continue above -- the step-out
+      // worker holds the stepping lock, so pause can't take effect until
+      // it bails. Queue it for PollBreakpointStop to apply post-join.
+      if (m_step_out_thread.joinable() && !m_step_out_done.load())
+      {
+        m_pending_pause.store(true);
+        Respond(request->seq, command, picojson::object{});
+        return;
+      }
       m_controller.Pause();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("pause");
@@ -524,7 +575,13 @@ private:
       Respond(request->seq, command, picojson::object{});
       if (result == StepOverResult::Stepped)
       {
-        SendStoppedEvent("step");
+        // DESNOTE(jbarber, 2026-07-21): Classify the actual stop via the
+        // stashed reason rather than unconditionally reporting "step" --
+        // StepOver may have advanced onto a code/data breakpoint that was
+        // hiding at the next instruction. SendClassifiedStoppedEvent will
+        // emit "breakpoint" with hitBreakpointIds in that case, "step" when
+        // the step genuinely advanced.
+        SendClassifiedStoppedEvent();
         SyncSteppingBaseline();
       }
       else
@@ -550,7 +607,13 @@ private:
       Respond(request->seq, command, picojson::object{});
       if (completed)
       {
-        SendStoppedEvent("step");
+        // DESNOTE(jbarber, 2026-07-21): Classify the actual stop reason
+        // (CodeBreakpoint / DataBreakpoint / Step) instead of always
+        // emitting "step" -- StepInto may have walked the PC onto a real
+        // breakpoint the user installed at the next instruction. The state
+        // hook has already stashed the reason while the exception flag was
+        // still set; SendClassifiedStoppedEvent consumes it.
+        SendClassifiedStoppedEvent();
         SyncSteppingBaseline();
       }
       else
@@ -1650,8 +1713,16 @@ private:
   // joins the worker and emits the `stopped`/`step` event when it completes.
   // The worker captures a shared_ptr<Session> (rather than `this`) so a late
   // tear-down can't free the Session while the worker still holds the guard.
+  //
+  // `m_pending_continue` / `m_pending_pause` are set when the client issues
+  // continue/pause while a step-out worker is still holding the stepping lock.
+  // We respond success immediately and defer the actual SetState call to
+  // PollBreakpointStop (which runs after the worker joins), so the session
+  // thread never blocks on the stepping lock.
   std::thread m_step_out_thread;
   std::atomic<bool> m_step_out_done{true};
+  std::atomic<bool> m_pending_continue{false};
+  std::atomic<bool> m_pending_pause{false};
 };
 }  // namespace
 
