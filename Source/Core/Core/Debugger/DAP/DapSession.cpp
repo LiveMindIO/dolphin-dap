@@ -331,6 +331,21 @@ private:
   // mid-update exception state -- a race Bugbot flagged as "stale stop info
   // after pause". The stash is the authoritative source; everything else
   // is best-effort and we'd rather under-report than mis-report.
+  //
+  // DESNOTE(jbarber, 2026-07-21): Bugbot re-flagged this as
+  // "Watchpoint stops report as step": `CPUManager::Break` (which fires on
+  // code-breakpoint and watchpoint hits in the interpreter) doesn't call
+  // `NotifyStateChanged`, so the Paused hook never runs for those stops
+  // and `m_pending_stop_info` stays empty -- the client got "step" for a
+  // real breakpoint hit. Only `Continue()` notifies (with Running), so
+  // the Running hook fires but the matching Paused hook doesn't. Rather
+  // than touch `CPUManager::Break` (a hotpath shared with frame-step,
+  // GDB stub, etc., and wiring NotifyStateChanged there risks recursive
+  // callbacks), fall back to a fresh `GetStopInfo()` here when the stash
+  // is empty. `GetStopInfo` takes a `CPUThreadGuard` itself, so the CPU
+  // is frozen for the read and the exception flag can't be cleared out
+  // from under us -- the earlier "stale stop info" concern was about
+  // reading without that freeze; with the guard the read is safe.
   void SendClassifiedStoppedEvent()
   {
     StopInfo info;
@@ -342,6 +357,14 @@ private:
         m_pending_stop_info.reset();
       }
     }
+    // No stash means the state hook didn't fire for this stop (typical for
+    // interpreter breakpoint/watchpoint hits via CPU::Break, which doesn't
+    // notify state changes). Re-classify from live CPU state -- GetStopInfo
+    // takes a CPUThreadGuard so the read is atomic with respect to the
+    // stepping CPU. Keep this as a fallback so the hook-driven fast path
+    // still wins when it does fire.
+    if (info.reason == StopReason::Step && !info.hit_breakpoint_address)
+      info = m_controller.GetStopInfo();
 
     picojson::object body;
     body.emplace("threadId", 1.0);

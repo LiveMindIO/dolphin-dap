@@ -425,18 +425,17 @@ std::optional<FreezeArguments> ParseFreeze(const picojson::object& arguments)
   result.value = std::move(*decoded);
   if (watch_id)
   {
-    // Form 2: freeze existing. address/count must be absent; the sampler
-    // authoritative source for the watch's width is its existing
-    // subscription. We do allow them to be ignored if present (some clients
-    // echo them back), but fail loudly if `data` doesn't match the watch.
-    if (!address && !count)
-    {
-      result.watch_id = *watch_id;
-      return result;
-    }
-    // Mixed form: address/count present alongside watchId. Reject -- the
-    // client should pick one form or the other.
-    return std::nullopt;
+    // DESNOTE(jbarber, 2026-07-21): Form 2 -- freeze an existing watch by id.
+    // The sampler is the authoritative source for the watch's width (its
+    // existing subscription), so address/count are not consulted here. Some
+    // DAP clients echo the watch's memoryReference/count back on the freeze
+    // request; the comment promised to ignore them, but the previous form
+    // (`!address && !count`) rejected the request whenever either was
+    // present, so an echoed-field client got "invalid arguments" instead
+    // of a frozen watch. Accept watchId alone; any echoed address/count
+    // is silently dropped.
+    result.watch_id = *watch_id;
+    return result;
   }
 
   // Form 1: standalone freeze. Requires both address and count, and `data`

@@ -659,18 +659,26 @@ TEST(DapProtocol, ParseFreezeRejectsInvalidBase64)
   EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
 }
 
-TEST(DapProtocol, ParseFreezeRejectsMixedWatchIdAndAddress)
+TEST(DapProtocol, ParseFreezeAcceptsWatchIdWithEchoedAddressAndCount)
 {
-  // Form 1 and form 2 are mutually exclusive; the sampler can't tell which
-  // width the client wants if both `watchId` and `memoryReference`+`count`
-  // are present, so the parser rejects.
+  // DESNOTE(jbarber, 2026-07-21): Form 2 freezes an existing watch by id;
+  // the sampler is the authoritative source of the watch's width (its
+  // existing subscription). Some DAP clients echo the watch's
+  // memoryReference/count back on the freeze request. The parser must
+  // accept watchId and ignore the echoed fields rather than reject the
+  // request as a "mixed form". Bugbot previously flagged the reject-path
+  // as: freezing an existing watch failed whenever the client echoed
+  // address/count, with HandleFreeze reporting "invalid arguments".
   const auto args = ParseObjectOrDie(R"({
     "watchId": 7,
     "memoryReference": "0x00003100",
     "count": 4,
     "data": "AAAAAAE="
   })");
-  EXPECT_FALSE(Protocol::ParseFreeze(args).has_value());
+  const auto parsed = Protocol::ParseFreeze(args);
+  ASSERT_TRUE(parsed.has_value());
+  ASSERT_TRUE(parsed->watch_id.has_value());
+  EXPECT_EQ(*parsed->watch_id, 7);
 }
 
 TEST(DapProtocol, ParseFreezeRejectsCountZero)
