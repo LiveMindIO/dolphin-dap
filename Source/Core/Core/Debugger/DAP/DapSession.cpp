@@ -539,7 +539,15 @@ private:
       if (m_step_out_thread.joinable() && !m_step_out_done.load())
       {
         m_pending_continue.store(true);
-        Respond(request->seq, command, picojson::object{});
+        // DESNOTE(jbarber, 2026-07-21): Mirror the body the synchronous
+        // continue path emits. DAP clients that read the response (rather
+        // than waiting for the later `continued` event) treat a missing
+        // allThreadsContinued as incomplete/malformed, so include it here
+        // too -- the resume semantics are the same, just deferred until
+        // the step-out worker joins.
+        picojson::object body;
+        body.emplace("allThreadsContinued", true);
+        Respond(request->seq, command, std::move(body));
         return;
       }
       m_controller.Continue();

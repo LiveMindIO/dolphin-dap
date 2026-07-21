@@ -51,10 +51,22 @@ namespace
 // shifted left by 6, lands at bit 29 of the result and spills across the
 // opcode boundary when OR'd with 0x48000000. The correct placement is
 // `<< 2` (LSB u32 bits 2-25), which leaves bits 26-31 clear for the opcode.
-constexpr u32 MakeBranchInstruction(u32 pc, u32 target)
+// DESNOTE(jbarber, 2026-07-21): Return nullopt when the signed offset falls
+// outside the 24-bit signed displacement PPC `b` supports (±32 MiB). The
+// previous form masked the LI field silently, so a distant detour
+// (detourAddress more than ~32 MiB from the patch site) encoded the wrong
+// target and quietly corrupted control flow at runtime. Detour rejects
+// any out-of-range branch now, restoring memory to its pre-Detour state.
+constexpr std::optional<u32> MakeBranchInstruction(u32 pc, u32 target)
 {
   const s32 offset = static_cast<s32>(target - pc);
   const s32 li = offset >> 2;  // arithmetic shift: signed div-by-4
+  // LI is a 24-bit signed field, so its representable range is
+  // [-2^23, 2^23 - 1]. Anything outside that can't be encoded as a relative
+  // `b` -- callers must fall back to a sequence (e.g. `lis + ori + mtctr +
+  // bctr`) or relocate the detour closer to the patch site.
+  if (li < -(1 << 23) || li >= (1 << 23))
+    return std::nullopt;
   const u32 masked_li = static_cast<u32>(li) & 0x00FFFFFFu;
   return 0x48000000u | (masked_li << 2);
 }
@@ -941,9 +953,20 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
   //   - detour_branch: replaces the target, branches to the detour.
   //   - trampoline_return: after the replayed original, branches back to
   //     `target + 4` to resume execution after the patch site.
-  const u32 tail_branch = MakeBranchInstruction(tail_branch_addr, trampoline_addr);
-  const u32 detour_branch = MakeBranchInstruction(target_address, detour_addr);
-  const u32 trampoline_return = MakeBranchInstruction(trampoline_addr + 4u, target_address + 4u);
+  const auto tail_branch_opt = MakeBranchInstruction(tail_branch_addr, trampoline_addr);
+  const auto detour_branch_opt = MakeBranchInstruction(target_address, detour_addr);
+  const auto trampoline_return_opt =
+      MakeBranchInstruction(trampoline_addr + 4u, target_address + 4u);
+  // DESNOTE(jbarber, 2026-07-21): A detour layout that places the patch site
+  // and its targets > ±32 MiB apart can't be encoded as a relative `b`
+  // instruction -- the PPC `b` LI field is 24-bit signed. Reject the detour
+  // outright instead of silently encoding a truncated branch that would
+  // jump to a nonsense PC at runtime.
+  if (!tail_branch_opt || !detour_branch_opt || !trampoline_return_opt)
+    return std::nullopt;
+  const u32 tail_branch = *tail_branch_opt;
+  const u32 detour_branch = *detour_branch_opt;
+  const u32 trampoline_return = *trampoline_return_opt;
 
   // DESNOTE(jbarber, 2026-07-21): Each (address, snapshot) pair below records
   // the pre-detour bytes we're about to overwrite. If any WriteMemory call

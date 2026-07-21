@@ -205,10 +205,19 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
   s_socket_context.emplace();
   s_shutting_down.store(false);
 
+  // DESNOTE(jbarber, 2026-07-21): On any failure after `s_socket_context` is
+  // emplaced, tear it down before returning. The caller only invokes
+  // `DAP::Deinit` when `IsActive()` is true, and `IsActive()` stays false
+  // on a failed init -- so without this cleanup the SocketContext (Winsock
+  // `WSAStartup` refcount on Windows, etc.) leaks for the rest of the
+  // process. Reset `s_listen_sock` to -1 too, so a later `Deinit` (if one
+  // is ever called explicitly) early-returns instead of double-closing the
+  // now-stale fd.
   s_listen_sock = socket(domain, SOCK_STREAM, 0);
   if (s_listen_sock == -1)
   {
     ERROR_LOG_FMT(CONSOLE, "DAP: failed to create socket.");
+    s_socket_context.reset();
     return;
   }
 
@@ -223,6 +232,8 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
   {
     ERROR_LOG_FMT(CONSOLE, "DAP: failed to bind socket.");
     CloseSocket(s_listen_sock);
+    s_listen_sock = -1;
+    s_socket_context.reset();
     return;
   }
 
@@ -232,6 +243,8 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
   {
     ERROR_LOG_FMT(CONSOLE, "DAP: failed to listen on socket.");
     CloseSocket(s_listen_sock);
+    s_listen_sock = -1;
+    s_socket_context.reset();
     return;
   }
 

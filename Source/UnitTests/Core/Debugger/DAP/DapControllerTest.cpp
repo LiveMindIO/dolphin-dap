@@ -1403,6 +1403,35 @@ TEST_F(DapControllerTest, DetourRejectsInvalidTargetAddress)
   EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(DapControllerTest, DetourRejectsOutOfRangeBranchDisplacement)
+{
+  // DESNOTE(jbarber, 2026-07-21): PPC `b` encodes a 24-bit signed offset/4,
+  // so the maximum branch range is ±32 MiB. A detour layout placing the
+  // patch site farther than that from its target can't be encoded as a
+  // single `b` -- Detour must reject it rather than silently truncating the
+  // displacement to a wrong target.
+  DAP::DapDebugController controller(System());
+  const u32 ram_size = System().GetMemory().GetRamSizeReal();
+  if (ram_size == 0)
+    GTEST_SKIP() << "requires a booted memory arena";
+
+  // Plant the target INJECT_BASE and a detour region far away. We need > 32
+  // MiB of separation. far_detour is past RAM but Detour's range check
+  // rejects before any memory read of far_detour -- only INJECT_BASE (which
+  // is valid RAM) is read first for the original bytes.
+  constexpr u32 kOutOfBranchRange = 0x02000001u;  // 32 MiB + 1
+
+  const u32 far_detour = INJECT_BASE + kOutOfBranchRange;
+  WriteRam(INJECT_BASE, std::vector<u8>{0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, far_detour, body);
+  // Out-of-range displacement -> Detour rejects, doesn't write the patch.
+  EXPECT_FALSE(result.has_value());
+  // Target untouched (no patch).
+  const std::vector<u8> target_after = controller.ReadMemory(INJECT_BASE, 4u);
+  EXPECT_EQ(target_after, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
 TEST_F(DapControllerTest, DetourRollsBackPartialPatchesOnFailure)
 {
   // DESNOTE(jbarber, 2026-07-21): When Detour's WriteMemory chain fails
