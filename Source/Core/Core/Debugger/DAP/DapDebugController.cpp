@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -312,17 +313,30 @@ void DapDebugController::UpdateInstructionBreakpoints(
 
 void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
 {
+  // DESNOTE(jbarber, 2026-07-21): Dolphin has a single global memcheck store
+  // tied to the one emulated PPC core, so installing this client's list
+  // replaces the global set. Concurrent DAP clients on the same core (a rare
+  // multi-client setup) will clobber each other's watchpoints here; DAP and
+  // GDB are mutually exclusive, and the typical flow is one client per core.
   auto& memchecks = m_system.GetPowerPC().GetMemChecks();
   memchecks.Clear();
   for (const DataBreakpointRequest& request : breakpoints)
   {
+    const u32 length = request.length == 0 ? 1 : request.length;
+    // Guard against u32 wrap: if address + length overflows, clamp end to
+    // u32 max so GetMemCheck still resolves a sane, monotonic range rather
+    // than a wrapped (start > end) one that silently never hits.
+    const u32 end = (length - 1u > std::numeric_limits<u32>::max() - request.address) ?
+                        std::numeric_limits<u32>::max() :
+                        request.address + (length - 1u);
+
     TMemCheck check;
     check.start_address = request.address;
-    check.end_address = request.address + (request.length == 0 ? 1 : request.length) - 1;
+    check.end_address = end;
     // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck distinguishes single-
     // byte vs ranged checks; DAP data breakpoints default to one byte, but a
     // client may pass `length` (a Dolphin extension) to watch a region.
-    check.is_ranged = (request.length > 1);
+    check.is_ranged = (length > 1);
     check.is_break_on_read = request.read;
     check.is_break_on_write = request.write;
     check.break_on_hit = true;

@@ -499,6 +499,25 @@ TEST_F(DapControllerTest, SetDataBreakpointsSingleByteIsNotRanged)
   EXPECT_EQ(check->end_address, TEST_ADDRESS);
 }
 
+TEST_F(DapControllerTest, SetDataBreakpointsRangedOverflowClampsEndAddress)
+{
+  // A length that would overflow u32 start + length - 1 must clamp to u32 max
+  // rather than wrapping to a sub-start end (which would silently never hit).
+  constexpr u32 NEAR_MAX = 0xFFFFFF00;
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  controller.SetDataBreakpoints(
+      {{.address = NEAR_MAX, .length = 0x100, .read = false, .write = true}});
+
+  const TMemCheck* check = memchecks.GetMemCheck(NEAR_MAX);
+  ASSERT_NE(check, nullptr);
+  EXPECT_TRUE(check->is_ranged);
+  EXPECT_EQ(check->start_address, NEAR_MAX);
+  EXPECT_GE(check->end_address, NEAR_MAX);
+  EXPECT_EQ(check->end_address, 0xFFFFFFFFu);
+}
+
 TEST_F(DapControllerTest, SetDataBreakpointsEmptyClearsExisting)
 {
   auto& memchecks = System().GetPowerPC().GetMemChecks();

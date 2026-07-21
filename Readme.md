@@ -122,6 +122,21 @@ declares itself the CPU thread and drives it over a `socketpair`.
 > `Memory::Init` (also breaks `PageTableHostMappingTest`) — run tests
 > unsandboxed.
 
+### Known limitations
+
+- **Single global breakpoint store.** Dolphin has one PPC core and one shared
+  breakpoint/watchpoint store tied to it. Each DAP client's `setBreakpoints` /
+  `setDataBreakpoints` / `setInstructionBreakpoints` replaces the global set.
+  The intended topology is one DAP client per running core (DAP and GDB are
+  mutually exclusive). Concurrent DAP clients on the same core will clobber
+  each other's breakpoints/watchpoints — this is an architectural constraint,
+  not a per-session isolation bug.
+- **Realtime sample delivery cadence.** `dolphin_realtimeWatch` *samples* at
+  field rate (~60 Hz NTSC) but *delivers* `dolphin_memoryChanged` events on
+  the session loop's 50 ms poll, so a change is flushed to the socket within
+  ~50 ms of being observed. Burst changes within a single frame are coalesced
+  to one event per region.
+
 ### Request / response payload reference
 
 All messages use DAP framing: `Content-Length: N\r\n\r\n` followed by a JSON

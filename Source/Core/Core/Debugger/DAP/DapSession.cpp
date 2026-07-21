@@ -124,13 +124,21 @@ picojson::object MakeVariable(std::string_view name, u32 value)
   return variable;
 }
 
-class Session
+class Session : public std::enable_shared_from_this<Session>
 {
 public:
   Session(DapTransport& transport, Core::System& system)
       : m_transport(transport), m_controller(system), m_system(system),
         m_stop_on_entry(Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY))
   {
+    // DESNOTE(jbarber, 2026-07-21): The state hook fires on the CPU thread at
+    // the moment of a running<->paused transition. For Paused we capture the
+    // stop reason synchronously here, while ppc_state.Exceptions still carries
+    // EXCEPTION_FAKE_MEMCHECK_HIT (the flag is transient -- the next
+    // interpreter step's CheckExceptions clears it). PollBreakpointStop, which
+    // runs ~50ms later on the session thread, used to miss the flag and
+    // mis-report watchpoint hits as "step"; it now consumes the stashed reason
+    // instead. For Running (continue), we queue the `continued` event.
     m_state_hook = Core::AddOnStateChangedCallback([this](const Core::State state) {
       if (state == Core::State::Running)
       {
@@ -139,37 +147,45 @@ public:
         body.emplace("allThreadsContinued", true);
         QueueEvent("continued", std::move(body));
       }
+      else if (state == Core::State::Paused)
+      {
+        std::lock_guard lock(m_stop_info_mutex);
+        m_pending_stop_info = m_controller.GetStopInfo();
+      }
     });
-
-    // DESNOTE(jbarber, 2026-07-20): The realtime-watch sampler hooks
-    // vi_end_field_event (CPU thread) and, on a region change, enqueues a
-    // `dolphin_memoryChanged` event per change. The dispatch runs on the CPU
-    // thread; QueueEvent is mutex-guarded and uses an atomic seq, so it is
-    // safe to call cross-thread. The Run() loop flushes queued events to the
-    // socket on each 50ms poll iteration -- so a change observed at frame rate
-    // is delivered to the client within ~50ms. Constructed in the ctor body so
-    // the lambda captures a fully-formed `this` (the other members it touches
-    // -- m_event_mutex, m_pending_events, m_next_seq -- are already live by
-    // this point and are not touched before Run() begins).
-    m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
-        m_system,
-        [this](const std::vector<RealtimeWatchChange>& changes) {
-          for (const RealtimeWatchChange& change : changes)
-          {
-            picojson::object body;
-            body.emplace("watchId", static_cast<double>(change.watch_id));
-            body.emplace("address", Json::FormatAddress(change.address));
-            body.emplace("count", static_cast<double>(change.count));
-            body.emplace("data", Json::Base64Encode(change.bytes));
-            QueueEvent("dolphin_memoryChanged", std::move(body));
-          }
-        });
   }
 
   void Run()
   {
     if (!RunHandshake())
       return;
+
+    // DESNOTE(jbarber, 2026-07-21): Construct the realtime-watch sampler here
+    // (not in the ctor) so its dispatch lambda can capture a weak_ptr to this
+    // Session via weak_from_this() -- which is only valid once *this is owned
+    // by a shared_ptr (RunSession constructs the Session via make_shared before
+    // calling Run()). The weak_ptr lock keeps the Session alive for the
+    // duration of an in-flight Tick() on the CPU thread, so disconnect/
+    // shutdown can't race the dispatch and touch a destroyed Session. When the
+    // weak_ptr can't be locked (session torn down), the dispatch is a no-op.
+    auto self = shared_from_this();
+    m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
+        m_system,
+        [weak = std::weak_ptr<Session>(self)](
+            const std::vector<RealtimeWatchChange>& changes) {
+          if (auto sp = weak.lock())
+          {
+            for (const RealtimeWatchChange& change : changes)
+            {
+              picojson::object body;
+              body.emplace("watchId", static_cast<double>(change.watch_id));
+              body.emplace("address", Json::FormatAddress(change.address));
+              body.emplace("count", static_cast<double>(change.count));
+              body.emplace("data", Json::Base64Encode(change.bytes));
+              sp->QueueEvent("dolphin_memoryChanged", std::move(body));
+            }
+          }
+        });
 
     m_was_stepping = m_system.GetCPU().IsStepping();
 
@@ -190,6 +206,10 @@ public:
       HandleMessage(*message);
     }
 
+    // Tear down the sampler before the rest of the Session so its
+    // vi_end_field_event hook is unregistered (no further Tick() will fire)
+    // before the transport/event-queue members are destroyed.
+    m_watch_sampler.reset();
     FlushEvents();
   }
 
@@ -225,9 +245,29 @@ private:
   // Emits a `stopped` event whose reason is classified from the current PC
   // (code breakpoint, data watchpoint, or step) and carries `hitBreakpointIds`
   // when a breakpoint at the PC caused the stop.
+  //
+  // The reason is taken from `m_pending_stop_info` when present: the state hook
+  // stashes it synchronously on the CPU thread at break time, while
+  // EXCEPTION_FAKE_MEMCHECK_HIT is still set (it's cleared by the next
+  // CheckExceptions). If the stash is empty (e.g. an explicit pause with no
+  // spontaneous break, or the hook ran before exceptions were raised), fall
+  // back to a fresh GetStopInfo().
   void SendClassifiedStoppedEvent()
   {
-    const StopInfo info = m_controller.GetStopInfo();
+    StopInfo info;
+    {
+      std::lock_guard lock(m_stop_info_mutex);
+      if (m_pending_stop_info)
+      {
+        info = *m_pending_stop_info;
+        m_pending_stop_info.reset();
+      }
+    }
+    if (info.reason == StopReason::Step && !info.hit_breakpoint_address)
+    {
+      // No stash was available -- classify from current state as best effort.
+      info = m_controller.GetStopInfo();
+    }
 
     picojson::object body;
     body.emplace("threadId", 1.0);
@@ -382,6 +422,13 @@ private:
 
     if (command == "next")
     {
+      // DESNOTE(jbarber, 2026-07-21): DAP stepping requires the core to be
+      // paused. If a client sends `next` while running (a client error), the
+      // controller's StepOver early-returns without advancing -- don't emit a
+      // spurious `stopped`/"step". Pause first so the step has a frame to step
+      // from, mirroring how VS Code's own client pauses before stepping.
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.Pause();
       const StepOverResult result = m_controller.StepOver();
       Respond(request->seq, command, picojson::object{});
       if (result == StepOverResult::Stepped)
@@ -398,6 +445,8 @@ private:
 
     if (command == "stepIn")
     {
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.Pause();
       m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
@@ -407,6 +456,8 @@ private:
 
     if (command == "stepOut")
     {
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.Pause();
       m_controller.StepOut();
       Respond(request->seq, command, picojson::object{});
       SendStoppedEvent("step");
@@ -543,9 +594,12 @@ private:
       // "setup complete" signal when a client uses initialize->launch->done
       // without passing stopOnEntry to launch. If launch/attach already set
       // the stop-on-entry policy (m_stop_on_entry), honor it; otherwise (e.g.
-      // a bare attach with no prior launch) default to stopping.
-      if (!m_debugging_started)
+      // a bare attach with no prior launch) default to stopping. The
+      // m_entry_stop_sent guard ensures the entry/attach stop fires exactly
+      // once even if a client sends configurationDone before launch/attach.
+      if (!m_debugging_started && !m_entry_stop_sent)
       {
+        m_entry_stop_sent = true;
         if (m_stop_on_entry)
           SendStoppedEvent("entry");
         else
@@ -571,16 +625,20 @@ private:
 
       Respond(request->seq, command, picojson::object{});
       m_debugging_started = true;
-      if (m_stop_on_entry)
+      if (!m_entry_stop_sent)
       {
-        SendStoppedEvent(command == "launch" ? "entry" : "attach");
-      }
-      else
-      {
-        // Core starts paused while a debugger is attached (see
-        // CPUSetInitialExecutionState in Core.cpp); resume it so the game
-        // runs immediately. The state hook queues a `continued` event.
-        m_controller.Continue();
+        m_entry_stop_sent = true;
+        if (m_stop_on_entry)
+        {
+          SendStoppedEvent(command == "launch" ? "entry" : "attach");
+        }
+        else
+        {
+          // Core starts paused while a debugger is attached (see
+          // CPUSetInitialExecutionState in Core.cpp); resume it so the game
+          // runs immediately. The state hook queues a `continued` event.
+          m_controller.Continue();
+        }
       }
       SyncSteppingBaseline();
       return;
@@ -1173,6 +1231,16 @@ private:
   // per-session request); an explicit `stopOnEntry` on `launch`/`attach`
   // overrides it for the session. Consulted by `configurationDone`.
   bool m_stop_on_entry = true;
+  // Guards the entry-stop so it fires exactly once across launch/attach and
+  // configurationDone, even when a client sends configurationDone before
+  // launch (or otherwise interleaves them).
+  bool m_entry_stop_sent = false;
+
+  // Stop reason captured synchronously by the state hook at break time (on the
+  // CPU thread), before EXCEPTION_FAKE_MEMCHECK_HIT is cleared. Consumed by
+  // SendClassifiedStoppedEvent on the session thread.
+  std::mutex m_stop_info_mutex;
+  std::optional<StopInfo> m_pending_stop_info;
 
   std::mutex m_event_mutex;
   std::vector<std::string> m_pending_events;
@@ -1181,6 +1249,11 @@ private:
 
 void RunSession(DapTransport& transport, Core::System& system)
 {
-  Session{transport, system}.Run();
+  // DESNOTE(jbarber, 2026-07-21): Session derives from enable_shared_from_this
+  // so the realtime-watch sampler's dispatch lambda can capture a weak_ptr and
+  // keep *this alive across an in-flight vi_end_field_event Tick() on the CPU
+  // thread. Constructing here via make_shared (rather than a stack local)
+  // makes weak_from_this() valid by the time Run() is entered.
+  std::make_shared<Session>(transport, system)->Run();
 }
 }  // namespace DAP

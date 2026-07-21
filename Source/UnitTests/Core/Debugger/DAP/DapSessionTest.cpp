@@ -1340,5 +1340,63 @@ TEST_F(DapSessionTest, LaunchDefaultsToStoppedEntry)
   })");
   (void)client.Receive();
 }
+
+TEST_F(DapSessionTest, ConfigurationDoneBeforeLaunchDoesNotDuplicateEntryStop)
+{
+  // Regression: a client that sends configurationDone before launch/attach used
+  // to emit a `stopped`/entry from configurationDone AND a second one from
+  // launch. The m_entry_stop_sent guard now ensures entry/attach stop fires
+  // exactly once regardless of the configurationDone/launch ordering.
+  TestClient client(m_client_fd());
+
+  client.Send(R"({
+    "seq": 1,
+    "type": "request",
+    "command": "initialize",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // initialize response
+  ASSERT_TRUE(client.Receive().has_value());  // initialized event
+
+  // configurationDone before launch — this emits the entry stop and marks it sent.
+  client.Send(R"({
+    "seq": 2,
+    "type": "request",
+    "command": "configurationDone"
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // configurationDone response
+  const auto first_stop = client.Receive();
+  ASSERT_TRUE(first_stop.has_value());
+  EXPECT_EQ(first_stop->at("event").to_str(), "stopped");
+  EXPECT_EQ(first_stop->at("body").get<picojson::object>().at("reason").to_str(), "entry");
+
+  // launch must NOT emit a second entry stop — verify by sending a probe
+  // request (threads) and confirming its response is the very next message
+  // (no stale stopped event queued ahead of it).
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "launch",
+    "arguments": {}
+  })");
+  ASSERT_TRUE(client.Receive().has_value());  // launch response
+
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "threads"
+  })");
+  const auto next = client.Receive();
+  ASSERT_TRUE(next.has_value());
+  EXPECT_EQ(next->at("type").to_str(), "response");
+  EXPECT_EQ(next->at("command").to_str(), "threads");
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
 }  // namespace
 #endif  // _WIN32
