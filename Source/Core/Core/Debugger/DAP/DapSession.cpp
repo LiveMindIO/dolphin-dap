@@ -364,15 +364,18 @@ private:
   void PollBreakpointStop()
   {
     // Async step-out completion: the worker signals via m_step_out_done once
-    // DapDebugController::StepOut has returned. Join and emit the
-    // stopped/step event here, on the session thread, so the client still
-    // sees them in command order. This replaces the previous synchronous
-    // inline call that blocked HandleMessage for up to the 5s step-out
-    // timeout.
+    // DapDebugController::StepOut has returned. Join and emit the appropriate
+    // stopped event here, on the session thread, so the client still sees it
+    // in command order. The step-out may have stopped early because the
+    // interpreter loop hit a code breakpoint (StepOut bails when
+    // CheckBreakPoints fires) -- classify via SendClassifiedStoppedEvent so
+    // a real breakpoint hit isn't mis-reported as a plain 'step'. This
+    // replaces the previous synchronous inline call that blocked
+    // HandleMessage for up to the 5s step-out timeout.
     if (m_step_out_thread.joinable() && m_step_out_done.load())
     {
       m_step_out_thread.join();
-      SendStoppedEvent("step");
+      SendClassifiedStoppedEvent();
       SyncSteppingBaseline();
       return;
     }
@@ -565,15 +568,38 @@ private:
       // session loop keeps polling the socket for disconnect / new requests
       // and keeps flushing realtime-watch events while the interpreter
       // single-steps toward the next return. PollBreakpointStop joins the
-      // worker when it signals completion and emits the stopped/step event.
+      // worker when it signals completion and emits the stopped event via
+      // SendClassifiedStoppedEvent so a real breakpoint hit on the way out is
+      // reported as 'breakpoint', not as a plain 'step'.
+      //
+      // The pre-step pause fires the state hook and populates
+      // m_pending_stop_info with whatever GetStopInfo sees at that instant
+      // (often a CodeBreakpoint if we stopped on a code breakpoint the user
+      // had planted at the PC). If we left that stash in place, the
+      // post-step SendClassifiedStoppedEvent would consume it and lie about
+      // the stop reason. Reset it here so only a state-hook fire *during*
+      // the worker's interpreter loop can attribute the eventual stop --
+      // otherwise SendClassifiedStoppedEvent defaults to 'step' (which is
+      // the correct characterization for a step-out that ran to a return).
+      //
       // A previous step-out is still in flight only if the client reissued
       // step-out within one 50ms poll window -- in that pathological case we
-      // wait for the in-flight worker so only one step-out runs at a time.
+      // can't safely start a second concurrent interpreter loop, so we
+      // acknowledge the request with success and let the prior worker
+      // complete. (Previously this branch returned without responding,
+      // which left the client's request un-answered.)
       if (m_step_out_thread.joinable())
       {
         if (!m_step_out_done.load())
-          return;  // still stepping from a prior stepOut; ignore the reissue
+        {
+          Respond(request->seq, command, picojson::object{});
+          return;
+        }
         m_step_out_thread.join();
+      }
+      {
+        std::lock_guard lock(m_stop_info_mutex);
+        m_pending_stop_info.reset();
       }
       m_step_out_done.store(false);
       m_step_out_thread = std::thread([self = shared_from_this()]() {
@@ -581,7 +607,7 @@ private:
         self->m_step_out_done.store(true);
       });
       Respond(request->seq, command, picojson::object{});
-      // Don't emit stopped/step here -- PollBreakpointStop will, once the
+      // Don't emit stopped here -- PollBreakpointStop will, once the
       // worker signals completion. SyncSteppingBaseline is also deferred to
       // the join site so the polling baseline matches the post-step state.
       return;

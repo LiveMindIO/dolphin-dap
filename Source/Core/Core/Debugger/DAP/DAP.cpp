@@ -88,8 +88,14 @@ static void RunClient(SessionHandle* handle)
   handle->done.store(true);
 }
 
-// Wait up to `timeout_ms` for a new connection on `listen_fd`. Returns the
-// accepted fd (>= 0), 0 on timeout, or -1 on error / shutdown.
+// Wait up to `timeout_ms` for a new connection on `listen_fd`.
+// Returns:
+//   >= 0  : the accepted client fd (note: valid fds can include 0 when
+//          stdin has been closed in this process, so 0 must NOT be used as
+//          a "no connection" sentinel);
+//   -2    : timed out waiting for a connection (callers use this chance to
+//          reap finished sessions and loop);
+//   -1    : error or shutdown (callers exit the accept loop).
 static int TimedAccept(int listen_fd, int timeout_ms)
 {
   fd_set readfds;
@@ -101,12 +107,17 @@ static int TimedAccept(int listen_fd, int timeout_ms)
   tv.tv_usec = (timeout_ms % 1000) * 1000;
 
   const int ready = select(listen_fd + 1, &readfds, nullptr, nullptr, &tv);
-  if (ready <= 0)
-    return ready < 0 ? -1 : 0;
+  if (ready < 0)
+    return -1;
+  if (ready == 0)
+    return -2;
 
   sockaddr_storage client_addr{};
   socklen_t client_addrlen = sizeof(client_addr);
-  return accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addrlen);
+  const int fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addrlen);
+  if (fd < 0)
+    return -1;
+  return fd;
 }
 
 // Joins and removes session handles whose `RunClient` has finished. Called
@@ -149,14 +160,15 @@ static void AcceptLoop()
   {
     const int client_fd = TimedAccept(s_listen_sock, 200);
 
-    if (client_fd < 0)
+    if (client_fd == -1)
     {
-      // `select`/`accept` return < 0 on shutdown (listen socket closed).
+      // `select`/`accept` returned an error (typically the listen socket
+      // being closed during shutdown).
       if (!s_shutting_down.load())
         ERROR_LOG_FMT(CONSOLE, "DAP: accept failed (errno {}).", errno);
       break;
     }
-    if (client_fd == 0)
+    if (client_fd == -2)
     {
       // Timed out waiting for a connection; use the chance to reap finished
       // session threads so quit-and-reconnect cycles don't leak.
@@ -164,6 +176,8 @@ static void AcceptLoop()
       continue;
     }
 
+    // client_fd >= 0 (and may legitimately be 0 if stdin was closed in this
+    // process -- that's still a valid accepted socket, not a sentinel).
     if (s_shutting_down.load())
     {
       int fd = client_fd;

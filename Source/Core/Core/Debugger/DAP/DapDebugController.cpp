@@ -883,8 +883,8 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
   // Snapshot the original instruction we're about to patch out. The
   // detour is transparent: the trampoline replays this instruction and
   // then branches back to `target + 4`.
-  const std::vector<u8> original_bytes = ReadMemory(target_address, 4);
-  if (original_bytes.size() != 4u)
+  const std::vector<u8> original_target_bytes = ReadMemory(target_address, 4);
+  if (original_target_bytes.size() != 4u)
     return std::nullopt;  // Target address couldn't be read.
 
   // Region layout: [detour body][b trampoline][trampoline: original + b target+4]
@@ -909,32 +909,60 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
   const u32 detour_branch = MakeBranchInstruction(target_address, detour_addr);
   const u32 trampoline_return = MakeBranchInstruction(trampoline_addr + 4u, target_address + 4u);
 
+  // DESNOTE(jbarber, 2026-07-21): Each (address, snapshot) pair below records
+  // the pre-detour bytes we're about to overwrite. If any WriteMemory call
+  // fails partway through the chain, we walk the `written` list in reverse
+  // and restore each region from its snapshot so the caller is returned to
+  // the pre-detour byte layout (no partially-patched target/trampoline
+  // left behind). The `written` vector grows as writes succeed, so a
+  // failure on the Nth write restores only the first N-1 regions.
+  struct PendingWrite
+  {
+    u32 address;
+    std::vector<u8> snapshot;
+  };
+  std::vector<PendingWrite> written;
+  const auto restore = [&] {
+    for (auto it = written.rbegin(); it != written.rend(); ++it)
+      (void)WriteMemory(it->address, std::span<const u8>{it->snapshot});
+  };
+  const auto stage_or_fail = [&](u32 address, const std::vector<u8>& snapshot,
+                                  std::span<const u8> new_bytes) -> bool {
+    if (snapshot.size() != new_bytes.size() ||
+        WriteMemory(address, new_bytes) != new_bytes.size())
+    {
+      restore();
+      return false;
+    }
+    written.push_back({address, snapshot});
+    return true;
+  };
+
   // Order matters for live emulation: install the detour body and
   // trampoline FIRST, then patch the target. A CPU that hits the target
   // before the trampoline is in place would `b detour` -> fall through to
   // garbage after body. Even though tests don't run the CPU, this is the
   // correct ordering for production.
-  if (WriteMemory(detour_addr, std::span<const u8>{detour_body}) != detour_body.size())
+  if (!stage_or_fail(detour_addr, ReadMemory(detour_addr, detour_body.size()), detour_body))
     return std::nullopt;
   const auto tail_bytes = BigEndianBytes(tail_branch);
-  if (WriteMemory(tail_branch_addr, std::span<const u8>{tail_bytes}) != tail_bytes.size())
+  if (!stage_or_fail(tail_branch_addr, ReadMemory(tail_branch_addr, 4), tail_bytes))
     return std::nullopt;
-  const auto original_bytes_span = std::span<const u8>{original_bytes};
-  if (WriteMemory(trampoline_addr, original_bytes_span) != original_bytes.size())
+  if (!stage_or_fail(trampoline_addr, ReadMemory(trampoline_addr, 4), original_target_bytes))
     return std::nullopt;
   const auto return_bytes = BigEndianBytes(trampoline_return);
-  if (WriteMemory(trampoline_addr + 4u, std::span<const u8>{return_bytes}) != return_bytes.size())
+  if (!stage_or_fail(trampoline_addr + 4u, ReadMemory(trampoline_addr + 4u, 4), return_bytes))
     return std::nullopt;
   // Finally patch the target with `b detour_addr`.
   const auto patch_bytes = BigEndianBytes(detour_branch);
-  if (WriteMemory(target_address, std::span<const u8>{patch_bytes}) != patch_bytes.size())
+  if (!stage_or_fail(target_address, ReadMemory(target_address, 4), patch_bytes))
     return std::nullopt;
 
   DetourResult result;
   result.target_address = target_address;
   result.detour_address = detour_addr;
   result.trampoline_address = trampoline_addr;
-  result.original_instruction = original_bytes;
+  result.original_instruction = original_target_bytes;
   return result;
 }
 

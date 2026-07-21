@@ -195,6 +195,14 @@ void RealtimeWatchSampler::Tick()
           // readable tail can't slip a write through to a bad address.
           if (cur[i] == frozen[i] || !accessors->IsValidAddress(guard, addr))
             continue;
+          // DESNOTE(jbarber, 2026-07-21): WriteU8 routes through
+          // PowerPC::MMU::HostWrite, which calls WriteToHardware<NoException>
+          // -- the same primitive CodeWidget / RegisterWidget use for their
+          // "set value" path. That primitive does NOT invoke
+          // PowerPC::MMU::Memcheck, so data watchpoints race-firing on the
+          // canon write-back is a non-issue here. The MMU::Write path
+          // (which DOES fire memchecks) is reserved for emulated
+          // instructions raising real watchpoint traps.
           accessors->WriteU8(guard, addr, frozen[i]);
           cur[i] = frozen[i];
         }

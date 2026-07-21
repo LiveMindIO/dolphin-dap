@@ -1403,6 +1403,68 @@ TEST_F(DapControllerTest, DetourRejectsInvalidTargetAddress)
   EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(DapControllerTest, DetourRollsBackPartialPatchesOnFailure)
+{
+  // DESNOTE(jbarber, 2026-07-21): When Detour's WriteMemory chain fails
+  // partway through, earlier successful writes must be restored from their
+  // pre-detour snapshots so the caller isn't left with a partially-patched
+  // body/trampoline. Here the target address is valid (so the original
+  // bytes read succeeds), but the supplied `detour_address` is past MEM1
+  // (so reads of the detour-body / tail / trampoline snapshots come back
+  // empty and `stage_or_fail` rejects without writing). The target_byte
+  // check at the start of Detour accepts a valid target_address, then the
+  // detour-body stage fails and rolls back (nothing written yet).
+  DAP::DapDebugController controller(System());
+  const std::array<u8, 4> target_orig{{0x60, 0x00, 0x00, 0x00}};
+  WriteRam(INJECT_BASE, std::vector<u8>{target_orig.begin(), target_orig.end()});
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, INVALID_ADDRESS, body);
+  EXPECT_FALSE(result.has_value());
+  // Target untouched (nothing written yet).
+  const std::vector<u8> after = controller.ReadMemory(INJECT_BASE, 4);
+  EXPECT_EQ(after, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourWithInvalidTailRegionRollsBackDetourBody)
+{
+  // Force a mid-sequence rollback by pointing the detour at a boundary
+  // where the body write succeeds but the tail-branch snapshot read
+  // crosses past RAM. Construct: detour_body at the very end of RAM, so
+  // the body bytes fit but `tail_branch_addr = detour_addr + body_size`
+  // is past RAM. The body write succeeds (snapshot was full-size RAM
+  // read), the tail stage reads an empty snapshot -> rollback restores
+  // the body region's snapshot -> we leave body region with its original
+  // bytes.
+  DAP::DapDebugController controller(System());
+  const u32 ram_size = System().GetMemory().GetRamSizeReal();
+  if (ram_size == 0)
+    GTEST_SKIP() << "requires a booted memory arena";
+  // Choose detour_addr so body fits at the very end of RAM but the tail
+  // is one byte past. Body is 4 bytes; detour_addr = ram_size - 4
+  // (physical == effective in DR=0 tests) means tail_branch_addr = ram_size,
+  // which is past RAM.
+  const u32 detour_addr = ram_size - 4;
+  // Seed that region with a known byte so we can assert rollback restored it.
+  const std::array<u8, 4> body_orig{{0xAA, 0xBB, 0xCC, 0xDD}};
+  // The DR=0 translation is identity, so we can write via the API itself to
+  // seed the snapshot.
+  (void)controller.WriteMemory(detour_addr, std::span<const u8>{body_orig});
+
+  // Target site at INJECT_BASE — must be writable so Detour's first read
+  // succeeds.
+  WriteRam(INJECT_BASE, std::vector<u8>{0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x7C, 0x63, 0x1B, 0x78};  // mr r3,r3 detour body.
+  auto result = controller.Detour(INJECT_BASE, detour_addr, body);
+  EXPECT_FALSE(result.has_value());
+  // The body region was overwritten then rolled back; post-Detour bytes
+  // match the pre-Detour snapshot.
+  const std::vector<u8> after = controller.ReadMemory(detour_addr, 4);
+  EXPECT_EQ(after, (std::vector<u8>{0xAA, 0xBB, 0xCC, 0xDD}));
+  // Target untouched (rolled back from the patch_bytes stage that never ran).
+  const std::vector<u8> target_after = controller.ReadMemory(INJECT_BASE, 4u);
+  EXPECT_EQ(target_after, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
 TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
 {
   // Smoke test: WriteMemory writes the bytes and invalidates the iCache+JIT
