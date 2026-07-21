@@ -199,8 +199,15 @@ StepOverResult DapDebugController::StepOver()
     return StepOverResult::Continuing;
   }
 
-  StepInto();
-  return StepOverResult::Stepped;
+  // DESNOTE(jbarber, 2026-07-21): Propagate StepInto's failure rather than
+  // unconditionally report Stepped. StepInto returns false when the async
+  // StepOpcode path timed out without the CPU thread acknowledging -- in
+  // that case the PC has not advanced. The session handler mirrors the
+  // stepIn guard (suppress the stopped event on false), so a `next` whose
+  // underlying single-step didn't complete no longer emits a spurious
+  // stopped/"step" event for a PC that didn't move.
+  const bool stepped = StepInto();
+  return stepped ? StepOverResult::Stepped : StepOverResult::NotStepped;
 }
 
 void DapDebugController::StepOut(std::chrono::milliseconds timeout_ms)

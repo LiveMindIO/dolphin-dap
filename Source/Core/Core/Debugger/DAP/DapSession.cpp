@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -383,13 +384,67 @@ private:
 
     if (info.hit_breakpoint_address)
     {
-      picojson::array hit_ids;
-      hit_ids.emplace_back(static_cast<double>(*info.hit_breakpoint_address));
-      body.emplace("hitBreakpointIds", std::move(hit_ids));
+      // DESNOTE(jbarber, 2026-07-21): DAP `hitBreakpointIds` must echo the
+      // stable id the client received in its setBreakpoints /
+      // setInstructionBreakpoints response -- NOT the raw PC address. The
+      // previous form shoved the address in here, which broke client-side
+      // correlation between configured breakpoints and stop events. Look
+      // up the id via m_bp_id_by_address; if no mapping exists (e.g. a
+      // temporary step-over breakpoint set via SetTemporary, which never
+      // got a DAP response), omit hitBreakpointIds entirely rather than
+      // fabricate one.
+      std::optional<int> hit_id = LookupBreakpointId(*info.hit_breakpoint_address);
+      if (hit_id)
+      {
+        picojson::array hit_ids;
+        hit_ids.emplace_back(static_cast<double>(*hit_id));
+        body.emplace("hitBreakpointIds", std::move(hit_ids));
+      }
     }
 
     QueueEvent("stopped", std::move(body));
     FlushEvents();
+  }
+
+  // DESNOTE(jbarber, 2026-07-21): Assign a stable DAP id for a breakpoint
+  // site installed at `address` and remember the (address -> id) mapping so
+  // SendClassifiedStoppedEvent can translate a hit PC back to the id the
+  // client received in its setBreakpoints / setInstructionBreakpoints
+  // response. Re-installing the same address (e.g. when the client
+  // re-sends an authoritative set with the same site) reuses the existing
+  // id rather than minting a new one, so client-side correlation doesn't
+  // break across refreshes. Ids start at 1 because DAP clients often
+  // treat 0 as "no id".
+  int AssignBreakpointId(u32 address)
+  {
+    std::lock_guard lock(m_bp_id_mutex);
+    auto it = m_bp_id_by_address.find(address);
+    if (it != m_bp_id_by_address.end())
+      return it->second;
+    const int id = m_next_bp_id++;
+    m_bp_id_by_address.emplace(address, id);
+    return id;
+  }
+
+  std::optional<int> LookupBreakpointId(u32 address)
+  {
+    std::lock_guard lock(m_bp_id_mutex);
+    auto it = m_bp_id_by_address.find(address);
+    if (it == m_bp_id_by_address.end())
+      return std::nullopt;
+    return it->second;
+  }
+
+  // DESNOTE(jbarber, 2026-07-21): Each authoritative setBreakpoints /
+  // setInstructionBreakpoints call REPLACES the previously-installed set
+  // (Dolphin keeps a single code-breakpoint list). Drop the (address->id)
+  // mappings for the previously-installed sites so a future stop at one of
+  // those addresses doesn't match a stale id; the response below will
+  // mint fresh ids for the new set.
+  void ClearBreakpointIds()
+  {
+    std::lock_guard lock(m_bp_id_mutex);
+    m_bp_id_by_address.clear();
   }
 
   void PollBreakpointStop()
@@ -621,6 +676,16 @@ private:
         SendClassifiedStoppedEvent();
         SyncSteppingBaseline();
       }
+      else if (result == StepOverResult::NotStepped)
+      {
+        // DESNOTE(jbarber, 2026-07-21): The underlying StepInto timed out
+        // without the CPU thread acknowledging -- the PC has not advanced.
+        // Suppress the stopped event (mirroring the stepIn guard) so the
+        // client isn't told execution stopped at an unchanged PC. The
+        // response still acks the `next` request so the client knows the
+        // command was received.
+        SyncSteppingBaseline();
+      }
       else
       {
         SyncSteppingBaseline();
@@ -688,11 +753,21 @@ private:
       // acknowledge the request with success and let the prior worker
       // complete. (Previously this branch returned without responding,
       // which left the client's request un-answered.)
+      // DESNOTE(jbarber, 2026-07-21): A previous step-out may still be in
+      // flight (client reissued stepOut within one 50ms poll window). We
+      // can't safely start a second concurrent interpreter loop against
+      // the same CPU -- two workers would each take CPUThreadGuard and
+      // race on the PC + breakpoint state. The previous form responded
+      // success and returned, leaving the client believing a second
+      // step-out ran when only the prior worker is active and only one
+      // classified stop will arrive. Reject the duplicate explicitly so
+      // the client knows the second step-out didn't start -- it can retry
+      // once the in-flight worker's stopped event arrives.
       if (m_step_out_thread.joinable())
       {
         if (!m_step_out_done.load())
         {
-          Respond(request->seq, command, picojson::object{});
+          RespondError(request->seq, command, "stepOut already in progress");
           return;
         }
         m_step_out_thread.join();
@@ -963,6 +1038,14 @@ private:
     const std::vector<std::optional<u32>> addresses =
         m_controller.UpdateSourceBreakpoints(source_key, context, specs);
 
+    // DESNOTE(jbarber, 2026-07-21): Each authoritative setBreakpoints call
+    // REPLACES the previously-installed source breakpoints (Dolphin keeps
+    // a single code-breakpoint list), so drop the previously-assigned DAP
+    // ids and mint fresh ones for the sites installed by this call. The
+    // ids are echoed back in the response so the client can correlate
+    // future stopped-event hitBreakpointIds back to these entries.
+    ClearBreakpointIds();
+
     picojson::array breakpoints;
     for (size_t i = 0; i < specs.size(); ++i)
     {
@@ -970,7 +1053,10 @@ private:
       const std::optional<u32>& address = addresses[i];
       entry.emplace("verified", address.has_value());
       if (address)
+      {
+        entry.emplace("id", static_cast<double>(AssignBreakpointId(*address)));
         entry.emplace("instructionReference", Json::FormatAddress(*address));
+      }
       breakpoints.emplace_back(std::move(entry));
     }
 
@@ -986,12 +1072,17 @@ private:
 
     std::vector<CodeBreakpointRequest> breakpoint_requests;
     picojson::array breakpoints;
+    // DESNOTE(jbarber, 2026-07-21): setInstructionBreakpoints also replaces
+    // the whole installed list (and shares storage with source breakpoints),
+    // so reset the id map before assigning fresh ids below.
+    ClearBreakpointIds();
     for (const Protocol::RequestedInstructionBreakpoint& breakpoint : arguments.breakpoints)
     {
       picojson::object entry;
       entry.emplace("verified", breakpoint.address.has_value());
       if (breakpoint.address)
       {
+        entry.emplace("id", static_cast<double>(AssignBreakpointId(*breakpoint.address)));
         entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
         CodeBreakpointRequest bp;
         bp.address = *breakpoint.address;
@@ -1739,6 +1830,17 @@ private:
 
   std::mutex m_event_mutex;
   std::vector<std::string> m_pending_events;
+
+  // DESNOTE(jbarber, 2026-07-21): DAP `hitBreakpointIds` in a stopped event
+  // must echo the stable `id` the client received in its
+  // setBreakpoints/setInstructionBreakpoints response, NOT the raw PC where
+  // the breakpoint hit (clients correlate via the id and would mis-associate
+  // a hit if we shipped the address instead). We assign a monotonic id per
+  // installed breakpoint site and remember the (address -> id) mapping so
+  // SendClassifiedStoppedEvent can translate the hit PC back to an id.
+  std::mutex m_bp_id_mutex;
+  std::unordered_map<u32, int> m_bp_id_by_address;
+  int m_next_bp_id = 1;
 
   // DESNOTE(jbarber, 2026-07-21): Asynchronous step-out worker. The previous
   // form ran DapDebugController::StepOut inline on the session thread, which

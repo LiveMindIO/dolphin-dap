@@ -39,6 +39,11 @@ enum class StepOverResult
 {
   Stepped,
   Continuing,
+  // DESNOTE(jbarber, 2026-07-21): The underlying StepInto didn't complete
+  // (async StepOpcode timed out without CPU thread acknowledgement), so
+  // the PC has not advanced. The session suppresses the stopped event
+  // rather than emit a false stop for an unchanged PC.
+  NotStepped,
 };
 
 struct ThreadInfo
