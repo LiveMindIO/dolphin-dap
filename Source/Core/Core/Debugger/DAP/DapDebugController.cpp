@@ -175,7 +175,21 @@ bool DapDebugController::StepInto()
   const PowerPC::CoreMode old_mode = power_pc.GetMode();
   power_pc.SetMode(PowerPC::CoreMode::Interpreter);
   cpu.StepOpcode(&sync_event);
-  const bool completed = sync_event.WaitFor(std::chrono::milliseconds(20));
+  // DESNOTE(jbarber, 2026-07-21): Wait for the CPU thread to ack the step
+  // rather than bail after 20ms. The previous 20ms timeout was chosen so
+  // the session thread wouldn't block when the CPU was mid-block or under
+  // load, returning false and instructing the caller NOT to emit a
+  // stopped event. But PollBreakpointStop can't observe the late
+  // completion -- it only emits stops on a not-stepping->stepping
+  // transition, and after Pause/SyncSteppingBaseline the core is already
+  // stepping=true with no further state change. The step's late
+  // completion sets sync_event silently and the client hangs waiting for
+  // a stop that never arrives (Bugbot: "Step timeout drops stopped
+  // event"). Bumping to 2s keeps the session responsive while covering
+  // the realistic range of CPU-thread step ack latency; if the ack truly
+  // never arrives (deadlock), no stop is emitted and the client will at
+  // worst time out itself rather than hang on a phantom in-flight step.
+  const bool completed = sync_event.WaitFor(std::chrono::seconds(2));
   power_pc.SetMode(old_mode);
   return completed;
 }
@@ -769,6 +783,15 @@ void DapDebugController::Restart()
 {
   Core::CPUThreadGuard guard(m_system);
   m_system.GetPowerPC().Reset();
+  // DESNOTE(jbarber, 2026-07-21): PowerPC::Reset only clears PPC/MMU/cache
+  // state; it doesn't touch the CPU run state. If the client had continued
+  // execution (stopOnEntry:false or after `continue`), the core stays
+  // Running and the post-restart `stopped` event the session emits would
+  // lie -- the client would believe emulation halted while the CPU kept
+  // running. Force Break + State::Paused here so the post-restart stop is
+  // truthful, mirroring what Terminate does.
+  m_system.GetCPU().Break();
+  Core::SetState(m_system, Core::State::Paused);
 }
 
 void DapDebugController::Terminate()
