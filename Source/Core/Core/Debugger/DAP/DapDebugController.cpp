@@ -746,6 +746,19 @@ void DapDebugController::Terminate()
 
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
 {
+  // DESNOTE(jbarber, 2026-07-21): Reject ranges that wrap past u32 max so a
+  // huge `size` paired with a high `address` can't silently advance past
+  // 0xFFFFFFFF and onto unrelated low RAM. The previous form's
+  // `address + static_cast<u32>(i)` arithmetic wrapped in u32, and the
+  // IsValidAddress check could succeed for the wrapped address (low RAM is
+  // typically valid), reading bytes from the wrong region. Returning an
+  // empty vector surfacing the failure as "couldn't read anything" matches
+  // dolphin_realtimeWatch and ParseFreeze's existing overflow protection.
+  if (size > static_cast<std::size_t>(std::numeric_limits<u32>::max()) ||
+      address > std::numeric_limits<u32>::max() - static_cast<u32>(size))
+  {
+    return {};
+  }
   Core::CPUThreadGuard guard(m_system);
   AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
 
@@ -763,6 +776,15 @@ std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
 
 std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> data)
 {
+  // DESNOTE(jbarber, 2026-07-21): Same overflow guard as ReadMemory above --
+  // a huge user-supplied `data` paired with a high base address mustn't wrap
+  // and overwrite low RAM. Returning 0 here surfaces the failure to the
+  // caller, including Detour's staged-write rollback.
+  if (data.size() > static_cast<std::size_t>(std::numeric_limits<u32>::max()) ||
+      address > std::numeric_limits<u32>::max() - static_cast<u32>(data.size()))
+  {
+    return 0;
+  }
   Core::CPUThreadGuard guard(m_system);
   AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
 

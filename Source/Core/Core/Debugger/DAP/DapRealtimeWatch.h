@@ -117,6 +117,17 @@ private:
     // readable tail of the region shrank. The reported region still carries
     // the original `count` so the client can tell where unreadable tail begins.
     u32 readable = 0;
+    // DESNOTE(jbarber, 2026-07-21): `readable` captured at the END of the
+    // previous Tick(). Used to bound the change comparison so a region whose
+    // readable tail grew doesn't dispatch a spurious change event: the prefix
+    // we already knew about is compared against `last_seen`, and only bytes
+    // that were previously readable AND currently readable can produce a
+    // real change. Newly-readable bytes are dispatched once (the user wants
+    // to see their current value) and then folded into `last_seen` -- the
+    // NEXT tick will compare them normally. Without this bound,
+    // uninitialized zero-fill in `last_seen`'s tail would compare against
+    // honest-ram bytes that just became readable and report "changed".
+    u32 prev_readable = 0;
   };
 
   Core::System& m_system;

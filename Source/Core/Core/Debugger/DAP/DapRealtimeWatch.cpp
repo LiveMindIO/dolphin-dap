@@ -80,6 +80,14 @@ int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
   // CPU thread.
   sub.current.assign(count, 0);
   sub.readable = readable;
+  // DESNOTE(jbarber, 2026-07-21): Initialize prev_readable to the seeded
+  // readable count so the first Tick()'s compare window includes the full
+  // seed prefix. Without this, prev_readable defaults to 0 and the first
+  // Tick would see `grew = (readable > 0)` and dispatch unconditionally
+  // -- a spurious change event whose payload matches the seed. The seed
+  // already captured the current value; the first tick should treat it as
+  // the baseline.
+  sub.prev_readable = readable;
   m_subscriptions.push_back(std::move(sub));
   return m_subscriptions.back().watch_id;
 }
@@ -213,9 +221,27 @@ void RealtimeWatchSampler::Tick()
       }
 
       // Unfrozen path: compare against last_seen and dispatch on drift.
-      if (sub.readable == 0 ||
-          std::memcmp(sub.current.data(), sub.last_seen.data(), sub.readable) == 0)
+      // DESNOTE(jbarber, 2026-07-21): Bound the comparison to bytes that
+      // were readable BOTH this tick AND the previous tick (min(readable,
+      // prev_readable)). Bytes that just became readable had no real prior
+      // value in last_seen -- the previous Tick couldn't read them -- and
+      // comparing against the zero-fill there would always show "changed"
+      // even though guest memory was stable. The newly readable bytes are
+      // still useful to the client (they reveal the cell's current value),
+      // so when `readable > prev_readable` we dispatch unconditionally to
+      // surface them; otherwise we compare only the previously-readable
+      // prefix and dispatch only if that prefix actually drifted.
+      const u32 prev_readable = sub.prev_readable;
+      const u32 compare_bytes = std::min(sub.readable, prev_readable);
+      bool changed = false;
+      if (compare_bytes > 0)
+        changed = std::memcmp(sub.current.data(), sub.last_seen.data(), compare_bytes) != 0;
+      const bool grew = sub.readable > prev_readable;
+      if (!changed && !grew)
       {
+        // No drift and no new bytes surfaced: nothing to report. Keep
+        // last_seen and prev_readable as-is so the next tick has the same
+        // baseline.
         continue;
       }
 
@@ -225,7 +251,13 @@ void RealtimeWatchSampler::Tick()
       change.count = sub.count;
       change.bytes.assign(sub.current.begin(), sub.current.begin() + sub.readable);
       changes.push_back(std::move(change));
-      std::swap(sub.last_seen, sub.current);
+      // Sync last_seen to the freshly-read prefix; bytes past `readable` are
+      // left untouched (they're stale from a prior tick, but the next Tick
+      // will overwrite stale bytes if they become readable again -- and the
+      // compare window above is bounded by prev_readable, so stale tail
+      // bytes can't drive the comparison).
+      std::memcpy(sub.last_seen.data(), sub.current.data(), sub.readable);
+      sub.prev_readable = sub.readable;
     }
   }
 
