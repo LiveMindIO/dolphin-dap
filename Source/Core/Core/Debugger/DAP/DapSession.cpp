@@ -708,13 +708,16 @@ private:
       if (!m_system.GetCPU().IsStepping())
         m_controller.Pause();
       // DESNOTE(jbarber, 2026-07-21): StepInto may return false when the
-      // CPU thread can't acknowledge the StepOpcode signal within its 20ms
+      // CPU thread can't acknowledge the StepOpcode signal within its 2s
       // wait (e.g. the emulator is mid-block or under load). Emitting a
       // `stopped`/`step` event in that case would lie to the client -- the
       // PC hasn't advanced -- so we only send the stop when the step
-      // actually completed. When stepIn returns false the stop arrives
-      // later via PollBreakpointStop once the step settles, mirroring how
-      // `next`/StepOver's Continuing branch is handled.
+      // actually completed. The earlier "stop arrives later via
+      // PollBreakpointStop" framing was wrong: PollBreakpointStop only
+      // emits stops on a not-stepping->stepping transition, and after
+      // Pause/SyncSteppingBaseline the core is already stepping=true with
+      // no further state change when the late completion fires -- so
+      // suppressing the stop here is the only correct response.
       const bool completed = m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
       if (completed)
@@ -1254,30 +1257,47 @@ private:
     // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck store keys on
     // start_address and MemChecks::Add replaces an existing entry at the
     // same address, so a single setDataBreakpoints request that lists two
-    // entries with the same dataId silently drops all but the last. Without
-    // de-dup, every entry was reported verified:true -- the client believed
-    // N watchpoints were installed when only one (the last) was actually
-    // active. Track seen addresses here and mark later duplicates as
-    // verified:false, skipping them in the request list sent to the
-    // controller. The first occurrence wins so the client's earliest
-    // configuration takes effect.
-    std::unordered_set<u32> seen_addresses;
+    // entries with the same dataId installs only the LAST -- earlier
+    // entries are silently overwritten. Without de-dup, every entry was
+    // reported verified:true and the client believed N watchpoints were
+    // installed when only one was.
+    //
+    // The earlier de-dup marked later duplicates verified:false and skipped
+    // them entirely, but Bugbot flagged that as wrong: a request listing
+    // the same dataId twice with different length / accessType is the
+    // client's way of REPLACING the prior config with a new range/access
+    // kind. Dropping the later entry silently left the configured ranged
+    // watch inactive while still telling the client nothing changed.
+    //
+    // New behavior: pass ALL entries through to the controller (so
+    // MemChecks::Add's replace-on-same-address makes the LAST config win)
+    // and report entries accordingly. For a duplicate address, mark the
+    // PRIOR entry's response slot verified:false (it was overridden) and
+    // the CURRENT entry verified:true (its config is the one now active).
+    // That way the client sees which entry is the survivor and isn't told
+    // a changed configuration is active when it has been replaced by a
+    // later sibling.
+    std::unordered_map<u32, size_t> first_index_for_address;
     for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
     {
       picojson::object entry;
-      const bool duplicate =
-          breakpoint.address.has_value() && !seen_addresses.insert(*breakpoint.address).second;
-      if (duplicate)
-      {
-        entry.emplace("verified", false);
-        breakpoints.emplace_back(std::move(entry));
-        continue;
-      }
       entry.emplace("verified", breakpoint.address.has_value());
       if (breakpoint.address)
       {
+        const u32 addr = *breakpoint.address;
+        auto prev = first_index_for_address.find(addr);
+        if (prev != first_index_for_address.end())
+        {
+          // Mark the prior entry (which will be overwritten by MemChecks::Add
+          // when the controller processes this list) as not-verified in the
+          // response so the client knows it isn't the live config.
+          picojson::object& prev_obj = breakpoints[prev->second].get<picojson::object>();
+          prev_obj["verified"] = picojson::value(false);
+        }
+        first_index_for_address[addr] = breakpoints.size();
+
         DataBreakpointRequest bp;
-        bp.address = *breakpoint.address;
+        bp.address = addr;
         bp.length = breakpoint.length;
         bp.read = breakpoint.read;
         bp.write = breakpoint.write;
@@ -1714,12 +1734,28 @@ private:
       RespondError(request.seq, "dolphin_injectCode", "invalid dolphin_injectCode arguments");
       return;
     }
-    if (!arguments->address && !m_controller.FindFreeMemory(static_cast<u32>(arguments->code.size())))
+    // DESNOTE(jbarber, 2026-07-21): When no address is supplied, allocate
+    // ONCE here and pass it down to InjectCode. The previous form called
+    // FindFreeMemory as a predicate pre-check ("is there ANY free region?")
+    // and let InjectCode scan again to find the actual cave. With the core
+    // running, writes between those two scans can change the free-map, so
+    // the pre-check passes but the inject-time scan returns a different
+    // address (or none) -- the pre-check promised feasibility that the
+    // inject didn't deliver. Allocating up front and threading the chosen
+    // address through makes the response truthful and avoids the second
+    // scan entirely.
+    std::optional<u32> resolved_address = arguments->address;
+    if (!resolved_address)
     {
-      RespondError(request.seq, "dolphin_injectCode", "no free region of that size");
-      return;
+      auto alloc = m_controller.FindFreeMemory(static_cast<u32>(arguments->code.size()));
+      if (!alloc)
+      {
+        RespondError(request.seq, "dolphin_injectCode", "no free region of that size");
+        return;
+      }
+      resolved_address = *alloc;
     }
-    const u32 address = m_controller.InjectCode(arguments->address, arguments->code);
+    const u32 address = m_controller.InjectCode(resolved_address, arguments->code);
     if (address == 0)
     {
       RespondError(request.seq, "dolphin_injectCode", "write failed (invalid address?)");

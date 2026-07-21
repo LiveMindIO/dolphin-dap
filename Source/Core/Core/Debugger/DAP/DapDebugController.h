@@ -150,10 +150,12 @@ public:
   // Steps one PPC instruction in interpreter mode. Returns true when the step
   // completed synchronously (the CPUThreadGuard path), was a no-op on an
   // already-stopped core, or the async StepOpcode signal fired within its
-  // 20ms wait. Returns false only when the step was attempted but the CPU
-  // thread didn't acknowledge the StepOpcode in time — in that case the PC
-  // hasn't advanced and callers must not emit a `stopped`/`step` event
-  // (the stop will arrive later via PollBreakpointStop).
+  // 2s wait. Returns false only when the step was attempted but the CPU
+  // thread didn't acknowledge the StepOpcode within the 2s timeout — in that
+  // case the PC hasn't advanced and callers must not emit a `stopped`/`step`
+  // event (the late completion has no observable state transition for
+  // PollBreakpointStop to catch, so suppressing the stop here is the only
+  // correct response).
   bool StepInto();
   StepOverResult StepOver();
   // Steps until the current function returns, a breakpoint is hit, or `timeout`
