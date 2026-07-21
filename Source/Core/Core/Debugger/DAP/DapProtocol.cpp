@@ -151,7 +151,15 @@ SetBreakpointsArguments ParseSetBreakpoints(const picojson::object& arguments)
     if (const std::optional<u32> line = ReadNumericFromJson<u32>(entry_obj, "line"))
     {
       if (result.base)
-        breakpoint.address = *result.base + *line * 4;
+      {
+        // Compute in 64-bit so a wildly-large `line` produces a non-resolvable
+        // nullopt address rather than silently wrapping past u32 max and
+        // installing a breakpoint at a nonsense PC.
+        const u64 effective = static_cast<u64>(*result.base) +
+                              static_cast<u64>(*line) * 4ull;
+        if (effective <= static_cast<u64>(std::numeric_limits<u32>::max()))
+          breakpoint.address = static_cast<u32>(effective);
+      }
     }
     else if (result.base)
     {
@@ -305,10 +313,15 @@ GotoTargetsArguments ParseGotoTargets(const picojson::object& arguments)
     return result;
 
   // DESNOTE(jbarber, 2026-07-03): Dolphin models a "source" as a code region
-  // anchored at a hex address, so a goto line resolves to base + line*4, matching
-  // setBreakpoints' line handling.
+  // anchored at a hex address, so a goto line resolves to base + line*4,
+  // matching setBreakpoints' line handling. Compute in u64 so an absurd
+  // `line` value yields an out-of-range address (left as nullopt) instead of
+  // silently wrapping the source base to a destination that points elsewhere.
   const std::optional<u32> line = ReadNumericFromJson<u32>(arguments, "line");
-  result.address = *base + line.value_or(0) * 4;
+  const u64 line_value = static_cast<u64>(line.value_or(0));
+  const u64 effective = static_cast<u64>(*base) + line_value * 4ull;
+  if (effective <= static_cast<u64>(std::numeric_limits<u32>::max()))
+    result.address = static_cast<u32>(effective);
   return result;
 }
 

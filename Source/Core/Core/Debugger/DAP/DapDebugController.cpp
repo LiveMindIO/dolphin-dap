@@ -41,13 +41,22 @@ namespace DAP
 namespace
 {
 // Encodes a PPC `b target` instruction relative to `pc`. PPC b: opcode 18
-// (bits 0-5), LI is the 24-bit signed word-aligned offset (bits 6-29), AA=0
-// (relative, bit 30), LK=0 (no link, bit 31). Because `target - pc` is always
-// word-aligned (low 2 bits clear), masking to 0x03FFFFFCu places the offset
-// directly into the LI field with AA and LK zeroed.
+// (0x48000000, MSB-numbered bits 0-5 = LSB u32 bits 31-26), LI is the
+// 24-bit signed offset/4 placed at MSB-numbered bits 6-29 (= LSB u32 bits
+// 2-25, mask 0x03FFFFFC), AA=0 (relative, bit 30), LK=0 (no link, bit 31).
+// Compute the offset in s32 so backward branches (target < pc) sign-extend
+// correctly when masking the LI field. The previous iterative fix used
+// `<< 6` (placing LI at u32 bits 6-29, mask 0x3FFFFFC0), which clobbered
+// the opcode on negative LI values: a 24-bit value with its sign bit set,
+// shifted left by 6, lands at bit 29 of the result and spills across the
+// opcode boundary when OR'd with 0x48000000. The correct placement is
+// `<< 2` (LSB u32 bits 2-25), which leaves bits 26-31 clear for the opcode.
 constexpr u32 MakeBranchInstruction(u32 pc, u32 target)
 {
-  return 0x48000000u | ((target - pc) & 0x03FFFFFCu);
+  const s32 offset = static_cast<s32>(target - pc);
+  const s32 li = offset >> 2;  // arithmetic shift: signed div-by-4
+  const u32 masked_li = static_cast<u32>(li) & 0x00FFFFFFu;
+  return 0x48000000u | (masked_li << 2);
 }
 
 constexpr std::array<u8, 4> BigEndianBytes(u32 word)

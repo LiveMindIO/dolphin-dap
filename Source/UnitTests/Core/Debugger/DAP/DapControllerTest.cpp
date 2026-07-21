@@ -1330,6 +1330,58 @@ TEST_F(DapControllerTest, DetourPatchesTargetAndInstallsTrampoline)
   EXPECT_NE(tail_bytes, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 }
 
+TEST_F(DapControllerTest, DetourEncodesForwardAndBackwardBranchesExactly)
+{
+  // DESNOTE(jbarber, 2026-07-21): MakeBranchInstruction's previous formula
+  // `((target - pc) & 0x03FFFFFC)` placed the raw byte offset at the wrong
+  // bit position and produced a nonsense instruction for both forward and
+  // backward branches. The correct encoding: LI (24-bit signed offset/4) at
+  // bits 6-29 of the instruction. This test pins the exact byte encoding
+  // for both a forward branch (the detour patch site -> detour body) and a
+  // backward branch (the trampoline's `b target+4` returns to a PC below
+  // the trampoline), so a future regression in MakeBranchInstruction's
+  // shifting fails loudly instead of subtly corrupting control flow.
+  //
+  // Layout:
+  //   INJECT_BASE   (target site, 0x8000) -- pre-loaded with no-op
+  //   DETOUR_BASE   (detour body, 0xC000)
+  //   DETOUR_BASE+4 (tail branch: b trampoline)
+  //   DETOUR_BASE+8 (trampoline: original + b INJECT_BASE+4)
+  //
+  // Branch encodings (per corrected MakeBranchInstruction):
+  //   - detour patch at INJECT_BASE:  b DETOUR_BASE
+  //       pc=0x8000, target=0xC000, offset=+0x4000, LI=0x1000
+  //       encoded as 0x48000000 | (0x1000 << 2) = 0x48004000
+  //       big-endian bytes: {0x48, 0x00, 0x40, 0x00}
+  //   - tail branch at DETOUR_BASE+4:  b DETOUR_BASE+8
+  //       pc=0xC004, target=0xC008, offset=+0x4, LI=0x1
+  //       encoded as 0x48000000 | (0x1 << 2) = 0x48000004
+  //       big-endian bytes: {0x48, 0x00, 0x00, 0x04}
+  //   - trampoline return at DETOUR_BASE+0xC:  b INJECT_BASE+4
+  //       pc=0xC00C, target=0x8004, offset=-0x4008, LI=-0x1002
+  //       LI as 24-bit two's complement: 0xFFEFFE
+  //       encoded as 0x48000000 | (0xFFEFFE << 2) = 0x4BFFBFF8
+  //       big-endian bytes: {0x4B, 0xFF, 0xBF, 0xF8}  (BACKWARD branch)
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+
+  // Forward branch at the target site (detour patch).
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x48, 0x00, 0x40, 0x00}));
+
+  // Short forward branch at the tail (detour body -> trampoline).
+  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE + 4u, 4),
+            (std::vector<u8>{0x48, 0x00, 0x00, 0x04}));
+
+  // Backward branch at the trampoline return (trampoline -> target+4).
+  // The trampoline is 8 bytes: [original 4 bytes][return branch 4 bytes].
+  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE + 8u + 4u, 4),
+            (std::vector<u8>{0x4B, 0xFF, 0xBF, 0xF8}));
+}
+
 TEST_F(DapControllerTest, DetourRejectsInvalidTargetAddress)
 {
   DAP::DapDebugController controller(System());
