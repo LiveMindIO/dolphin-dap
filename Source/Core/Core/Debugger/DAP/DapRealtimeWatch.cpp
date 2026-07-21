@@ -10,6 +10,7 @@
 
 #include "Core/Core.h"
 #include "Core/HW/AddressSpace.h"
+#include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "VideoCommon/VideoEvents.h"
 
@@ -30,11 +31,23 @@ RealtimeWatchSampler::~RealtimeWatchSampler() = default;
 
 int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
 {
-  // DESNOTE(jbarber, 2026-07-21): Reject ranges that wrap past u32 max so later
-  // `address + i` arithmetic in Tick() can't silently read from low memory.
-  // A subscription of count == 0 is meaningless and would make the change
-  // detector noisy without producing useful bytes.
-  if (count == 0 || address > std::numeric_limits<u32>::max() - count)
+  // DESNOTE(jbarber, 2026-07-21): Reject ranges that wrap past u32 max so
+  // later `address + i` arithmetic in Tick() can't silently read from low
+  // memory. A subscription of count == 0 is meaningless and would make the
+  // change detector noisy without producing useful bytes. We also cap
+  // `count` at the system's physical RAM size: the sampler reads via the
+  // Effective address space, which can never exceed RAM, and an
+  // unbounded count (e.g. UINT32_MAX) would allocate multi-gigabyte
+  // buffers and a seed loop that reads past the end of RAM. The previous
+  // form `address > UINT32_MAX - count` was correct for the wrap itself
+  // but still let a UINT32_MAX count through when address == 0, allocating
+  // 4 GB of zero-fill for `current`/`last_seen`.
+  if (count == 0)
+    return kInvalidWatchId;
+  if (address > std::numeric_limits<u32>::max() - count)
+    return kInvalidWatchId;
+  const u32 ram_size = m_system.GetMemory().GetRamSizeReal();
+  if (ram_size == 0 || count > ram_size)
     return kInvalidWatchId;
 
   // Seed the last-seen snapshot with the current region contents so the first
@@ -160,25 +173,34 @@ void RealtimeWatchSampler::Tick()
       {
         u8* cur = sub.current.data();
         const u8* frozen = sub.frozen_value->data();
-        if (std::memcmp(cur, frozen, sub.count) == 0)
+        // Only compare/restore the readable prefix; bytes past `readable`
+        // in `cur` are stale from a prior Tick and mustn't drive the freeze
+        // comparison or the write-back. Without this guard a frozen region
+        // whose tail went unreadable would spuriously "drift" on every field
+        // (stale current bytes vs canon) and could overwrite the unreadable
+        // tail with canon bytes via an unchecked WriteU8.
+        const u32 frozen_bytes = std::min(sub.readable, sub.count);
+        if (frozen_bytes == 0 ||
+            std::memcmp(cur, frozen, frozen_bytes) == 0)
+        {
           continue;
-        for (u32 i = 0; i < sub.count; ++i)
+        }
+        for (u32 i = 0; i < frozen_bytes; ++i)
         {
           const u32 addr = sub.address + i;
-          // Only write back bytes that differ from what's in memory now --
-          // skip the ones that already match to halve the WriteU8 calls on
-          // the typical "only r0 changed" case. Writes go through the same
-          // CPUThreadGuard as reads; the accessors handle the page-table walk.
-          if (cur[i] != frozen[i])
-            accessors->WriteU8(guard, addr, frozen[i]);
-          // Mirror into `current` so a later `memcmp` against last_seen
-          // (which we keep in lockstep below) doesn't re-flag this as a
-          // change on the next field.
+          // Skip the write and the mirror when the cell already matches --
+          // halves the WriteU8 count on the typical "only r0 changed" case
+          // and avoids issuing writes against addresses that may be invalid
+          // mid-region. IsValidAddress is re-checked per byte so a shrunken
+          // readable tail can't slip a write through to a bad address.
+          if (cur[i] == frozen[i] || !accessors->IsValidAddress(guard, addr))
+            continue;
+          accessors->WriteU8(guard, addr, frozen[i]);
           cur[i] = frozen[i];
         }
-        // Keep last_seen in lockstep with the restored cell so a stable
+        // Keep last_seen in lockstep with the restored prefix so a stable
         // value doesn't keep triggering the write-back path.
-        std::memcpy(sub.last_seen.data(), frozen, sub.count);
+        std::memcpy(sub.last_seen.data(), frozen, frozen_bytes);
         continue;
       }
 

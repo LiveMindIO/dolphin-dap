@@ -248,7 +248,8 @@ void InitLocal(const char* socket_path)
   std::strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
   InitGeneric(PF_LOCAL, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
-  INFO_LOG_FMT(CONSOLE, "DAP: listening on unix socket {}", socket_path);
+  if (s_active.load())
+    INFO_LOG_FMT(CONSOLE, "DAP: listening on unix socket {}", socket_path);
 }
 #endif
 
@@ -260,7 +261,12 @@ void Init(u32 port)
   addr.sin_addr.s_addr = INADDR_ANY;
 
   InitGeneric(PF_INET, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
-  INFO_LOG_FMT(CONSOLE, "DAP: listening on port {}", port);
+  // DESNOTE(jbarber, 2026-07-21): InitGeneric sets s_active only after a
+  // successful bind+listen. Logging "listening" unconditionally would
+  // mislead users when bind failed (port in use, permission denied, etc.)
+  // and no server is actually accepting connections.
+  if (s_active.load())
+    INFO_LOG_FMT(CONSOLE, "DAP: listening on port {}", port);
 }
 
 void Deinit()

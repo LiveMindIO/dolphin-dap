@@ -127,11 +127,17 @@ void DapDebugController::Pause()
   Core::SetState(m_system, Core::State::Paused);
 }
 
-void DapDebugController::StepInto()
+bool DapDebugController::StepInto()
 {
   auto& cpu = m_system.GetCPU();
+  // DESNOTE(jbarber, 2026-07-21): When the core isn't stepping (paused
+  // already, or never started), SingleStep is a no-op. Return true so the
+  // session emits a stopped event — the core IS stopped, after all. The
+  // false return is reserved for the async path where StepOpcode timed
+  // out without the CPU thread acknowledging: in that case the PC hasn't
+  // advanced and a stopped/step event would be a lie.
   if (!cpu.IsStepping())
-    return;
+    return true;
 
   auto& power_pc = m_system.GetPowerPC();
   if (Core::IsCPUThread())
@@ -141,15 +147,16 @@ void DapDebugController::StepInto()
     power_pc.SetMode(PowerPC::CoreMode::Interpreter);
     power_pc.SingleStep();
     power_pc.SetMode(old_mode);
-    return;
+    return true;
   }
 
   Common::Event sync_event;
   const PowerPC::CoreMode old_mode = power_pc.GetMode();
   power_pc.SetMode(PowerPC::CoreMode::Interpreter);
   cpu.StepOpcode(&sync_event);
-  sync_event.WaitFor(std::chrono::milliseconds(20));
+  const bool completed = sync_event.WaitFor(std::chrono::milliseconds(20));
   power_pc.SetMode(old_mode);
+  return completed;
 }
 
 StepOverResult DapDebugController::StepOver()
@@ -597,7 +604,15 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
 
   const int first_line = std::max(start_line, 0);
-  const int last_line = end_line > first_line ? end_line : first_line + 63;
+  // DESNOTE(jbarber, 2026-07-21): DAP's `endLine` defaults to -1 when the
+  // client means "through end of file/source". The previous form
+  // `end_line > first_line ? end_line : first_line + 63` collapsed -1 to
+  // at most first_line + 63, silently truncating long files. Treat any
+  // negative end_line as "no upper bound" so the read loop runs to EOF or
+  // the line_count cap (256) below, whichever comes first. The cap keeps
+  // responses bounded; clients paging past it just send another request.
+  const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
+                     (end_line > first_line ? end_line : first_line + 63);
   const int line_count = std::min(last_line - first_line + 1, 256);
 
   if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
@@ -672,7 +687,12 @@ std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const
   std::vector<BreakpointLocation> locations;
 
   const int first_line = std::max(start_line, 0);
-  const int last_line = end_line >= first_line ? end_line : first_line + 63;
+  // DESNOTE(jbarber, 2026-07-21): DAP's `endLine` defaults to -1 meaning
+  // "through end". Treat negative end_line as unbounded so we enumerate
+  // every instruction slot / line entry in the range rather than stopping
+  // at first_line + 63.
+  const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
+                     (end_line >= first_line ? end_line : first_line + 63);
 
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
   if (symbol_db.HasSourceLineInfo() && base_address > 0 &&

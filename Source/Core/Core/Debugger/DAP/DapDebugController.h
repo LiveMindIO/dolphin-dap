@@ -142,7 +142,14 @@ public:
 
   void Continue();
   void Pause();
-  void StepInto();
+  // Steps one PPC instruction in interpreter mode. Returns true when the step
+  // completed synchronously (the CPUThreadGuard path), was a no-op on an
+  // already-stopped core, or the async StepOpcode signal fired within its
+  // 20ms wait. Returns false only when the step was attempted but the CPU
+  // thread didn't acknowledge the StepOpcode in time — in that case the PC
+  // hasn't advanced and callers must not emit a `stopped`/`step` event
+  // (the stop will arrive later via PollBreakpointStop).
+  bool StepInto();
   StepOverResult StepOver();
   // Steps until the current function returns, a breakpoint is hit, or `timeout`
   // wall-clock time elapses. The timeout bounds otherwise non-returning code

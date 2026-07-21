@@ -272,8 +272,18 @@ SetInstructionBreakpointsArguments ParseSetInstructionBreakpoints(const picojson
     {
       if (const std::optional<u32> base = Json::ParseHexAddress(*reference))
       {
+        // DESNOTE(jbarber, 2026-07-21): The DAP `offset` is a signed byte
+        // offset from `instructionReference`. Compute the effective address
+        // in s64 so we can detect under/overflow -- a negative offset that
+        // wraps below 0 or a positive one past u32 max means the client
+        // asked for an address outside the PPC address space. Leave
+        // `address` nullopt in that case rather than silently wrapping to
+        // a nonsense PC; the session reports the unverified breakpoint to
+        // the client so it can re-resolve.
         const s64 offset = ReadNumericFromJson<s64>(entry_obj, "offset").value_or(0);
-        breakpoint.address = static_cast<u32>(static_cast<s64>(*base) + offset);
+        const s64 effective = static_cast<s64>(*base) + offset;
+        if (effective >= 0 && effective <= static_cast<s64>(std::numeric_limits<u32>::max()))
+          breakpoint.address = static_cast<u32>(effective);
       }
     }
 

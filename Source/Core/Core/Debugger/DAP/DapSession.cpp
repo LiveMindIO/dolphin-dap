@@ -4,6 +4,8 @@
 #include "Core/Debugger/DAP/DapSession.h"
 
 #include <atomic>
+#include <cstddef>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -51,9 +53,20 @@ bool WaitForReadable(int socket, int timeout_ms)
   return select(socket + 1, &readfds, nullptr, nullptr, &tv) > 0;
 }
 
-u32 ApplyOffset(u32 address, s64 offset)
+// DESNOTE(jbarber, 2026-07-21): DAP allows signed `offset` on readMemory,
+// writeMemory, and disassemble (as an instruction byte offset). The previous
+// form `static_cast<u32>(s64(address) + offset)` silently wrapped a
+// negative or overflowed effective address to a nonsense high value --
+// reads/writes would then land at the wrong cell, and a breakpoint-style
+// request could corrupt an unrelated region. Return nullopt when the
+// effective address falls outside [0, u32 max] so callers can surface an
+// error response instead of touching the wrong memory.
+std::optional<u32> ApplyOffset(u32 address, s64 offset)
 {
-  return static_cast<u32>(static_cast<s64>(address) + offset);
+  const s64 effective = static_cast<s64>(address) + offset;
+  if (effective < 0 || effective > static_cast<s64>(std::numeric_limits<u32>::max()))
+    return std::nullopt;
+  return static_cast<u32>(effective);
 }
 
 const picojson::object* GetObject(const picojson::object& obj, const std::string& key)
@@ -275,9 +288,15 @@ private:
   // The reason is taken from `m_pending_stop_info` when present: the state hook
   // stashes it synchronously on the CPU thread at break time, while
   // EXCEPTION_FAKE_MEMCHECK_HIT is still set (it's cleared by the next
-  // CheckExceptions). If the stash is empty (e.g. an explicit pause with no
-  // spontaneous break, or the hook ran before exceptions were raised), fall
-  // back to a fresh GetStopInfo().
+  // CheckExceptions). If the stash is empty (e.g. an explicit pause that
+  // already used SendStoppedEvent("pause"), or the hook ran before exceptions
+  // were raised), `info` defaults to `Step` with no hit_breakpoint and we
+  // send that as the safest non-committal answer. The previous form fell
+  // back to a fresh `m_controller.GetStopInfo()` here, but that call runs
+  // on the session thread without a CPU freeze and can see cleared/
+  // mid-update exception state -- a race Bugbot flagged as "stale stop info
+  // after pause". The stash is the authoritative source; everything else
+  // is best-effort and we'd rather under-report than mis-report.
   void SendClassifiedStoppedEvent()
   {
     StopInfo info;
@@ -288,11 +307,6 @@ private:
         info = *m_pending_stop_info;
         m_pending_stop_info.reset();
       }
-    }
-    if (info.reason == StopReason::Step && !info.hit_breakpoint_address)
-    {
-      // No stash was available -- classify from current state as best effort.
-      info = m_controller.GetStopInfo();
     }
 
     picojson::object body;
@@ -481,10 +495,25 @@ private:
     {
       if (!m_system.GetCPU().IsStepping())
         m_controller.Pause();
-      m_controller.StepInto();
+      // DESNOTE(jbarber, 2026-07-21): StepInto may return false when the
+      // CPU thread can't acknowledge the StepOpcode signal within its 20ms
+      // wait (e.g. the emulator is mid-block or under load). Emitting a
+      // `stopped`/`step` event in that case would lie to the client -- the
+      // PC hasn't advanced -- so we only send the stop when the step
+      // actually completed. When stepIn returns false the stop arrives
+      // later via PollBreakpointStop once the step settles, mirroring how
+      // `next`/StepOver's Continuing branch is handled.
+      const bool completed = m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
-      SendStoppedEvent("step");
-      SyncSteppingBaseline();
+      if (completed)
+      {
+        SendStoppedEvent("step");
+        SyncSteppingBaseline();
+      }
+      else
+      {
+        SyncSteppingBaseline();
+      }
       return;
     }
 
@@ -1093,12 +1122,17 @@ private:
       return;
     }
 
-    const u32 address = ApplyOffset(arguments->address, arguments->offset);
-    const std::vector<u8> bytes = m_controller.ReadMemory(address, arguments->count);
+    const std::optional<u32> address = ApplyOffset(arguments->address, arguments->offset);
+    if (!address)
+    {
+      RespondError(request.seq, "readMemory", "address + offset out of range");
+      return;
+    }
+    const std::vector<u8> bytes = m_controller.ReadMemory(*address, arguments->count);
     const u32 unreadable = arguments->count - static_cast<u32>(bytes.size());
 
     picojson::object body;
-    body.emplace("address", Json::FormatAddress(address));
+    body.emplace("address", Json::FormatAddress(*address));
     body.emplace("data", Json::Base64Encode(bytes));
     if (unreadable > 0)
       body.emplace("unreadableBytes", static_cast<double>(unreadable));
@@ -1115,8 +1149,13 @@ private:
       return;
     }
 
-    const u32 address = ApplyOffset(arguments->address, arguments->offset);
-    const std::size_t written = m_controller.WriteMemory(address, arguments->data);
+    const std::optional<u32> address = ApplyOffset(arguments->address, arguments->offset);
+    if (!address)
+    {
+      RespondError(request.seq, "writeMemory", "address + offset out of range");
+      return;
+    }
+    const std::size_t written = m_controller.WriteMemory(*address, arguments->data);
 
     if (written < arguments->data.size() && !arguments->allow_partial)
     {
@@ -1140,8 +1179,22 @@ private:
       return;
     }
 
-    u32 address = ApplyOffset(arguments->address, arguments->offset) +
-                  static_cast<u32>(arguments->instruction_offset * 4);
+    const std::optional<u32> base = ApplyOffset(arguments->address, arguments->offset);
+    if (!base)
+    {
+      RespondError(request.seq, "disassemble", "address + offset out of range");
+      return;
+    }
+    // `instructionOffset` is a signed instruction-word count; fold it in s64
+    // so a negative offset (backwards disassembly) can't wrap past 0.
+    const s64 effective = static_cast<s64>(*base) +
+                          static_cast<s64>(arguments->instruction_offset) * 4;
+    if (effective < 0 || effective > static_cast<s64>(std::numeric_limits<u32>::max()))
+    {
+      RespondError(request.seq, "disassemble", "instruction offset out of range");
+      return;
+    }
+    u32 address = static_cast<u32>(effective);
     const std::string disasm =
         m_controller.Disassemble(address, static_cast<int>(arguments->instruction_count));
 
@@ -1185,6 +1238,20 @@ private:
     // client uses the returned watchId to correlate the asynchronous
     // `dolphin_memoryChanged` events and to cancel the subscription.
     const int watch_id = m_watch_sampler->AddSubscription(arguments->address, arguments->count);
+
+    // DESNOTE(jbarber, 2026-07-21): AddSubscription returns kInvalidWatchId
+    // (0) when the (address, count) pair is rejected (zero count, address+
+    // count wrap, or count larger than physical RAM). The previous form
+    // still reported success with watchId 0, misleading clients into
+    // thinking a watch was active and waiting for events that never
+    // arrive. Surface the rejection as an error response so the client
+    // can re-issue or give up.
+    if (watch_id == DAP::kInvalidWatchId)
+    {
+      RespondError(request.seq, "dolphin_realtimeWatch",
+                   "rejected address/count (zero, overflow, or exceeds RAM)");
+      return;
+    }
 
     picojson::object body;
     body.emplace("watchId", static_cast<double>(watch_id));
