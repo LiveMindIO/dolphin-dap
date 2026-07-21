@@ -399,8 +399,14 @@ private:
       }
       if (m_pending_pause.exchange(false))
       {
+        // DESNOTE(jbarber, 2026-07-21): A user-initiated pause that
+        // happened during async step-out should be reported to the client
+        // with reason "pause", not whatever SendClassifiedStoppedEvent
+        // would synthesize from the step-out's stashed stop info (which
+        // could be NoteBreakpoint / Step). The user explicitly asked the
+        // core to halt.
         m_controller.Pause();
-        SendClassifiedStoppedEvent();
+        SendStoppedEvent("pause");
         SyncSteppingBaseline();
         return;
       }

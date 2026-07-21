@@ -342,6 +342,13 @@ std::optional<GotoArguments> ParseGoto(const picojson::object& arguments)
   if (!thread_id || !target)
     return std::nullopt;
 
+  // DESNOTE(jbarber, 2026-07-21): Reject negative or > u32-max targetIds
+  // instead of `static_cast<u32>` wrapping them. A negative or huge id would
+  // otherwise land the PC at a wrapped address -- silently jumping the
+  // debugger to an unintended PC while reporting success.
+  if (*target < 0 || *target > static_cast<s64>(std::numeric_limits<u32>::max()))
+    return std::nullopt;
+
   GotoArguments result;
   result.thread_id = *thread_id;
   result.target = static_cast<u32>(*target);
