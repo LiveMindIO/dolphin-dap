@@ -3,6 +3,7 @@
 
 #include "Core/Debugger/DAP/DapProtocol.h"
 
+#include <algorithm>
 #include <limits>
 
 #include "Common/JsonUtil.h"
@@ -134,7 +135,16 @@ std::optional<DisassembleArguments> ParseDisassemble(const picojson::object& arg
   result.address = *address;
   result.offset = ReadNumericFromJson<s64>(arguments, "offset").value_or(0);
   result.instruction_offset = ReadNumericFromJson<s64>(arguments, "instructionOffset").value_or(0);
-  result.instruction_count = ReadNumericFromJson<u32>(arguments, "instructionCount").value_or(1);
+  // DESNOTE(jbarber, 2026-07-21): Cap instruction_count at 65536. Without
+  // a bound a single disassemble request could force millions of MMU
+  // reads + disassembly steps on the session thread, stalling all other
+  // DAP traffic. 65536 instructions is far beyond anything a real debugger
+  // view needs (a 4096-instruction viewport is already overkill) but
+  // keeps bulk-dump commands usable. The cap mirrors the GetSource /
+  // GetBreakpointLocations iteration limits.
+  result.instruction_count =
+      std::min(ReadNumericFromJson<u32>(arguments, "instructionCount").value_or(1),
+               static_cast<u32>(65536));
   return result;
 }
 

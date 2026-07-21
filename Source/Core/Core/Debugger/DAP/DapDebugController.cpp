@@ -864,7 +864,14 @@ std::optional<u32> DapDebugController::FindFreeMemory(u32 count)
     return std::nullopt;
   Core::CPUThreadGuard guard(m_system);
   auto& memory = m_system.GetMemory();
-  const u32 ram_size = memory.GetRamSize();
+  // DESNOTE(jbarber, 2026-07-21): Use GetRamSizeReal(), not GetRamSize().
+  // GetRamSize() returns the power-of-two-padded size of the MEM1 arena
+  // (typically 24 MiB retail rounded up to 32 MiB); the padded tail beyond
+  // GetRamSizeReal() isn't backed by the GC's actual RAM and writing
+  // there corrupts nothing but isn't usable code-cave space either. Auto-
+  // allocation for dolphin_injectCode / dolphin_detour previously scanned
+  // into that padded tail and could return addresses in non-real RAM.
+  const u32 ram_size = memory.GetRamSizeReal();
   if (ram_size == 0)
     return std::nullopt;
   const u8* ram = memory.GetRAM();

@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -1242,9 +1243,28 @@ private:
 
     std::vector<DataBreakpointRequest> breakpoint_requests;
     picojson::array breakpoints;
+    // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck store keys on
+    // start_address and MemChecks::Add replaces an existing entry at the
+    // same address, so a single setDataBreakpoints request that lists two
+    // entries with the same dataId silently drops all but the last. Without
+    // de-dup, every entry was reported verified:true -- the client believed
+    // N watchpoints were installed when only one (the last) was actually
+    // active. Track seen addresses here and mark later duplicates as
+    // verified:false, skipping them in the request list sent to the
+    // controller. The first occurrence wins so the client's earliest
+    // configuration takes effect.
+    std::unordered_set<u32> seen_addresses;
     for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
     {
       picojson::object entry;
+      const bool duplicate =
+          breakpoint.address.has_value() && !seen_addresses.insert(*breakpoint.address).second;
+      if (duplicate)
+      {
+        entry.emplace("verified", false);
+        breakpoints.emplace_back(std::move(entry));
+        continue;
+      }
       entry.emplace("verified", breakpoint.address.has_value());
       if (breakpoint.address)
       {
