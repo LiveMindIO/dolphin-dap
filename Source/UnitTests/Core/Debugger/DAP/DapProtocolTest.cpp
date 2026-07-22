@@ -235,6 +235,39 @@ TEST(DapProtocol, ParseWriteMemoryPassesThroughUnderCap)
   EXPECT_EQ(write->data.front(), 0x42);
 }
 
+TEST(DapProtocol, ParseRealtimeWatchCapsCount)
+{
+  // DESNOTE(jbarber, 2026-07-22): realtimeWatch count is capped at 1 MiB so
+  // a pathological client can't subscribe to multi-MB regions that would
+  // allocate multi-MB buffers per subscription AND force a full-region
+  // seed read in AddSubscription. Mirrors readMemory/writeMemory caps.
+  // Bugbot #73.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference":"0x80003100", "count": 4294967295})");
+  const auto watch = Protocol::ParseRealtimeWatch(args);
+  ASSERT_TRUE(watch.has_value());
+  EXPECT_EQ(watch->address, 0x80003100u);
+  constexpr u32 kExpectedCap = 1u << 20;  // 1 MiB
+  EXPECT_EQ(watch->count, kExpectedCap);
+}
+
+TEST(DapProtocol, ParseRealtimeWatchPassesThroughUnderCap)
+{
+  // A small count passes through unchanged.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference":"0x80003100", "count": 4096})");
+  const auto watch = Protocol::ParseRealtimeWatch(args);
+  ASSERT_TRUE(watch.has_value());
+  EXPECT_EQ(watch->count, 4096u);
+}
+
+TEST(DapProtocol, ParseRealtimeWatchRejectsZeroCount)
+{
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference":"0x80003100", "count": 0})");
+  EXPECT_FALSE(Protocol::ParseRealtimeWatch(args).has_value());
+}
+
 TEST(DapProtocol, ParseDisassembleDefaults)
 {
   const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100"})");

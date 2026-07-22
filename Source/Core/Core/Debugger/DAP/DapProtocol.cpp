@@ -425,9 +425,20 @@ std::optional<RealtimeWatchArguments> ParseRealtimeWatch(const picojson::object&
   if (!address || !count || *count == 0)
     return std::nullopt;
 
+  // DESNOTE(jbarber, 2026-07-22): Cap `count` at 1 MiB so a pathological
+  // client can't subscribe to multi-MB regions that would allocate multi-MB
+  // buffers per subscription AND force a full-region seed read in
+  // AddSubscription (and a full Tick() re-read at field rate). Mirrors the
+  // readMemory/writeMemory caps (#58, #60). A 1 MiB realtime watch is far
+  // beyond any realistic use case (games typically pin individual fields
+  // of a few bytes); clients watching bigger regions should poll
+  // periodically with readMemory. Bugbot #73.
+  constexpr u32 kMaxRealtimeWatchBytes = 1u << 20;  // 1 MiB
+  const u32 capped_count = std::min(*count, kMaxRealtimeWatchBytes);
+
   RealtimeWatchArguments result;
   result.address = *address;
-  result.count = *count;
+  result.count = capped_count;
   return result;
 }
 
@@ -459,13 +470,25 @@ std::optional<FreezeArguments> ParseFreeze(const picojson::object& arguments)
   const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
   if (!decoded)
     return std::nullopt;
+  // DESNOTE(jbarber, 2026-07-22): Cap the decoded payload at 1 MiB so a
+  // pathological client can't ship a multi-GB base64 body that decodes into
+  // a multi-GB allocation on the session thread. Matches the
+  // kMaxWriteMemoryBytes cap on writeMemory. RealtimeWatchSampler::Freeze
+  // separately enforces `value.size() == subscription.count` (which is now
+  // also capped at 1 MiB), so a freeze request against an existing watch
+  // with an oversized payload would reject naturally; for the standalone
+  // form this is the first line of defense. Bugbot #73 (sibling to #60).
+  constexpr std::size_t kMaxFreezeBytes = 1u << 20;  // 1 MiB
+  std::vector<u8> capped_value = *decoded;
+  if (capped_value.size() > kMaxFreezeBytes)
+    capped_value.resize(kMaxFreezeBytes);
 
   const std::optional<int> watch_id = ReadNumericFromJson<int>(arguments, "watchId");
   const std::optional<u32> address = ResolveMemoryReference(arguments);
   const std::optional<u32> count = ReadNumericFromJson<u32>(arguments, "count");
 
   FreezeArguments result;
-  result.value = std::move(*decoded);
+  result.value = std::move(capped_value);
   if (watch_id)
   {
     // DESNOTE(jbarber, 2026-07-21): Form 2 -- freeze an existing watch by id.

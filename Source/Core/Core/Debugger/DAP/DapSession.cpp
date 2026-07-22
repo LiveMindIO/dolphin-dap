@@ -281,6 +281,16 @@ public:
     // vi_end_field_event hook is unregistered (no further Tick() will fire)
     // before the transport/event-queue members are destroyed.
     m_watch_sampler.reset();
+    // DESNOTE(jbarber, 2026-07-22): Join the async step-out worker (if
+    // running) BEFORE clearing breakpoints. The worker captures a
+    // shared_ptr<Session> and calls m_controller.StepOut(), which uses the
+    // global PPC BreakPoints / MemChecks store. Clearing breakpoints while
+    // the worker is still mid-StepOut races that store -- the worker could
+    // install a temporary breakpoint that ClearBreakpoints wipes, or vice
+    // versa. The destructor also joins, but it runs AFTER this teardown
+    // path, so ClearBreakpoints would have already raced. Bugbot #72.
+    if (m_step_out_thread.joinable())
+      m_step_out_thread.join();
     // DESNOTE(jbarber, 2026-07-22): Clear debugger state this session
     // installed in the global PPC BreakPoints / MemChecks stores, but ONLY
     // if no other session is still connected -- otherwise we'd clobber
