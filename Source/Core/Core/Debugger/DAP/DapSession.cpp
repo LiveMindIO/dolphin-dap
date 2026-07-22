@@ -194,10 +194,19 @@ public:
     m_state_hook = Core::AddOnStateChangedCallback([this](const Core::State state) {
       if (state == Core::State::Running)
       {
-        picojson::object body;
-        body.emplace("threadId", 1.0);
-        body.emplace("allThreadsContinued", true);
-        QueueEvent("continued", std::move(body));
+        // DESNOTE(jbarber, 2026-07-22): Only emit `continued` if THIS session
+        // initiated the resume (via ContinueCore). Without this gate, every
+        // connected session's hook would emit `continued` on a single
+        // client's continue request, making it look like every client
+        // initiated the resume. The exchange consumes the flag so the
+        // emission is one-shot per ContinueCore. Bugbot #70.
+        if (m_owns_next_continue.exchange(false))
+        {
+          picojson::object body;
+          body.emplace("threadId", 1.0);
+          body.emplace("allThreadsContinued", true);
+          QueueEvent("continued", std::move(body));
+        }
       }
       else if (state == Core::State::Paused)
       {
@@ -355,13 +364,33 @@ private:
     m_entry_stop_sent = true;
     // DESNOTE(jbarber, 2026-07-22): Only the first session to reach this
     // point makes the continue/stay-paused decision; later sessions observe
-    // the resulting core State and do nothing. Without this gate, a second
-    // client with stopOnEntry:false would resume the shared core out from
-    // under a first client that was still expecting a paused entry stop.
-    // Bugbot #67.
+    // the resulting core State and emit a matching lifecycle event so the
+    // client isn't left hanging without a `stopped`/`continued`. Without
+    // this gate, a second client with stopOnEntry:false would resume the
+    // shared core out from under a first client that was still expecting a
+    // paused entry stop. Bugbot #67 + #69.
     bool expected = false;
     if (!s_entry_stop_handled.compare_exchange_strong(expected, true))
+    {
+      // First session already made the decision -- emit a lifecycle event
+      // reflecting the CURRENT core state so this client knows whether
+      // they're paused or running. Without this, the second session's
+      // client would hang waiting for a stopped/continued that already
+      // happened. Bugbot #69.
+      if (m_system.GetCPU().GetState() == CPU::State::Running)
+      {
+        picojson::object body;
+        body.emplace("threadId", 1.0);
+        body.emplace("allThreadsContinued", true);
+        QueueEvent("continued", std::move(body));
+      }
+      else
+      {
+        SendStoppedEvent(m_launch_kind == "attach" ? "attach" : "entry");
+      }
+      FlushEvents();
       return;
+    }
     if (m_stop_on_entry)
     {
       // DESNOTE(jbarber, 2026-07-21): Force the core into Paused before
@@ -378,9 +407,29 @@ private:
     {
       // Core starts paused while a debugger is attached (see
       // CPUSetInitialExecutionState in Core.cpp); resume it so the game runs
-      // immediately. The state hook queues a `continued` event.
-      m_controller.Continue();
+      // immediately. The state hook queues a `continued` event for this
+      // session only (Bugbot #70).
+      ContinueCore();
     }
+  }
+
+  // Helper: calls Continue on the controller, marking this session as the
+  // initiator so the state hook only emits `continued` for this session
+  // (Bugbot #70). If Continue was a no-op (state already Running, no
+  // transition fired), clear our claim so a future transition doesn't
+  // attribute someone else's resume to us.
+  void ContinueCore()
+  {
+    const CPU::State before = m_system.GetCPU().GetState();
+    m_owns_next_continue.store(true);
+    m_controller.Continue();
+    // If state didn't transition, the hook won't consume the flag. Clear it
+    // so the next transition (which this session didn't initiate) isn't
+    // mis-attributed. The race window between Continue returning and this
+    // check is small: if the hook fires in that window, it consumes the
+    // flag and this store is a no-op; if not, transition didn't happen.
+    if (m_system.GetCPU().GetState() == before)
+      m_owns_next_continue.store(false);
   }
 
   // Emits a `stopped` event whose reason is classified from the current PC
@@ -564,7 +613,7 @@ private:
       }
       if (want_continue)
       {
-        m_controller.Continue();
+        ContinueCore();
         SyncSteppingBaseline();
         return;
       }
@@ -714,7 +763,10 @@ private:
         Respond(request->seq, command, picojson::object{});
         return;
       }
-      m_controller.Continue();
+      // DESNOTE(jbarber, 2026-07-22): use ContinueCore so the resulting
+      // `continued` event is attributed to this session only -- the state
+      // hook consumes the per-session ownership flag. Bugbot #70.
+      ContinueCore();
       SyncSteppingBaseline();
       picojson::object body;
       body.emplace("allThreadsContinued", true);
@@ -1988,7 +2040,23 @@ private:
   Core::System& m_system;
   Common::EventHook m_state_hook;
   std::unique_ptr<RealtimeWatchSampler> m_watch_sampler;
-  std::atomic<bool> m_running{true};
+   std::atomic<bool> m_running{true};
+  // DESNOTE(jbarber, 2026-07-22): Set just before this session calls
+  // m_controller.Continue(); the state hook consumes it via exchange so
+  // only the initiating session emits `continued`. Without this gate, every
+  // session's state hook emits `continued` on every Running transition --
+  // a session B calling Continue would notify session A's client as well,
+  // making it look like session A initiated the resume. Bugbot #70.
+  // The flag is consumed atomically by the state hook (running on the CPU
+  // thread). The race (Continue is a no-op because the core was already
+  // running → no hook fires → flag stays set → next transition emits
+  // spuriously) is bounded: the hook checks state == Running, and Continue
+  // can be a no-op only when the state is already Running, so the next
+  // transition is Paused (no continued emitted) -- the flag would carry
+  // forward but the future `continued` emission only fires on the next
+  // Running transition, which this session did NOT initiate. To bound
+  // that, ContinueCore clears the flag if no transition occurred.
+  std::atomic<bool> m_owns_next_continue{false};
   // Sequence numbers are handed out from both the session loop (responses) and
   // the core state-changed callback (the "continued" event), which may run on
   // the CPU thread; keep allocation race-free.

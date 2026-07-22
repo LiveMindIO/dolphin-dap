@@ -1044,13 +1044,38 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
   // FindFreeMemory fallback here only fires for in-process callers (tests)
   // that pass nullopt. Bugbot #68.
   u32 detour_addr = detour_address.value_or(0);
+  const u32 detour_size = body_size + 12u;  // body + tail branch + 8-byte trampoline
   if (!detour_address)
   {
-    const u32 detour_size = body_size + 12u;  // body + tail branch + 8-byte trampoline
     auto alloc = FindFreeMemory(detour_size);
     if (!alloc)
       return std::nullopt;
     detour_addr = *alloc;
+  }
+  else
+  {
+    // DESNOTE(jbarber, 2026-07-22): Validate the client-supplied detour cave
+    // is large enough for the full detour layout (body + tail branch + 8-byte
+    // trampoline). Without this check, Detour silently writes body+12 bytes
+    // from `detour_addr` -- a too-short cave overwrites adjacent guest
+    // memory the client didn't intend to release. We can't peek at the whole
+    // range without a CPUThreadGuard, so we use AddressSpace::IsValidAddress
+    // for the last byte (which itself takes the guard internally if it
+    // needs to). We check the end byte rather than per-byte iteration to
+    // keep this O(1); a high address plus a large body that wraps in u32
+    // also fails here (end_addr < detour_addr). Bugbot #71.
+    const u64 end_byte_64 = static_cast<u64>(detour_addr) + static_cast<u64>(detour_size) - 1ull;
+    if (end_byte_64 > static_cast<u64>(std::numeric_limits<u32>::max()))
+      return std::nullopt;
+    const u32 end_byte = static_cast<u32>(end_byte_64);
+    AddressSpace::Accessors* accessors =
+        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    {
+      Core::CPUThreadGuard guard(m_system);
+      if (!accessors->IsValidAddress(guard, detour_addr) ||
+          !accessors->IsValidAddress(guard, end_byte))
+        return std::nullopt;
+    }
   }
   const u32 tail_branch_addr = detour_addr + body_size;
   const u32 trampoline_addr = tail_branch_addr + 4u;

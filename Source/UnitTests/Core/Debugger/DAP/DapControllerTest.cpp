@@ -1588,6 +1588,24 @@ TEST_F(DapControllerTest, DetourRejectsInvalidTargetAddress)
   EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(DapControllerTest, DetourRejectsExplicitCaveAtInvalidAddress)
+{
+  // DESNOTE(jbarber, 2026-07-22): When the client supplies an explicit
+  // detourAddress, Detour now validates the cave address range is
+  // addressable for the full detour_size (body + 12). Without this check,
+  // a too-short cave or an address past RAM would silently overwrite
+  // adjacent/unmapped memory. Bugbot #71.
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});  // plant valid target
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  // INVALID_ADDRESS is past MEM1 -- the cave range can't be read/written.
+  auto result = controller.Detour(INJECT_BASE, INVALID_ADDRESS, body);
+  EXPECT_FALSE(result.has_value());
+  // Target must be untouched (rejection happens before any writes).
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
 TEST_F(DapControllerTest, DetourRejectsOutOfRangeBranchDisplacement)
 {
   // DESNOTE(jbarber, 2026-07-21): PPC `b` encodes a 24-bit signed offset/4,
