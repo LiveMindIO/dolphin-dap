@@ -12,67 +12,14 @@ Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
 
 ## Debug Adapter Protocol (DAP) Server
 
-This fork of Dolphin adds a **Debug Adapter Protocol server** that exposes
-Dolphin's PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.).
-Activation mirrors the GDB stub: there is no `--dap` flag and no separate
-binary; the server is inert unless a DAP port/socket is configured at runtime,
-and DAP and GDB are mutually exclusive.
+This fork adds a **Debug Adapter Protocol server** that exposes Dolphin's
+PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.). Enable
+it by configuring a DAP port or socket at runtime; it compiles into the
+NoGUI target with no separate binary.
 
-For build/run instructions, tests, known limitations, message framing, and
-per-operation request/response payload reference, see
-[`DAP.md`](DAP.md).
-
-### Operations
-
-Each operation below is a link to its detailed reference section in
-[`DAP.md`](DAP.md).
-
-#### Standard requests
-
-| Request | Summary |
-|---------|---------|
-| [`initialize`](DAP.md#initialize) | Capability handshake — advertises standard + Dolphin-specific extensions. |
-| [`launch`](DAP.md#launch-attach) | Boot the configured ISO/DOL. Emulation starts paused. |
-| [`attach`](DAP.md#launch-attach) | Attach to an already-running core. |
-| [`configurationDone`](DAP.md#configurationdone) | Concludes the launch handshake. |
-| [`continue`](DAP.md#continue-pause-step) | Resume execution. `allThreadsContinued: true` reported. |
-| [`pause`](DAP.md#continue-pause-step) | Halt the core; emits `stopped`/`"pause"`. |
-| [`next`](DAP.md#continue-pause-step) | Step over (interpreter mode). |
-| [`stepIn`](DAP.md#continue-pause-step) | Step into (interpreter mode). |
-| [`stepOut`](DAP.md#continue-pause-step) | Step out (async worker, classified stop on completion). |
-| [`setBreakpoints`](DAP.md#setbreakpoints) | Source/line code breakpoints. Conditional via `condition`. |
-| [`setInstructionBreakpoints`](DAP.md#setinstructionbreakpoints) | Address-keyed code breakpoints; replaces the whole list. |
-| [`setDataBreakpoints`](DAP.md#setdatabreakpoints) | Watchpoints. **Ranged** watchpoints via `length` extension. |
-| [`readMemory`](DAP.md#readmemory-writememory) | Read bytes; base64 payload. `unreadableBytes` reported. |
-| [`writeMemory`](DAP.md#readmemory-writememory) | Write bytes; base64 payload. `allowPartial` for soft failures. |
-| [`disassemble`](DAP.md#disassemble) | Per-instruction disassembly. `instructionCount` capped at 65536. |
-| [`stackTrace`](DAP.md#stacktrace-threads-scopes-variables-setvariable) | PPC call stack. |
-| [`threads`](DAP.md#stacktrace-threads-scopes-variables-setvariable) | OS thread enumeration. |
-| [`scopes`](DAP.md#stacktrace-threads-scopes-variables-setvariable) | Variable scopes for a frame (`Registers`, `PC`). |
-| [`variables`](DAP.md#stacktrace-threads-scopes-variables-setvariable) | Enumerate variables in a scope. |
-| [`setVariable`](DAP.md#stacktrace-threads-scopes-variables-setvariable) | Mutate a variable (registers, etc.). |
-| [`evaluate`](DAP.md#evaluate) | Evaluate a PPC debugger expression. |
-| [`goto`](DAP.md#goto-gototargets) | Set PC; re-emits `stopped`/`"goto"`. |
-| [`gotoTargets`](DAP.md#goto-gototargets) | Enumerate goto targets (address doubles as target id). |
-| [`exceptionInfo`](DAP.md#exceptioninfo) | Reports pending PPC exceptions. |
-| [`loadedSources`](DAP.md#loadedsources-source-breakpointlocations) | List known source files (DWARF/entrypoints-driven). |
-| [`source`](DAP.md#loadedsources-source-breakpointlocations) | Fetch source contents. Emits ≤256 lines. |
-| [`breakpointLocations`](DAP.md#loadedsources-source-breakpointlocations) | List valid breakpoint lines. Capped at 65536. |
-| [`terminate`](DAP.md#terminate-restart-disconnect) | Halt the core; emits `terminated`. |
-| [`restart`](DAP.md#terminate-restart-disconnect) | PPC reset + forced pause; emits `stopped`/`"restart"`. |
-| [`disconnect`](DAP.md#terminate-restart-disconnect) | End session; sockets torn down. |
-
-#### Dolphin-specific custom requests
-
-| Request | Summary |
-|---------|---------|
-| [`dolphin_realtimeWatch`](DAP.md#dolphin_realtimewatch) | Subscribe to a memory region; stream `dolphin_memoryChanged` events on change at field rate. |
-| [`dolphin_realtimeWatchCancel`](DAP.md#dolphin_realtimewatchcancel) | Cancel a realtime watch subscription by `watchId`. |
-| [`dolphin_freeze`](DAP.md#dolphin_freeze) | Hold a memory region at a fixed value. Standalone form or freeze-an-existing-watch form. |
-| [`dolphin_unfreeze`](DAP.md#dolphin_unfreeze) | Clear the freeze layer on a watch; the watch keeps running. Idempotent. |
-| [`dolphin_findFreeMemory`](DAP.md#dolphin_findfreememory) | Locate the smallest 4-byte-aligned zero-run ≥ `count` bytes in MEM1. |
-| [`dolphin_injectCode`](DAP.md#dolphin_injectcode) | Write raw PPC machine code (base64) at an explicit or server-allocated address. iCache + JIT invalidated. |
-| [`dolphin_detour`](DAP.md#dolphin_detour) | Install a transparent detour at a 4-byte instruction target: detour body + trampoline that replays the original instruction. |
+For build/run instructions, tests, known limitations, the operations summary,
+and per-operation request/response payload reference, see
+[`Tools/dap/`](Tools/dap/).
 
 ---
 

@@ -1,123 +1,45 @@
-# Dolphin DAP Server
+# DAP Server Capabilities
 
-This fork of Dolphin adds a **Debug Adapter Protocol server** that exposes
-Dolphin's PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.).
-It mirrors the behavior of Dolphin's built-in Qt debugger — breakpoints,
-watchpoints, stepping, register/memory inspection — but drives them over a
-socket from an external editor instead of from the in-app UI. The result is a
-fully scriptable, headless reverse-engineering and TAS-debugging workflow with
-the emulator as the backend and your editor as the front-end.
+Operations supported by the Dolphin DAP server. Each command below is a link
+target — the [Features](README.md#features) table links into this document.
 
-Activation mirrors the GDB stub: there is no `--dap` flag and no separate
-binary. The server is **inert** unless a DAP port/socket is configured at
-runtime. DAP and GDB are mutually exclusive (only one may be active at a time).
-
-For a one-row-per-command overview, see the
-[DAP section of the Readme](Readme.md#debug-adapter-protocol-dap-server). This
-document is the per-operation reference.
-
----
-
-## Running the DAP server
-
-Build with the NoGUI target (DAP sources compile into the `core` static lib;
-there is no separate binary or compile flag):
-
-```bash
-cmake -B build -DENABLE_NOGUI=ON -DENABLE_QT=OFF
-cmake --build build --target dolphin-nogui
-```
-
-The server is **inert** unless a DAP port or socket is configured at runtime
-(mirrors `GDBPort`). DAP and GDB are mutually exclusive. `stdout` stays free
-for normal logging. The DAP client (VS Code / Cursor / Neovim) then attaches
-over the socket.
-
-**TCP** (`Dolphin.General.DAPPort`):
-
-```bash
-dolphin-emu-nogui -C Dolphin.General.DAPPort=5678 \
-  --exec ~/projects/ai/yolo/crowd-control/melee-iso/game.iso --platform headless
-```
-
-**Unix socket** (`Dolphin.General.DAPSocket`, Linux/macOS only):
-
-```bash
-dolphin-emu-nogui -C Dolphin.General.DAPSocket=./dap.sock \
-  --exec ~/projects/ai/yolo/crowd-control/melee-iso/game.iso --platform headless
-```
-
-**Don't pause at entry** — let the game run immediately, only breaking when a
-breakpoint is hit or the client explicitly pauses. Set
-`Dolphin.General.DAPStopOnEntry=false` at dolphin launch; an explicit
-`stopOnEntry` field on a `launch`/`attach` request overrides it per session:
-
-```bash
-dolphin-emu-nogui -C Dolphin.General.DAPSocket=./dap.sock \
-  -C Dolphin.General.DAPStopOnEntry=false \
-  --exec ~/projects/ai/yolo/crowd-control/melee-iso/game.iso --platform headless
-```
-
-**With a sidecar debug ELF** for DWARF 1.1 line info (imported after boot; code
-in memory must match the ELF link layout for line mappings to be correct):
-
-```bash
-dolphin-emu-nogui -C Dolphin.General.DAPPort=5678 \
-  --debug-elf /path/to/build/GALE01/main.elf \
-  --exec /path/to/GALE01.iso --platform headless
-```
-
-Equivalent config form for the ELF: `-C Dolphin.Debug.DwarfElf=/path/to/main.elf`.
-
-## Tests
-
-```bash
-cmake --build build --target tests
-./build/Binaries/Tests/tests --gtest_filter='Dap*:RealtimeWatch*:Dwarf*:PPCSymbolDBLine*'
-```
-
-The integration tests (`DapControllerTest`, `DapSessionTest`,
-`RealtimeWatchTest`) follow `PageFaultTest`/`PageTableHostMappingTest`: they use
-the `Core::System` singleton, `Memory::Init()` + `AddressSpace::Init()`,
-`DeclareAsCPUThread()`, and disable address translation (`MSR.DR=0`) so
-effective == physical RAM. `DapSessionTest` runs `RunSession` on a thread that
-declares itself the CPU thread and drives it over a `socketpair`.
-
-> The memory arena uses shared memory; restrictive sandboxes raise `SIGBUS` in
-> `Memory::Init` (also breaks `PageTableHostMappingTest`) — run tests
-> unsandboxed.
-
-## Known limitations
-
-- **Single global breakpoint store.** Dolphin has one PPC core and one shared
-  breakpoint/watchpoint store tied to it. Each DAP client's `setBreakpoints` /
-  `setDataBreakpoints` / `setInstructionBreakpoints` replaces the global set.
-  The intended topology is one DAP client per running core (DAP and GDB are
-  mutually exclusive). Concurrent DAP clients on the same core will clobber
-  each other's breakpoints/watchpoints — this is an architectural constraint,
-  not a per-session isolation bug.
-- **Realtime sample delivery cadence.** `dolphin_realtimeWatch` *samples* at
-  field rate (~60 Hz NTSC) but *delivers* `dolphin_memoryChanged` events on
-  the session loop's 50 ms poll, so a change is flushed to the socket within
-  ~50 ms of being observed. Burst changes within a single frame are coalesced
-  to one event per region.
-- **Freeze is field-rate, not atomic.** `dolphin_freeze` writes the frozen
-  value back at the next `vi_end_field_event` after the game drifts. For up to
-  one field (~16 ms NTSC) the game's value is visible in memory before the
-  restore. The canonical use cases (health/ammo/coins/timer) tolerate this
-  window; for atomicity you'd need an MMU write-hook, which isn't implemented.
-  Freeze is a layer on top of a watch subscription — clearing the freeze via
-  `dolphin_unfreeze` leaves the watch running and dispatching events normally.
-
-## Message framing
+For build/run instructions, tests, known limitations, and source awareness, see
+[`README.md`](README.md).
 
 All messages use DAP framing: `Content-Length: N\r\n\r\n` followed by a JSON
 body. Sequence numbers (`seq`) are assigned by the client for requests and by
 the server for responses/events.
 
+## Table of contents
+
+- [Standard requests](#standard-requests)
+  - [`initialize`](#initialize)
+  - [`launch` / `attach`](#launch--attach)
+  - [`configurationDone`](#configurationdone)
+  - [`continue` / `pause` / `step`](#continue--pause--step)
+  - [`setBreakpoints`](#setbreakpoints)
+  - [`setInstructionBreakpoints`](#setinstructionbreakpoints)
+  - [`setDataBreakpoints`](#setdatabreakpoints)
+  - [`readMemory` / `writeMemory`](#readmemory--writememory)
+  - [`disassemble`](#disassemble)
+  - [`stackTrace` / `threads` / `scopes` / `variables` / `setVariable`](#stacktrace--threads--scopes--variables--setvariable)
+  - [`evaluate`](#evaluate)
+  - [`goto` / `gotoTargets`](#goto--gototargets)
+  - [`loadedSources` / `source` / `breakpointLocations`](#loadedsources--source--breakpointlocations)
+  - [`exceptionInfo`](#exceptioninfo)
+  - [`terminate` / `restart` / `disconnect`](#terminate--restart--disconnect)
+- [Dolphin-specific custom requests](#dolphin-specific-custom-requests)
+  - [`dolphin_realtimeWatch`](#dolphin_realtimewatch)
+  - [`dolphin_realtimeWatchCancel`](#dolphin_realtimewatchcancel)
+  - [`dolphin_freeze`](#dolphin_freeze)
+  - [`dolphin_unfreeze`](#dolphin_unfreeze)
+  - [`dolphin_findFreeMemory`](#dolphin_findfreememory)
+  - [`dolphin_injectCode`](#dolphin_injectcode)
+  - [`dolphin_detour`](#dolphin_detour)
+
 ## Standard requests
 
-### initialize
+### `initialize`
 
 Capability handshake. The server advertises which standard and
 Dolphin-specific extensions it supports.
@@ -154,7 +76,7 @@ Dolphin-specific extensions it supports.
 {"seq": 3, "type": "event", "event": "initialized", "body": {}}
 ```
 
-### launch / attach
+### `launch` / `attach`
 
 ```jsonc
 {"command": "launch", "arguments": {}}      // boot the configured ISO/DOL, then stop at entry
@@ -183,12 +105,12 @@ config for that session.
 {"command": "launch", "arguments": {"stopOnEntry": false}}  // start running, don't pause at entry
 ```
 
-### configurationDone
+### `configurationDone`
 
 Concludes the launch handshake. Server emits a `stopped`/`"entry"` event if it
 hasn't already.
 
-### continue / pause / step
+### `continue` / `pause` / `step`
 
 ```jsonc
 {"command": "continue",  "arguments": {"threadId": 1}}
@@ -209,7 +131,7 @@ On a spontaneous stop (breakpoint hit / watchpoint hit / step completion) the
 reason is classified: `"breakpoint"`, `"data breakpoint"`, or `"step"`.
 `hitBreakpointIds` is populated for code breakpoints.
 
-### setBreakpoints
+### `setBreakpoints`
 
 A Dolphin "source" is anchored at an address encoded as a hex string in
 `source.name` or `source.path`; each breakpoint's address is `base + line*4`.
@@ -228,7 +150,7 @@ A Dolphin "source" is anchored at an address encoded as a hex string in
 //     ]}
 ```
 
-### setInstructionBreakpoints
+### `setInstructionBreakpoints`
 
 Directly sets code breakpoints by address. Replaces the whole code-breakpoint
 list (mirrors the GDB stub).
@@ -241,7 +163,7 @@ list (mirrors the GDB stub).
 }}
 ```
 
-### setDataBreakpoints
+### `setDataBreakpoints`
 
 A DAP **data breakpoint** is a memory watchpoint: it pauses the core when the
 specified address is read or written. `accessType` is one of
@@ -283,7 +205,7 @@ On a watchpoint hit, the server emits:
 {"event": "stopped", "body": {"reason": "data breakpoint", "threadId": 1}}
 ```
 
-### readMemory / writeMemory
+### `readMemory` / `writeMemory`
 
 ```jsonc
 // read 4 bytes at 0x80004000
@@ -303,7 +225,7 @@ On a watchpoint hit, the server emits:
 `readMemory` reports `unreadableBytes` when the region extends past valid RAM.
 The read stops at the first invalid address.
 
-### disassemble
+### `disassemble`
 
 ```jsonc
 {"command": "disassemble", "arguments":
@@ -319,7 +241,7 @@ The read stops at the first invalid address.
 against u32 max so a high base address paired with a large count fails safely
 rather than wrapping and disassembling unrelated low memory.
 
-### stackTrace / threads / scopes / variables / setVariable
+### `stackTrace` / `threads` / `scopes` / `variables` / `setVariable`
 
 ```jsonc
 {"command": "stackTrace", "arguments": {"threadId": 1, "startFrame": 0, "levels": 20}}
@@ -334,7 +256,7 @@ Frame `source.path`/`source.name` carry either a real source file path (when
 DWARF/entrypoints line info is loaded) or a hex anchor address for a
 disassembly pseudo-source.
 
-### evaluate
+### `evaluate`
 
 ```jsonc
 {"command": "evaluate", "arguments": {"expression": "r3 + r4"}}
@@ -344,7 +266,7 @@ disassembly pseudo-source.
 Uses the PPC debugger expression syntax — the same evaluator that handles
 breakpoint conditions.
 
-### goto / gotoTargets
+### `goto` / `gotoTargets`
 
 ```jsonc
 {"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 0}}
@@ -360,7 +282,7 @@ first so the post-goto stopped event is truthful — if the client called `goto`
 while emulation was running, the CPU would otherwise keep executing at the new
 PC while the adapter told the client emulation halted.
 
-### loadedSources / source / breakpointLocations
+### `loadedSources` / `source` / `breakpointLocations`
 
 ```jsonc
 {"command": "loadedSources"}
@@ -375,14 +297,14 @@ PC while the adapter told the client emulation halted.
 iteration is capped at 65536 entries — bounds guarding against pathological
 inputs.
 
-### exceptionInfo
+### `exceptionInfo`
 
 ```jsonc
 {"command": "exceptionInfo", "arguments": {"threadId": 1}}
 //  → {"exceptionId": "0x00000000", "description": "...", "breakMode": "always"}
 ```
 
-### terminate / restart / disconnect
+### `terminate` / `restart` / `disconnect`
 
 ```jsonc
 {"command": "terminate"}          // → emits {"event": "terminated", "body": {"restart": false}}
@@ -394,13 +316,13 @@ inputs.
 the post-restart `stopped`/`"restart"` event is truthful even when the client
 had continued execution before the restart.
 
-## Custom (Dolphin-specific) requests
+## Dolphin-specific custom requests
 
 These requests are not part of the DAP spec and are prefixed `dolphin_`. A
 DAP-aware editor that wants to use them needs a small client-side extension
 (e.g. a custom VS Code command or a debug-adapter extension).
 
-### dolphin_realtimeWatch
+### `dolphin_realtimeWatch`
 
 Subscribes to changes in a memory region. Unlike `setDataBreakpoints` (which
 **pauses** on access), a realtime watch **streams** the new value to the client
@@ -435,7 +357,7 @@ begins.
 Multiple watches are independent — each gets its own `watchId`. A region that
 never changes never emits.
 
-### dolphin_realtimeWatchCancel
+### `dolphin_realtimeWatchCancel`
 
 ```jsonc
 {"command": "dolphin_realtimeWatchCancel", "arguments": {"watchId": 1}}
@@ -446,7 +368,7 @@ never changes never emits.
 After cancellation the region is no longer sampled; no further
 `dolphin_memoryChanged` events are emitted for that `watchId`.
 
-### dolphin_freeze
+### `dolphin_freeze`
 
 Holds a memory region at a fixed value. Every field, if the cell drifted from
 the frozen canon, the adapter writes the canon back and suppresses the
@@ -481,7 +403,7 @@ into guest RAM immediately at subscribe/Freeze time (under `CPUThreadGuard`)
 so the freeze takes effect at once even when the core is paused — the
 watched bytes are not left at the game value waiting for the next field.
 
-### dolphin_unfreeze
+### `dolphin_unfreeze`
 
 Clears the freeze layer on an existing watch.
 
@@ -495,7 +417,7 @@ The watch itself stays subscribed and resumes dispatching `dolphin_memoryChanged
 events normally. Idempotent — calling on a watch that wasn't frozen still
 succeeds.
 
-### dolphin_findFreeMemory
+### `dolphin_findFreeMemory`
 
 Scans MEM1 (real RAM size, `GetRamSizeReal`) for the smallest 4-byte-aligned
 run of zero words of at least `count` bytes and returns its address. Used by
@@ -509,7 +431,7 @@ the server picks a safe address.
 //                    if count is 0 or no run of zeros >= count exists
 ```
 
-### dolphin_injectCode
+### `dolphin_injectCode`
 
 Writes PPC machine code at an explicit or server-allocated address. The
 client supplies raw big-endian bytes (base64-encoded); the server does not
@@ -538,7 +460,7 @@ client's responsibility. When no address is supplied, free memory is allocated
 ONCE and threaded through to the inject call so the response is truthful (no
 second scan that could disagree with the pre-check under a running core).
 
-### dolphin_detour
+### `dolphin_detour`
 
 Installs a transparent detour at a 4-byte instruction target. The server:
 
@@ -580,18 +502,3 @@ behind).
 encodes a 24-bit signed displacement (±32 MiB); a detour layout placing the
 patch site farther than that from its target is rejected outright rather than
 silently encoding the wrong branch.
-
-## Source awareness (DWARF 1.1 + entrypoints)
-
-When DWARF 1.1 line info (MWCC/CodeWarrior `.debug`+`.line` sections) is loaded,
-`stackTrace`, `loadedSources`, `source`, and `breakpointLocations` return real
-file:line mappings. Loading happens automatically when booting a debug ELF
-(`ElfReader::LoadSymbols`), programmatically via `Core::Debug::ImportDwarf` /
-`ImportDwarfFromElf`, or as a sidecar via `Dolphin.Debug.DwarfElf` (or
-`--debug-elf`).
-
-Retail-linked units that omit MWCC DWARF can still expose function entrypoints
-+ definition lines via an **`entrypoints.json`** sidecar (normalized; planned:
-Melee `tools/entrypoints.py` producer, Dolphin `ImportEntrypointsFromJson`
-importer). This supplies entrypoint-level line info without faking body-level
-line tables. See [`.ai-doc-reference/entrypoints-format.md`](.ai-doc-reference/entrypoints-format.md).
