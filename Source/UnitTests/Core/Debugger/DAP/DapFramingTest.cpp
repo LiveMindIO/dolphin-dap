@@ -127,3 +127,13 @@ TEST(DapFraming, DecodeFailsOnEmptyStream)
   BufferReader reader("");
   EXPECT_FALSE(DAP::Framing::DecodeMessage(reader.Reader()).has_value());
 }
+
+TEST(DapFraming, DecodeRejectsOversizedContentLength)
+{
+  // DESNOTE(jbarber, 2026-07-22): DecodeMessage caps Content-Length at 16 MiB
+  // so a malicious client can't ship a header claiming a multi-GB body that
+  // forces a multi-GB body.resize() on the session I/O thread. Bugbot #62.
+  // We don't need to send a real body -- the cap fires before any body read.
+  BufferReader reader("Content-Length: 1073741824\r\n\r\n");
+  EXPECT_FALSE(DAP::Framing::DecodeMessage(reader.Reader()).has_value());
+}

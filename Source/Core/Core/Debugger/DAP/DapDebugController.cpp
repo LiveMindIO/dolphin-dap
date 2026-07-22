@@ -343,7 +343,14 @@ std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
   if (!base)
     return std::nullopt;
 
-  return *base + line * 4;
+  // DESNOTE(jbarber, 2026-07-22): Compute in 64-bit so a wildly-large `line`
+  // produces a non-resolvable nullopt rather than silently wrapping past
+  // u32 max and installing a breakpoint at a nonsense PC. Mirrors the same
+  // guard in ParseSetBreakpoints. Bugbot #63.
+  const u64 effective = static_cast<u64>(*base) + static_cast<u64>(line) * 4ull;
+  if (effective > static_cast<u64>(std::numeric_limits<u32>::max()))
+    return std::nullopt;
+  return static_cast<u32>(effective);
 }
 
 std::vector<std::optional<u32>> DapDebugController::UpdateSourceBreakpoints(

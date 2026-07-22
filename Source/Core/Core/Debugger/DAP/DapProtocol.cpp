@@ -106,11 +106,17 @@ std::optional<ReadMemoryArguments> ParseReadMemory(const picojson::object& argum
   // — typical debug reads are <1 KiB, and clients paging through larger
   // regions can make repeated requests. Mirrors the instructionCount cap on
   // `disassemble` (65536). Bugbot #58.
+  // Record the original requested count so HandleReadMemory can report the
+  // capped bytes as `unreadableBytes` in the DAP response, rather than
+  // silently truncating. A client that asked for 100 MiB and got 1 MiB back
+  // needs to know the response was capped so it can re-issue smaller reads
+  // instead of treating the partial payload as the full region. Bugbot #65.
   constexpr u32 kMaxReadMemoryBytes = 1u << 20;  // 1 MiB
 
   ReadMemoryArguments result;
   result.address = *address;
   result.offset = ReadNumericFromJson<s64>(arguments, "offset").value_or(0);
+  result.requested_count = *count;
   result.count = std::min(*count, kMaxReadMemoryBytes);
   return result;
 }
@@ -122,10 +128,6 @@ std::optional<WriteMemoryArguments> ParseWriteMemory(const picojson::object& arg
   if (!address || !data)
     return std::nullopt;
 
-  const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
-  if (!decoded)
-    return std::nullopt;
-
   // DESNOTE(jbarber, 2026-07-22): Cap the decoded payload at 1 MiB so a
   // pathological client can't ship a multi-GB base64 body that decodes into
   // a multi-GB allocation on the session thread. Mirrors the kMaxReadMemoryBytes
@@ -134,7 +136,16 @@ std::optional<WriteMemoryArguments> ParseWriteMemory(const picojson::object& arg
   // still partially applies (the client can split oversized writes itself);
   // a hard reject would discard bytes the client reasonably expected to
   // land. Bugbot #60.
+  // The decoded buffer allocation in Base64Decode is bounded at ~12 MiB by
+  // the framing Content-Length cap (kMaxContentLength = 16 MiB), so the
+  // pre-decode allocation can't balloon to multi-GB even without a separate
+  // check here. Bugbot #64.
   constexpr std::size_t kMaxWriteMemoryBytes = 1u << 20;  // 1 MiB
+
+  const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
+  if (!decoded)
+    return std::nullopt;
+
   std::vector<u8> capped = *decoded;
   if (capped.size() > kMaxWriteMemoryBytes)
     capped.resize(kMaxWriteMemoryBytes);

@@ -1528,6 +1528,19 @@ private:
     body.emplace("data", Json::Base64Encode(bytes));
     if (unreadable > 0)
       body.emplace("unreadableBytes", static_cast<double>(unreadable));
+    // DESNOTE(jbarber, 2026-07-22): If `count` was capped below the client's
+    // requested count, surface the difference as `unreadableBytes` so the
+    // client knows the response was truncated (rather than silently getting
+    // a smaller payload). Mirrors how a partially-unreadable region is
+    // reported. Bugbot #65.
+    if (arguments->requested_count > arguments->count)
+    {
+      const u32 capped = arguments->requested_count - arguments->count;
+      // Add the cap shortfall to any prior unreadable tail so the client
+      // sees a single honest count of bytes it didn't get back.
+      const u32 total_unreadable = unreadable + capped;
+      body["unreadableBytes"] = picojson::value(static_cast<double>(total_unreadable));
+    }
     Respond(request.seq, "readMemory", std::move(body));
   }
 

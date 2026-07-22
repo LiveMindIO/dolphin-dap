@@ -440,6 +440,34 @@ TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesDwarfLineTable)
   EXPECT_EQ(*address, DwarfTestFixture::kLineTwoAddress);
 }
 
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointFallbackRejectsOverflowingLine)
+{
+  // DESNOTE(jbarber, 2026-07-22): When DWARF line lookup fails, the fallback
+  // computes `*base + line * 4`. Computing in 32-bit would silently wrap
+  // for a large `line` paired with a high base, installing a breakpoint at
+  // a nonsense PC. The 64-bit guard returns nullopt instead so the
+  // breakpoint is reported unresolved. Bugbot #63.
+  DAP::DapDebugController controller(System());
+  // base near the top of the 32-bit space; a line that pushes base+line*4
+  // past u32 max should fail to resolve.
+  const DAP::SourceBreakpointContext context{.source_name = "0xFFFFFFF0"};
+  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 4u);
+  EXPECT_FALSE(address.has_value());
+}
+
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointFallbackAcceptsBoundaryLine)
+{
+  // A line whose base+line*4 exactly equals u32 max should resolve.
+  // base = 0xFFFFFFFC, line = 3 -> 0xFFFFFFFC + 12 = 0x100000008 > u32 max,
+  // so this should NOT resolve. Pick base = 0xFFFFFFF0, line = 3 ->
+  // 0xFFFFFFF0 + 12 = 0xFFFFFFFC (in range).
+  DAP::DapDebugController controller(System());
+  const DAP::SourceBreakpointContext context{.source_name = "0xFFFFFFF0"};
+  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 3u);
+  ASSERT_TRUE(address.has_value());
+  EXPECT_EQ(*address, 0xFFFFFFFCu);
+}
+
 TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
 {
   DAP::DapDebugController controller(System());

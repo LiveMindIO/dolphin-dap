@@ -116,7 +116,9 @@ TEST(DapProtocol, ParseReadMemoryCapsOversizedCount)
   // a pathological client can't request a multi-GB read that would exhaust
   // memory on the session thread. Bugbot #58. A request for UINT32_MAX
   // bytes should silently cap to 1 MiB (the client gets back what it asked
-  // for in shape, just bounded in size).
+  // for in shape, just bounded in size). `requested_count` retains the
+  // original count so HandleReadMemory can surface the difference as
+  // `unreadableBytes` (Bugbot #65).
   const auto args = ParseObjectOrDie(
       R"({"memoryReference":"0x80003100", "count": 4294967295})");
   const auto read = Protocol::ParseReadMemory(args);
@@ -124,6 +126,7 @@ TEST(DapProtocol, ParseReadMemoryCapsOversizedCount)
   EXPECT_EQ(read->address, 0x80003100u);
   constexpr u32 kExpectedCap = 1u << 20;  // 1 MiB
   EXPECT_EQ(read->count, kExpectedCap);
+  EXPECT_EQ(read->requested_count, 4294967295u);
 }
 
 TEST(DapProtocol, ParseReadMemoryPassesThroughUnderCap)
@@ -134,6 +137,8 @@ TEST(DapProtocol, ParseReadMemoryPassesThroughUnderCap)
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->count, 4096u);
+  // requested_count == count when no cap was applied.
+  EXPECT_EQ(read->requested_count, 4096u);
 }
 
 TEST(DapProtocol, ParseReadMemoryCapsAtExactBoundary)

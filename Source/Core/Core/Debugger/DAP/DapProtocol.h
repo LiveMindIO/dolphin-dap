@@ -35,7 +35,12 @@ struct ReadMemoryArguments
 {
   u32 address = 0;
   s64 offset = 0;
+  // Capped at 1 MiB; the value actually used for the read. See ParseReadMemory.
   u32 count = 0;
+  // The original client-requested count, BEFORE the 1 MiB cap. HandleReadMemory
+  // surfaces (requested_count - count) as `unreadableBytes` in the DAP response
+  // so the client can detect a silent truncation. Bugbot #65.
+  u32 requested_count = 0;
 };
 
 std::optional<ReadMemoryArguments> ParseReadMemory(const picojson::object& arguments);

@@ -53,12 +53,28 @@ std::optional<std::string> DecodeMessage(const ReadExactFn& read_exact)
 
   size_t content_length = 0;
   const std::string_view length_str{header_line.data() + prefix.size(),
-                                    header_line.size() - prefix.size()};
+                                     header_line.size() - prefix.size()};
   const auto [ptr, ec] =
       std::from_chars(length_str.data(), length_str.data() + length_str.size(), content_length);
   if (ec != std::errc{} || ptr != length_str.data() + length_str.size())
   {
     ERROR_LOG_FMT(CONSOLE, "DAP: invalid Content-Length: {}", header_line);
+    return std::nullopt;
+  }
+
+  // DESNOTE(jbarber, 2026-07-22): Cap Content-Length at 16 MiB so a malicious
+  // or buggy client can't ship a header claiming a multi-GB body that forces
+  // a multi-GB `body.resize()` allocations on the session I/O thread (where
+  // the allocator would either OOM or stall all DAP traffic for the duration
+  // of the read). 16 MiB is well above the largest realistic DAP request
+  // (setVariables / writeMemory cap their payloads at 1 MiB decoded; a full
+  // stackTrace response with hundreds of frames is well under 1 MiB). DAP
+  // requests are JSON and routinely under 4 KiB. Bugbot #62.
+  constexpr size_t kMaxContentLength = 16u * 1024u * 1024u;  // 16 MiB
+  if (content_length > kMaxContentLength)
+  {
+    ERROR_LOG_FMT(CONSOLE, "DAP: Content-Length {} exceeds cap of {}, rejecting",
+                  content_length, kMaxContentLength);
     return std::nullopt;
   }
 
