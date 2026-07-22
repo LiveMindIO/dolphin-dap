@@ -460,6 +460,38 @@ client's responsibility. When no address is supplied, free memory is allocated
 ONCE and threaded through to the inject call so the response is truthful (no
 second scan that could disagree with the pre-check under a running core).
 
+### Overwriting existing memory
+
+**Yes — explicit-address injections overwrite whatever is at the target
+address, including live game code, existing detour bodies, or your own
+previously-injected code.** The server performs no read-before-write, no
+snapshot, no rollback, and no overlap detection. It calls `WriteMemory`
+directly:
+
+- **At a code address:** overwrites the instruction stream. The bytes need
+  not form a valid instruction boundary alignment with what was there
+  before — the server doesn't decode or check. As long as your `code` is a
+  multiple of 4, the write succeeds and iCache+JIT are invalidated so the
+  next fetch sees the new bytes.
+- **At a data address:** overwrites the data. Useful for patching constants,
+  tables, or live game state. No different from `writeMemory` except the
+  iCache invalidation hint — harmless for data writes.
+- **Overwriting game code that has a detour installed:** the detour's
+  patched `b detour_addr` instruction at the target is itself 4 bytes; if
+  your injection writes over it, the detour is silently destroyed (no
+  rollback). Detour bodies, trampolines, and code injected by prior
+  `dolphin_injectCode` calls are all regular memory and can be overwritten
+  the same way.
+- **Overwriting the same address twice:** the second write wins. There is no
+  versioning, no diffing, no record of what was there before. If you need
+  rollback semantics (write-through-until-revert), snapshot the bytes
+  yourself with `readMemory` before injecting.
+
+When `memoryReference` is **omitted**, the server allocates via
+`dolphin_findFreeMemory` which scans for a zero-run — so auto-allocated
+regions are guaranteed to be unused (as of the scan). Explicit addresses
+carry no such guarantee.
+
 ## `dolphin_detour`
 
 Installs a transparent detour at a 4-byte instruction target. The server:

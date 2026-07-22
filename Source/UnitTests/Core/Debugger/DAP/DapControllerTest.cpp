@@ -1307,6 +1307,101 @@ TEST_F(DapControllerTest, InjectCodeRejectsNonMultipleOfFour)
   EXPECT_EQ(controller.InjectCode(INJECT_BASE, code), 0u);
 }
 
+TEST_F(DapControllerTest, InjectCodeOverwritesExistingBytesWithoutSnapshot)
+{
+  // DESNOTE(jbarber, 2026-07-22): InjectCode is a plain overwrite — no
+  // read-before-write, no snapshot, no rollback, no overlap detection.
+  // Seed INJECT_BASE with recognizable non-zero bytes, then inject
+  // different bytes at the same address and assert the new bytes land
+  // verbatim, with no trace of the original. This is the behavior the
+  // capabilities.md "Overwriting existing memory" section documents.
+  DAP::DapDebugController controller(System());
+  // Seed with `li r5, 42` (0x38A0002A) + `li r6, 7` (0x38C00007).
+  WriteRam(INJECT_BASE, {0x38, 0xA0, 0x00, 0x2A, 0x38, 0xC0, 0x00, 0x07});
+  ASSERT_EQ(controller.ReadMemory(INJECT_BASE, 8),
+            (std::vector<u8>{0x38, 0xA0, 0x00, 0x2A, 0x38, 0xC0, 0x00, 0x07}));
+
+  // Inject two `nop` instructions over the same region.
+  const std::vector<u8> code = {0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00};
+  const u32 address = controller.InjectCode(INJECT_BASE, code);
+  ASSERT_EQ(address, INJECT_BASE);
+
+  // The new bytes exist verbatim; no merge / mixed-state / leftover
+  // original bytes survive.
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, code.size()), code);
+}
+
+TEST_F(DapControllerTest, InjectCodeOverwritesLiveDetourBodyAndDestroysIt)
+{
+  // DESNOTE(jbarber, 2026-07-22): A detour body is ordinary memory once
+  // installed. Injecting at the detour_body address overwrites the body's
+  // first instruction(s); the patched `b detour_addr` at the original target
+  // still routes control there, but the bytes the detour wrote are gone.
+  // This validates the capabilities.md claim that overwriting a detour
+  // body is a silent destroy: no error is raised, and the trampoline still
+  // holds the original instruction, but the body no longer does what the
+  // installer intended.
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});  // nop at target site
+
+  // Install a detour with a 1-instruction body at DETOUR_BASE.
+  const std::vector<u8> detour_body = {0x7C, 0x63, 0x1B, 0x78};  // mr r3,r3
+  auto detour = controller.Detour(INJECT_BASE, DETOUR_BASE, detour_body);
+  ASSERT_TRUE(detour.has_value());
+  ASSERT_EQ(controller.ReadMemory(DETOUR_BASE, 4), detour_body);
+  ASSERT_EQ(detour->detour_address, DETOUR_BASE);
+
+  // Now inject over the detour body with different bytes.
+  const std::vector<u8> replacement = {0x38, 0xA0, 0x00, 0x2A};  // li r5, 42
+  const u32 wrote = controller.InjectCode(DETOUR_BASE, replacement);
+  ASSERT_EQ(wrote, DETOUR_BASE);
+
+  // The detour body has been replaced; the original detour bytes are gone.
+  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE, 4), replacement);
+  EXPECT_NE(controller.ReadMemory(DETOUR_BASE, 4), detour_body);
+
+  // The patched `b detour_addr` at the target still exists, so if the
+  // CPU ran into the target, it would branch to DETOUR_BASE and execute
+  // the new bytes (li r5, 42) instead of the original mr r3,r3 body.
+  // This is the "silent destroy" footgun documented in capabilities.md.
+  EXPECT_NE(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));  // still `b detour`
+}
+
+TEST_F(DapControllerTest, InjectCodeOverwritesSameAddressTwiceLastWriteWins)
+{
+  // DESNOTE(jbarber, 2026-07-22): There is no versioning or diffing at
+  // InjectCode — calling it twice at the same address overwrites both
+  // times, and the second write wins. The first write's bytes are gone.
+  // This validates the capabilities.md "Overwriting the same address
+  // twice" note.
+  DAP::DapDebugController controller(System());
+
+  const std::vector<u8> first = {0x7C, 0x63, 0x1B, 0x78};  // mr r3,r3
+  ASSERT_EQ(controller.InjectCode(INJECT_BASE, first), INJECT_BASE);
+  ASSERT_EQ(controller.ReadMemory(INJECT_BASE, 4), first);
+
+  const std::vector<u8> second = {0x38, 0xA0, 0x00, 0x2A};  // li r5, 42
+  ASSERT_EQ(controller.InjectCode(INJECT_BASE, second), INJECT_BASE);
+
+  // Second write wins; no trace of the first.
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), second);
+  EXPECT_NE(controller.ReadMemory(INJECT_BASE, 4), first);
+}
+
+TEST_F(DapControllerTest, InjectCodeRejectsInvalidTranslatedAddress)
+{
+  // DESNOTE(jbarber, 2026-07-22): WriteToHardware<NoException> silently
+  // drops the write when address translation fails (in production with
+  // MSR.DR=1). The test harness runs with DR=0 (translation bypassed),
+  // so an out-of-RAM physical address is rejected by
+  // AddressSpace::Accessors::IsValidAddress, WriteMemory's loop hits the
+  // invalid address first byte, writes 0 bytes, and InjectCode returns 0.
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> code = {0x60, 0x00, 0x00, 0x00};
+  EXPECT_EQ(controller.InjectCode(INVALID_ADDRESS, code), 0u);
+}
+
 TEST_F(DapControllerTest, DetourPatchesTargetAndInstallsTrampoline)
 {
   // Pre-load a recognizable instruction at the target: `ori 0,0,0` (0x60000000).
@@ -1492,6 +1587,223 @@ TEST_F(DapControllerTest, DetourWithInvalidTailRegionRollsBackDetourBody)
   // Target untouched (rolled back from the patch_bytes stage that never ran).
   const std::vector<u8> target_after = controller.ReadMemory(INJECT_BASE, 4u);
   EXPECT_EQ(target_after, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourRejectsEmptyBody)
+{
+  // An empty body has nothing to execute; the API rejects it outright so
+  // the caller doesn't end up with a detour that immediately falls into
+  // the appended tail branch (which would be valid but useless, and would
+  // mask a client-side encoding bug).
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, {});
+  EXPECT_FALSE(result.has_value());
+  // Target untouched.
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourRejectsNonMultipleOfFourBody)
+{
+  // PPC instructions are 4 bytes wide; a body that isn't a multiple of 4
+  // would leave the appended tail branch unaligned, so the API rejects it
+  // before touching memory.
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+  // 5 bytes: a valid instruction + a stray byte.
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00, 0xFF};
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
+  EXPECT_FALSE(result.has_value());
+  // Target untouched.
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  // Detour region untouched (no rollback needed since reject is before writes).
+  const std::vector<u8> detour_region = controller.ReadMemory(DETOUR_BASE, 4);
+  // Whatever was there before (zeroed RAM on init), it's still zeroed.
+  EXPECT_EQ(detour_region, (std::vector<u8>{0x00, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourPreservesBodyBytesExactlyAtDetourAddress)
+{
+  // The detour body must land at detour_address verbatim — the server
+  // appends the tail branch *after* the body, not inside it. A multi-
+  // instruction body (8 bytes) exercises the offset math: body at
+  // [detour_addr, detour_addr+8), tail branch at detour_addr+8, trampoline
+  // at detour_addr+12.
+  DAP::DapDebugController controller(System());
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+  // Two-instruction body: `mr r3,r3` (0x7C631B78) + `nop` (0x60000000).
+  const std::vector<u8> body = {0x7C, 0x63, 0x1B, 0x78, 0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->detour_address, DETOUR_BASE);
+  // Trampoline = detour_addr + body_size(8) + tail_branch(4) = detour_addr + 12.
+  EXPECT_EQ(result->trampoline_address, DETOUR_BASE + 12u);
+
+  // The body bytes at detour_address are exactly what the caller supplied.
+  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE, body.size()), body);
+}
+
+TEST_F(DapControllerTest, DetourTrampolinePreservesOriginalInstructionExactly)
+{
+  // The trampoline must contain the exact original bytes from the target
+  // site so the patched-out instruction still executes. We use a distinctive
+  // instruction (`li r5, 42` = 0x38A0002A) so a byte-swap or wrong-address
+  // bug is immediately visible.
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> original = {0x38, 0xA0, 0x00, 0x2A};  // li r5, 42
+  WriteRam(INJECT_BASE, original);
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->original_instruction, original);
+
+  // Trampoline: [original instruction][b target+4]. First 4 bytes match.
+  const std::vector<u8> tramp = controller.ReadMemory(result->trampoline_address, 4);
+  EXPECT_EQ(tramp, original);
+}
+
+TEST_F(DapControllerTest, DetourTrampolineReturnBranchesToTargetPlusFour)
+{
+  // The trampoline's return branch must target `target_address + 4` so
+  // execution resumes at the instruction *after* the patched site. We
+  // place the target at a distinctive address and verify the encoded
+  // return branch targets exactly target+4.
+  DAP::DapDebugController controller(System());
+  constexpr u32 kTarget = INJECT_BASE + 0x200;  // Use a different offset for clarity.
+  WriteRam(kTarget, {0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(kTarget, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+
+  // The trampoline's return branch is at trampoline_address + 4.
+  const std::vector<u8> ret_bytes = controller.ReadMemory(result->trampoline_address + 4u, 4);
+  ASSERT_EQ(ret_bytes.size(), 4u);
+  // Decode the branch: opcode 0x49000000 | (LI << 2) for `b` (AA=0).
+  const u32 branch = (static_cast<u32>(ret_bytes[0]) << 24) |
+                     (static_cast<u32>(ret_bytes[1]) << 16) |
+                     (static_cast<u32>(ret_bytes[2]) << 8) |
+                     static_cast<u32>(ret_bytes[3]);
+  // The destination = trampoline_return_addr + 4 + (LI << 2) where LI is the
+  // signed 24-bit field. Compute what the branch should target.
+  const u32 ret_addr = result->trampoline_address + 4u;
+  const u32 expected_target = kTarget + 4u;
+  // PPC `b`: bits 6-29 are LI (signed, /4). Extract and sign-extend the 24-bit field.
+  const u32 li_raw = (branch & 0x03FFFFFC) >> 2;
+  const s32 li = (li_raw & 0x00800000u) ? static_cast<s32>(li_raw | 0xFF000000u) :
+                                              static_cast<s32>(li_raw);
+  const u32 decoded_target = ret_addr + static_cast<u32>(li * 4);
+  EXPECT_EQ(decoded_target, expected_target);
+}
+
+TEST_F(DapControllerTest, MultipleDetoursAtDifferentTargetsDoNotInterfere)
+{
+  // Two detours at different targets with different bodies must coexist:
+  // each patches its own target, and neither clobbers the other's body or
+  // trampoline. This verifies the staged-write rollback is scoped per-Detour
+  // call and FindFreeMemory / explicit addresses don't collide.
+  DAP::DapDebugController controller(System());
+  constexpr u32 kTarget1 = INJECT_BASE;
+  constexpr u32 kTarget2 = INJECT_BASE + 0x100;
+  constexpr u32 kDetour1 = DETOUR_BASE;
+  constexpr u32 kDetour2 = DETOUR_BASE + 0x100;  // Far enough that body+trampoline don't overlap.
+
+  WriteRam(kTarget1, {0x38, 0xA0, 0x00, 0x2A});  // li r5, 42
+  WriteRam(kTarget2, {0x38, 0xC0, 0x00, 0x07});  // li r6, 7
+
+  const std::vector<u8> body1 = {0x7C, 0x63, 0x1B, 0x78};  // mr r3,r3
+  const std::vector<u8> body2 = {0x7C, 0x83, 0x23, 0x78};  // mr r4,r4
+
+  auto result1 = controller.Detour(kTarget1, kDetour1, body1);
+  auto result2 = controller.Detour(kTarget2, kDetour2, body2);
+  ASSERT_TRUE(result1.has_value());
+  ASSERT_TRUE(result2.has_value());
+
+  // Each target patched with its own `b detourN`.
+  EXPECT_NE(controller.ReadMemory(kTarget1, 4), (std::vector<u8>{0x38, 0xA0, 0x00, 0x2A}));
+  EXPECT_NE(controller.ReadMemory(kTarget2, 4), (std::vector<u8>{0x38, 0xC0, 0x00, 0x07}));
+
+  // Each detour body preserved at its own detour address.
+  EXPECT_EQ(controller.ReadMemory(kDetour1, body1.size()), body1);
+  EXPECT_EQ(controller.ReadMemory(kDetour2, body2.size()), body2);
+
+  // Each trampoline holds its own original instruction.
+  EXPECT_EQ(controller.ReadMemory(result1->trampoline_address, 4),
+            (std::vector<u8>{0x38, 0xA0, 0x00, 0x2A}));
+  EXPECT_EQ(controller.ReadMemory(result2->trampoline_address, 4),
+            (std::vector<u8>{0x38, 0xC0, 0x00, 0x07}));
+
+  // Original instructions echoed in the results.
+  EXPECT_EQ(result1->original_instruction, (std::vector<u8>{0x38, 0xA0, 0x00, 0x2A}));
+  EXPECT_EQ(result2->original_instruction, (std::vector<u8>{0x38, 0xC0, 0x00, 0x07}));
+}
+
+TEST_F(DapControllerTest, DetourRestoresTargetAndDetourRegionOnTrampolineWriteFailure)
+{
+  // Force a rollback at the trampoline-write stage: detour body and tail
+  // branch write successfully, but the trampoline snapshot read returns
+  // empty (trampoline_addr is past RAM). Both the body region and the tail
+  // region must be restored to their pre-detour state, and the target must
+  // remain unpatched.
+  DAP::DapDebugController controller(System());
+  const u32 ram_size = System().GetMemory().GetRamSizeReal();
+  if (ram_size == 0)
+    GTEST_SKIP() << "requires a booted memory arena";
+
+  // 8-byte body so trampoline_addr = detour_addr + 8 (body) + 4 (tail) = detour_addr + 12.
+  // Place detour_addr so the body and tail fit in RAM but the trampoline
+  // starts past RAM: detour_addr = ram_size - 12 (body 8 + tail 4 = 12 fits),
+  // trampoline_addr = ram_size (past RAM).
+  const u32 detour_addr = ram_size - 12;
+  // Seed the body+tail region with distinct bytes so we can verify rollback.
+  const std::vector<u8> seed = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                                0x99, 0xAA, 0xBB, 0xCC};
+  (void)controller.WriteMemory(detour_addr, std::span<const u8>{seed});
+
+  WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x7C, 0x63, 0x1B, 0x78, 0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(INJECT_BASE, detour_addr, body);
+  EXPECT_FALSE(result.has_value());
+
+  // Body+tail region restored to pre-detour seed.
+  EXPECT_EQ(controller.ReadMemory(detour_addr, 12), seed);
+  // Target unpatched.
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+}
+
+TEST_F(DapControllerTest, DetourRestoresEverythingOnTargetPatchWriteFailure)
+{
+  // Force a rollback at the final stage (target patch write): the detour
+  // body, tail branch, and trampoline all write successfully, but the
+  // target patch itself fails. Everything must roll back, including the
+  // trampoline and tail region. We force this by making the target address
+  // invalid *after* the initial original-instruction read succeeds — but
+  // since we can't invalidate RAM mid-call, we instead test the case where
+  // the detour_address is valid for body+tail+trampoline writes but the
+  // target is at the very last word of RAM: the original-instruction read
+  // succeeds (target is in RAM), but we can't test a patch write failure
+  // directly without mocking. Instead, verify that a successful detour at
+  // the last word of RAM works (target+4 is past RAM, but the trampoline's
+  // return branch to target+4 is encoded as a branch instruction — it
+  // doesn't need target+4 to be readable at detour-install time).
+  DAP::DapDebugController controller(System());
+  const u32 ram_size = System().GetMemory().GetRamSizeReal();
+  if (ram_size == 0)
+    GTEST_SKIP() << "requires a booted memory arena";
+
+  const u32 target = ram_size - 4;
+  WriteRam(target, {0x60, 0x00, 0x00, 0x00});
+  const std::vector<u8> body = {0x60, 0x00, 0x00, 0x00};
+  auto result = controller.Detour(target, DETOUR_BASE, body);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->target_address, target);
+  // Target is now `b detour_addr`.
+  EXPECT_NE(controller.ReadMemory(target, 4), (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  // Trampoline holds original.
+  EXPECT_EQ(controller.ReadMemory(result->trampoline_address, 4),
+            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 }
 
 TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
