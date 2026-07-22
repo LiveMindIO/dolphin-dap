@@ -109,11 +109,24 @@ bool RealtimeWatchSampler::RemoveSubscription(int watch_id)
 
 bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
 {
+  // DESNOTE(jbarber, 2026-07-22): Acquire CPUThreadGuard BEFORE m_mutex.
+  // Tick() runs on the CPU thread (via vi_end_field_event), takes m_mutex,
+  // then constructs its own CPUThreadGuard — which is a no-op there because
+  // the calling thread *is* the CPU thread. If Freeze took m_mutex first
+  // and constructed CPUThreadGuard second, a Tick fired on the CPU thread
+  // between those two lines would block on m_mutex; the session thread's
+  // CPUThreadGuard would then wait for the CPU thread to idle (via
+  // PauseAndLock), which can't happen because the CPU thread is stuck in
+  // Tick holding-waiting-for-m_mutex. Acquiring the CPU guard first pauses
+  // the CPU (Tick can't start or completes its current run before idle),
+  // then m_mutex is safe. Mirrors AddSubscription's ordering.
+  Core::CPUThreadGuard guard(m_system);
+
   std::lock_guard lock(m_mutex);
   const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
-                               [watch_id](const Subscription& sub) {
-                                 return sub.watch_id == watch_id;
-                               });
+                                [watch_id](const Subscription& sub) {
+                                  return sub.watch_id == watch_id;
+                                });
   if (it == m_subscriptions.end())
     return false;
   // The frozen canon must match the subscription's width exactly -- a
@@ -139,7 +152,6 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   // the writes are atomic with respect to the stepping CPU.
   if (it->count > 0)
   {
-    Core::CPUThreadGuard guard(m_system);
     AddressSpace::Accessors* accessors =
         AddressSpace::GetAccessors(AddressSpace::Type::Effective);
     const u8* frozen = it->frozen_value->data();
