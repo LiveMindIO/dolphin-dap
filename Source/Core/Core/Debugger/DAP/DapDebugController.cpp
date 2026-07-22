@@ -867,6 +867,20 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
 {
   if (length == 0)
     return;
+  // DESNOTE(jbarber, 2026-07-21): Bounds-check the byte range against u32
+  // max before any arithmetic, mirroring WriteMemory / ReadMemory. The
+  // previous form computed `end_addr = address + (u32)length` which silently
+  // wrapped on a high address paired with a large length; the wrapped
+  // end_addr produced an end_line below start_line and the invalidation
+  // loop skipped -- JIT/iCache kept stale instructions after writeMemory,
+  // inject, or detour near the top of the 32-bit space. Bail out (caller is
+  // told the write succeeded but we can't safely flush the iCache for the
+  // tail; rejecting the whole write at this layer would be more disruptive
+  // than the wrap, and WriteMemory already validates the wrap for the
+  // actual byte writes themselves).
+  const u32 len32 = static_cast<u32>(length);
+  if (len32 > std::numeric_limits<u32>::max() - address)
+    return;
   Core::CPUThreadGuard guard(m_system);
   auto& ppc_state = m_system.GetPPCState();
   auto& memory = m_system.GetMemory();
@@ -874,7 +888,7 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
   // PPC L1 iCache lines are 32 bytes (CACHE_BLOCK_SIZE * 4). Round the range
   // out to the cacheline boundaries it overlaps and walk every line through
   // the icbi path -- same loop GeckoCode.cpp uses to flush its installer.
-  const u32 end_addr = address + static_cast<u32>(length);
+  const u32 end_addr = address + len32;
   const u32 start_line = address & ~u32{31u};
   const u32 end_line = (end_addr + 31u) & ~u32{31u};
   for (u32 line = start_line; line < end_line; line += 32)

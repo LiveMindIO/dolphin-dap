@@ -473,22 +473,32 @@ private:
       // this deferral, m_controller.Continue/Pause would block the
       // session thread on the stepping lock until the worker's 5s
       // timeout elapsed.
-      if (m_pending_continue.exchange(false))
-      {
-        m_controller.Continue();
-        SyncSteppingBaseline();
-        return;
-      }
-      if (m_pending_pause.exchange(false))
+      //
+      // DESNOTE(jbarber, 2026-07-21): If both flags are set (client asked to
+      // continue THEN pause during the step-out window), pause wins: the
+      // user's most recent intent was to halt. The earlier form ran Continue
+      // first and returned, silently dropping the deferred pause so the core
+      // kept running despite the client requesting a halt. Drain both flags
+      // and apply pause when both were requested.
+      const bool want_continue = m_pending_continue.exchange(false);
+      const bool want_pause = m_pending_pause.exchange(false);
+      if (want_pause)
       {
         // DESNOTE(jbarber, 2026-07-21): A user-initiated pause that
         // happened during async step-out should be reported to the client
         // with reason "pause", not whatever SendClassifiedStoppedEvent
         // would synthesize from the step-out's stashed stop info (which
         // could be NoteBreakpoint / Step). The user explicitly asked the
-        // core to halt.
+        // core to halt. If a continue was also pending (continue THEN
+        // pause), pause pre-empts since it is the more recent request.
         m_controller.Pause();
         SendStoppedEvent("pause");
+        SyncSteppingBaseline();
+        return;
+      }
+      if (want_continue)
+      {
+        m_controller.Continue();
         SyncSteppingBaseline();
         return;
       }
