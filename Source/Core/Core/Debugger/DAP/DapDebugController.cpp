@@ -800,6 +800,26 @@ void DapDebugController::Terminate()
   Core::SetState(m_system, Core::State::Paused);
 }
 
+void DapDebugController::ClearBreakpoints()
+{
+  // DESNOTE(jbarber, 2026-07-22): Dolphin has one shared global breakpoint /
+  // memcheck store tied to the PPC core. This session installed its
+  // breakpoints/watchpoints there via ApplyCodeBreakpoints (which clears the
+  // global store first) and SetDataBreakpoints (same for memchecks). Without
+  // this teardown call, a disconnecting client would leave the core halting
+  // on stale debugger state that no DAP client is around to clear. Wipe the
+  // session's tracked sets AND the global stores so follow-on emulation runs
+  // clean. Mirrors what ApplyCodeBreakpoints/SetDataBreakpoints do at the
+  // start of each set -- here we're doing the empty-set version.
+  m_source_breakpoints.clear();
+  m_instruction_breakpoints.clear();
+  {
+    Core::CPUThreadGuard guard(m_system);
+    m_system.GetPowerPC().GetBreakPoints().Clear();
+    m_system.GetPowerPC().GetMemChecks().Clear();
+  }
+}
+
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
 {
   // DESNOTE(jbarber, 2026-07-21): Reject ranges that wrap past u32 max so a

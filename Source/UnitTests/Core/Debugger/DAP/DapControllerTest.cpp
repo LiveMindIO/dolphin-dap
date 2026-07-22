@@ -1106,6 +1106,68 @@ TEST_F(DapControllerTest, TerminateBreaksCpu)
   EXPECT_TRUE(System().GetCPU().IsStepping());
 }
 
+TEST_F(DapControllerTest, ClearBreakpointsRemovesCodeAndDataBreakpoints)
+{
+  // DESNOTE(jbarber, 2026-07-22): ClearBreakpoints is the session-teardown
+  // path: a disconnecting client must not leave the emulated core halting on
+  // stale debugger state. Install both code breakpoints (via
+  // UpdateSourceBreakpoints + UpdateInstructionBreakpoints, which merge into
+  // the global store) and data watchpoints (via SetDataBreakpoints), then
+  // call ClearBreakpoints and assert both global stores are empty. Bugbot #57.
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  DAP::DapDebugController controller(System());
+  // UpdateSourceBreakpoints and UpdateInstructionBreakpoints merge: both
+  // contribute to the global BreakPoints store via ReapplyCodeBreakpoints.
+  const DAP::SourceBreakpointContext context{.source_name = "0x00003100"};
+  controller.UpdateSourceBreakpoints("test:1", context, {{.line = 0}});
+  controller.UpdateInstructionBreakpoints({{.address = TEST_ADDRESS + 0x100}});
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS + 0x100));
+  EXPECT_NE(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+
+  controller.ClearBreakpoints();
+
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS + 0x100));
+  // MemChecks::GetMemCheck returns nullptr when empty.
+  EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+}
+
+TEST_F(DapControllerTest, ClearBreakpointsIsIdempotent)
+{
+  // Calling ClearBreakpoints on a controller that never installed anything
+  // must be safe (the teardown path always calls it, regardless of what the
+  // session did). Calling it twice must also be safe.
+  DAP::DapDebugController controller(System());
+  controller.ClearBreakpoints();
+  controller.ClearBreakpoints();
+  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints().empty());
+  EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks().empty());
+}
+
+TEST_F(DapControllerTest, ClearBreakpointsAllowsReinstallAfter)
+{
+  // After ClearBreakpoints, the controller's internal state is reset so a
+  // subsequent Set* call installs fresh breakpoints in the (now-empty)
+  // global store. Validates the teardown-then-reconnect flow.
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS}});
+  ASSERT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
+
+  controller.ClearBreakpoints();
+  ASSERT_FALSE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
+
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 0x100}});
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS + 0x100));
+  // Previous address still gone.
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
+}
+
 TEST_F(DapControllerTest, GetStackTraceUsesDwarfSourceLineWhenAvailable)
 {
   Core::CPUThreadGuard guard(System());

@@ -184,6 +184,11 @@ public:
                                                          int end_line);
   void Restart();
   void Terminate();
+  // Clears all code/data breakpoints this controller installed in the global
+  // PPC BreakPoints / MemChecks stores. Called on session teardown so a
+  // disconnecting client doesn't leave the emulated core halting on stale
+  // debugger state. Safe to call multiple times; no-op if never installed.
+  void ClearBreakpoints();
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
   // returns the number written; stops at the first invalid address. After

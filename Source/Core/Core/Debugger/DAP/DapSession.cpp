@@ -237,6 +237,11 @@ public:
     // vi_end_field_event hook is unregistered (no further Tick() will fire)
     // before the transport/event-queue members are destroyed.
     m_watch_sampler.reset();
+    // DESNOTE(jbarber, 2026-07-22): Clear debugger state this session
+    // installed in the global PPC BreakPoints / MemChecks stores. Without
+    // this, a disconnecting client leaves the core halting on stale
+    // breakpoints/watchpoints no DAP client is around to clear. Bugbot #57.
+    m_controller.ClearBreakpoints();
     FlushEvents();
   }
 
