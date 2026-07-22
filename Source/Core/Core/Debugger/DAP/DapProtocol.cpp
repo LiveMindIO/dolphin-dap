@@ -455,7 +455,10 @@ std::optional<FreezeArguments> ParseFreeze(const picojson::object& arguments)
     return std::nullopt;
   if (result.value.size() != *count)
     return std::nullopt;
-  if (*count == 0 || *address > std::numeric_limits<u32>::max() - *count)
+  // DESNOTE(jbarber, 2026-07-21): Off-by-one fix. Reject only when the last
+  // byte (address + count - 1) exceeds UINT32_MAX, so a 1-byte freeze at
+  // 0xFFFFFFFF is accepted instead of rejected as overflow.
+  if (*count == 0 || (*count - 1u) > (std::numeric_limits<u32>::max() - *address))
     return std::nullopt;
 
   result.address = *address;

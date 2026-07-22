@@ -810,8 +810,17 @@ std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
   // typically valid), reading bytes from the wrong region. Returning an
   // empty vector surfacing the failure as "couldn't read anything" matches
   // dolphin_realtimeWatch and ParseFreeze's existing overflow protection.
+  //
+  // DESNOTE(jbarber, 2026-07-21): Off-by-one fix. The rejected condition
+  // must be (last_byte > UINT32_MAX), i.e. (size - 1) > (UINT32_MAX -
+  // address). The previous `address > UINT32_MAX - size` form rejected
+  // when address == UINT32_MAX - size + 1 even though the last byte
+  // (address + size - 1) is still UINT32_MAX and the read is valid -- a
+  // top-of-MEM1 read of exactly 1 byte at 0xFFFFFFFF was incorrectly
+  // rejected.
   if (size > static_cast<std::size_t>(std::numeric_limits<u32>::max()) ||
-      address > std::numeric_limits<u32>::max() - static_cast<u32>(size))
+      (size > 0 &&
+       static_cast<u32>(size - 1) > std::numeric_limits<u32>::max() - address))
   {
     return {};
   }
@@ -835,9 +844,12 @@ std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> dat
   // DESNOTE(jbarber, 2026-07-21): Same overflow guard as ReadMemory above --
   // a huge user-supplied `data` paired with a high base address mustn't wrap
   // and overwrite low RAM. Returning 0 here surfaces the failure to the
-  // caller, including Detour's staged-write rollback.
+  // caller, including Detour's staged-write rollback. Off-by-one fixed to
+  // use (size - 1) > (UINT32_MAX - address) so a 1-byte write at 0xFFFFFFFF
+  // is accepted (last byte is exactly UINT32_MAX).
   if (data.size() > static_cast<std::size_t>(std::numeric_limits<u32>::max()) ||
-      address > std::numeric_limits<u32>::max() - static_cast<u32>(data.size()))
+      (!data.empty() &&
+       static_cast<u32>(data.size() - 1) > std::numeric_limits<u32>::max() - address))
   {
     return 0;
   }
@@ -867,6 +879,7 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
 {
   if (length == 0)
     return;
+  const u32 len32 = static_cast<u32>(length);
   // DESNOTE(jbarber, 2026-07-21): Bounds-check the byte range against u32
   // max before any arithmetic, mirroring WriteMemory / ReadMemory. The
   // previous form computed `end_addr = address + (u32)length` which silently
@@ -877,9 +890,9 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
   // told the write succeeded but we can't safely flush the iCache for the
   // tail; rejecting the whole write at this layer would be more disruptive
   // than the wrap, and WriteMemory already validates the wrap for the
-  // actual byte writes themselves).
-  const u32 len32 = static_cast<u32>(length);
-  if (len32 > std::numeric_limits<u32>::max() - address)
+  // actual byte writes themselves). Off-by-one fix: use (len32 - 1) >
+  // (UINT32_MAX - address) so a 1-byte invalidate at 0xFFFFFFFF is accepted.
+  if (len32 - 1u > std::numeric_limits<u32>::max() - address)
     return;
   Core::CPUThreadGuard guard(m_system);
   auto& ppc_state = m_system.GetPPCState();

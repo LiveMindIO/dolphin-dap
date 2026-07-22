@@ -41,10 +41,12 @@ int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
   // buffers and a seed loop that reads past the end of RAM. The previous
   // form `address > UINT32_MAX - count` was correct for the wrap itself
   // but still let a UINT32_MAX count through when address == 0, allocating
-  // 4 GB of zero-fill for `current`/`last_seen`.
+  // 4 GB of zero-fill for `current`/`last_seen`. Off-by-one fix below: last
+  // byte is address + count - 1; reject only when (count - 1) > (UINT32_MAX
+  // - address), so a 1-byte watch at 0xFFFFFFFF is accepted.
   if (count == 0)
     return kInvalidWatchId;
-  if (address > std::numeric_limits<u32>::max() - count)
+  if (count - 1u > std::numeric_limits<u32>::max() - address)
     return kInvalidWatchId;
   const u32 ram_size = m_system.GetMemory().GetRamSizeReal();
   if (ram_size == 0 || count > ram_size)
