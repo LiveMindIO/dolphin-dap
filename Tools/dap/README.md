@@ -7,6 +7,18 @@ For the per-operation request/response reference, see
 [`capabilities.md`](capabilities.md). The full operations table is below in
 [Features](#features).
 
+## Table of contents
+
+- [Features](#features)
+  - [Standard requests](#standard-requests)
+  - [Dolphin-specific custom requests](#dolphin-specific-custom-requests)
+- [Running the server](#running-the-server)
+- [Handshake test (no game required for transport check)](#handshake-test-no-game-required-for-transport-check)
+- [Neovim (lazy.nvim)](#neovim-lazynvim)
+- [Tests](#tests)
+- [Known limitations](#known-limitations)
+- [Source awareness (DWARF 1.1 + entrypoints)](#source-awareness-dwarf-11-entrypoints)
+
 ## Features
 
 Each operation below links to its detailed reference section in
@@ -150,8 +162,7 @@ Expect a JSON `response` with `"command":"initialize"` and `"success":true`.
 ## Neovim (lazy.nvim)
 
 See [`nvim/README.md`](nvim/README.md) for `nvim-dap` + `nvim-dap-ui` setup,
-`.dolphin-dap.lua` per-project config, and keymaps. A sample `launch.json` is
-in [`launch.json.example`](launch.json.example).
+`.dolphin-dap.lua` per-project config, and keymaps.
 
 ## Tests
 

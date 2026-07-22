@@ -37,9 +37,9 @@ the server for responses/events.
   - [`dolphin_injectCode`](#dolphin_injectcode)
   - [`dolphin_detour`](#dolphin_detour)
 
-## Standard requests
+# Standard requests
 
-### `initialize`
+## `initialize`
 
 Capability handshake. The server advertises which standard and
 Dolphin-specific extensions it supports.
@@ -76,7 +76,7 @@ Dolphin-specific extensions it supports.
 {"seq": 3, "type": "event", "event": "initialized", "body": {}}
 ```
 
-### `launch` / `attach`
+## `launch` / `attach`
 
 ```jsonc
 {"command": "launch", "arguments": {}}      // boot the configured ISO/DOL, then stop at entry
@@ -105,12 +105,12 @@ config for that session.
 {"command": "launch", "arguments": {"stopOnEntry": false}}  // start running, don't pause at entry
 ```
 
-### `configurationDone`
+## `configurationDone`
 
 Concludes the launch handshake. Server emits a `stopped`/`"entry"` event if it
 hasn't already.
 
-### `continue` / `pause` / `step`
+## `continue` / `pause` / `step`
 
 ```jsonc
 {"command": "continue",  "arguments": {"threadId": 1}}
@@ -131,7 +131,7 @@ On a spontaneous stop (breakpoint hit / watchpoint hit / step completion) the
 reason is classified: `"breakpoint"`, `"data breakpoint"`, or `"step"`.
 `hitBreakpointIds` is populated for code breakpoints.
 
-### `setBreakpoints`
+## `setBreakpoints`
 
 A Dolphin "source" is anchored at an address encoded as a hex string in
 `source.name` or `source.path`; each breakpoint's address is `base + line*4`.
@@ -150,7 +150,7 @@ A Dolphin "source" is anchored at an address encoded as a hex string in
 //     ]}
 ```
 
-### `setInstructionBreakpoints`
+## `setInstructionBreakpoints`
 
 Directly sets code breakpoints by address. Replaces the whole code-breakpoint
 list (mirrors the GDB stub).
@@ -163,7 +163,7 @@ list (mirrors the GDB stub).
 }}
 ```
 
-### `setDataBreakpoints`
+## `setDataBreakpoints`
 
 A DAP **data breakpoint** is a memory watchpoint: it pauses the core when the
 specified address is read or written. `accessType` is one of
@@ -205,7 +205,7 @@ On a watchpoint hit, the server emits:
 {"event": "stopped", "body": {"reason": "data breakpoint", "threadId": 1}}
 ```
 
-### `readMemory` / `writeMemory`
+## `readMemory` / `writeMemory`
 
 ```jsonc
 // read 4 bytes at 0x80004000
@@ -225,7 +225,7 @@ On a watchpoint hit, the server emits:
 `readMemory` reports `unreadableBytes` when the region extends past valid RAM.
 The read stops at the first invalid address.
 
-### `disassemble`
+## `disassemble`
 
 ```jsonc
 {"command": "disassemble", "arguments":
@@ -241,7 +241,7 @@ The read stops at the first invalid address.
 against u32 max so a high base address paired with a large count fails safely
 rather than wrapping and disassembling unrelated low memory.
 
-### `stackTrace` / `threads` / `scopes` / `variables` / `setVariable`
+## `stackTrace` / `threads` / `scopes` / `variables` / `setVariable`
 
 ```jsonc
 {"command": "stackTrace", "arguments": {"threadId": 1, "startFrame": 0, "levels": 20}}
@@ -256,7 +256,7 @@ Frame `source.path`/`source.name` carry either a real source file path (when
 DWARF/entrypoints line info is loaded) or a hex anchor address for a
 disassembly pseudo-source.
 
-### `evaluate`
+## `evaluate`
 
 ```jsonc
 {"command": "evaluate", "arguments": {"expression": "r3 + r4"}}
@@ -266,7 +266,7 @@ disassembly pseudo-source.
 Uses the PPC debugger expression syntax — the same evaluator that handles
 breakpoint conditions.
 
-### `goto` / `gotoTargets`
+## `goto` / `gotoTargets`
 
 ```jsonc
 {"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 0}}
@@ -282,7 +282,7 @@ first so the post-goto stopped event is truthful — if the client called `goto`
 while emulation was running, the CPU would otherwise keep executing at the new
 PC while the adapter told the client emulation halted.
 
-### `loadedSources` / `source` / `breakpointLocations`
+## `loadedSources` / `source` / `breakpointLocations`
 
 ```jsonc
 {"command": "loadedSources"}
@@ -297,14 +297,14 @@ PC while the adapter told the client emulation halted.
 iteration is capped at 65536 entries — bounds guarding against pathological
 inputs.
 
-### `exceptionInfo`
+## `exceptionInfo`
 
 ```jsonc
 {"command": "exceptionInfo", "arguments": {"threadId": 1}}
 //  → {"exceptionId": "0x00000000", "description": "...", "breakMode": "always"}
 ```
 
-### `terminate` / `restart` / `disconnect`
+## `terminate` / `restart` / `disconnect`
 
 ```jsonc
 {"command": "terminate"}          // → emits {"event": "terminated", "body": {"restart": false}}
@@ -316,13 +316,13 @@ inputs.
 the post-restart `stopped`/`"restart"` event is truthful even when the client
 had continued execution before the restart.
 
-## Dolphin-specific custom requests
+# Dolphin-specific custom requests
 
 These requests are not part of the DAP spec and are prefixed `dolphin_`. A
 DAP-aware editor that wants to use them needs a small client-side extension
 (e.g. a custom VS Code command or a debug-adapter extension).
 
-### `dolphin_realtimeWatch`
+## `dolphin_realtimeWatch`
 
 Subscribes to changes in a memory region. Unlike `setDataBreakpoints` (which
 **pauses** on access), a realtime watch **streams** the new value to the client
@@ -357,7 +357,7 @@ begins.
 Multiple watches are independent — each gets its own `watchId`. A region that
 never changes never emits.
 
-### `dolphin_realtimeWatchCancel`
+## `dolphin_realtimeWatchCancel`
 
 ```jsonc
 {"command": "dolphin_realtimeWatchCancel", "arguments": {"watchId": 1}}
@@ -368,7 +368,7 @@ never changes never emits.
 After cancellation the region is no longer sampled; no further
 `dolphin_memoryChanged` events are emitted for that `watchId`.
 
-### `dolphin_freeze`
+## `dolphin_freeze`
 
 Holds a memory region at a fixed value. Every field, if the cell drifted from
 the frozen canon, the adapter writes the canon back and suppresses the
@@ -403,7 +403,7 @@ into guest RAM immediately at subscribe/Freeze time (under `CPUThreadGuard`)
 so the freeze takes effect at once even when the core is paused — the
 watched bytes are not left at the game value waiting for the next field.
 
-### `dolphin_unfreeze`
+## `dolphin_unfreeze`
 
 Clears the freeze layer on an existing watch.
 
@@ -417,7 +417,7 @@ The watch itself stays subscribed and resumes dispatching `dolphin_memoryChanged
 events normally. Idempotent — calling on a watch that wasn't frozen still
 succeeds.
 
-### `dolphin_findFreeMemory`
+## `dolphin_findFreeMemory`
 
 Scans MEM1 (real RAM size, `GetRamSizeReal`) for the smallest 4-byte-aligned
 run of zero words of at least `count` bytes and returns its address. Used by
@@ -431,7 +431,7 @@ the server picks a safe address.
 //                    if count is 0 or no run of zeros >= count exists
 ```
 
-### `dolphin_injectCode`
+## `dolphin_injectCode`
 
 Writes PPC machine code at an explicit or server-allocated address. The
 client supplies raw big-endian bytes (base64-encoded); the server does not
@@ -460,7 +460,7 @@ client's responsibility. When no address is supplied, free memory is allocated
 ONCE and threaded through to the inject call so the response is truthful (no
 second scan that could disagree with the pre-check under a running core).
 
-### `dolphin_detour`
+## `dolphin_detour`
 
 Installs a transparent detour at a 4-byte instruction target. The server:
 
