@@ -28,22 +28,25 @@ namespace
 // freezing a region that just happens to be executable), the L1 iCache and JIT
 // block cache would keep serving stale instructions. Re-running the icbi loop
 // on every back-write keeps the freeze honest at field rate. Bugbot #61.
-// The body is a 4-line cacheline walk (PPC L1 lines are 32 bytes); duplicating
-// it here keeps RealtimeWatch decoupled from DapDebugController.
+// Inclusive-form iteration (see DapDebugController::InvalidateCodeRange) so a
+// 1-byte invalidate at 0xFFFFFFFF doesn't skip the loop via u32 wrap.
+// Bugbot #66.
 void InvalidateCodeRange(Core::System& system, u32 address, u32 length)
 {
   if (length == 0)
     return;
-  if (length - 1u > std::numeric_limits<u32>::max() - address)
+  const u64 last_byte_64 = static_cast<u64>(address) + static_cast<u64>(length) - 1;
+  if (last_byte_64 > static_cast<u64>(std::numeric_limits<u32>::max()))
     return;
+  const u32 last_byte = static_cast<u32>(last_byte_64);
   auto& ppc_state = system.GetPPCState();
   auto& memory = system.GetMemory();
   auto& jit_interface = system.GetJitInterface();
-  const u32 end_addr = address + length;
   const u32 start_line = address & ~u32{31u};
-  const u32 end_line = (end_addr + 31u) & ~u32{31u};
-  for (u32 line = start_line; line < end_line; line += 32)
+  const u32 end_line_inclusive = last_byte & ~u32{31u};
+  for (u32 line = start_line; line != end_line_inclusive; line += 32)
     ppc_state.iCache.Invalidate(memory, jit_interface, line);
+  ppc_state.iCache.Invalidate(memory, jit_interface, end_line_inclusive);
 }
 }  // namespace
 

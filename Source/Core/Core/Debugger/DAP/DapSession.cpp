@@ -152,6 +152,18 @@ picojson::object MakeVariable(std::string_view name, u32 value)
 // is a documented architectural limitation in Tools/dap/README.md.
 std::atomic<int> s_active_session_count{0};
 
+// DESNOTE(jbarber, 2026-07-22): MaybeFireEntryStop decides whether the core
+// continues or stays paused on entry/attach. Without a shared gate, each
+// session makes the decision independently: a second client with
+// `stopOnEntry:false` calls Continue() on the shared core even if a first
+// client is still expecting a paused entry stop. The first session to reach
+// MaybeFireEntryStop test-and-sets this flag; any later session's call is a
+// no-op. The first session's `stopOnEntry` policy wins for the lifetime of
+// the boot -- concurrent clients with different policies is a documented
+// limitation (see Tools/dap/README.md). Reset when the last session exits so
+// a DAP re-init within the same process boot starts fresh. Bugbot #67.
+std::atomic<bool> s_entry_stop_handled{false};
+
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
@@ -273,6 +285,14 @@ public:
     if (is_last_session)
     {
       m_controller.ClearBreakpoints();
+      // DESNOTE(jbarber, 2026-07-22): Reset the entry-stop decision flag so a
+      // future DAP re-init within the same process boot starts fresh -- the
+      // first session of the new DAP lifetime makes the continue/stay-paused
+      // decision again. Without this, a re-init'd DAP would silently skip
+      // MaybeFireEntryStop's continue/pause action because the flag is still
+      // set from the prior lifetime (sessions exited but the process didn't).
+      // Bugbot #67.
+      s_entry_stop_handled.store(false);
     }
     FlushEvents();
   }
@@ -333,6 +353,15 @@ private:
       return;
     (void)command;
     m_entry_stop_sent = true;
+    // DESNOTE(jbarber, 2026-07-22): Only the first session to reach this
+    // point makes the continue/stay-paused decision; later sessions observe
+    // the resulting core State and do nothing. Without this gate, a second
+    // client with stopOnEntry:false would resume the shared core out from
+    // under a first client that was still expecting a paused entry stop.
+    // Bugbot #67.
+    bool expected = false;
+    if (!s_entry_stop_handled.compare_exchange_strong(expected, true))
+      return;
     if (m_stop_on_entry)
     {
       // DESNOTE(jbarber, 2026-07-21): Force the core into Paused before
@@ -1869,12 +1898,36 @@ private:
       RespondError(request.seq, "dolphin_detour", "invalid dolphin_detour arguments");
       return;
     }
-    auto result = m_controller.Detour(arguments->target_address, arguments->detour_address,
-                                      arguments->detour_body);
+    // DESNOTE(jbarber, 2026-07-22): When no detour address is supplied,
+    // allocate ONCE here and pass it down to Detour, mirroring
+    // HandleInjectCode's pre-allocation. The previous form let Detour scan
+    // FindFreeMemory internally, which is functionally equivalent (one scan
+    // either way) but asymmetric with the inject handler and made the
+    // "could rescan between calls" complaint surface. Detour now requires
+    // detour_address when invoked; the scan happens here, before any
+    // WriteMemory, so the response is truthful about feasibility. Bugbot #68.
+    // The size requested is body + 12 (tail branch + 8-byte trampoline), not
+    // just body.size() -- see Detour for the layout.
+    std::optional<u32> resolved_address = arguments->detour_address;
+    if (!resolved_address)
+    {
+      // detour_body is validated % 4 == 0 by ParseDetour; body_size is safe.
+      const u32 detour_size =
+          static_cast<u32>(arguments->detour_body.size()) + 12u;  // body + tail + trampoline
+      auto alloc = m_controller.FindFreeMemory(detour_size);
+      if (!alloc)
+      {
+        RespondError(request.seq, "dolphin_detour", "no free region of that size");
+        return;
+      }
+      resolved_address = *alloc;
+    }
+    auto result =
+        m_controller.Detour(arguments->target_address, resolved_address, arguments->detour_body);
     if (!result)
     {
       RespondError(request.seq, "dolphin_detour",
-                   "detour failed (invalid target or no free memory?)");
+                   "detour failed (invalid target or out-of-range branch?)");
       return;
     }
     picojson::object body;

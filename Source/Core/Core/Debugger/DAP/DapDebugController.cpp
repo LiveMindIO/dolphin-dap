@@ -906,7 +906,6 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
 {
   if (length == 0)
     return;
-  const u32 len32 = static_cast<u32>(length);
   // DESNOTE(jbarber, 2026-07-21): Bounds-check the byte range against u32
   // max before any arithmetic, mirroring WriteMemory / ReadMemory. The
   // previous form computed `end_addr = address + (u32)length` which silently
@@ -917,10 +916,19 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
   // told the write succeeded but we can't safely flush the iCache for the
   // tail; rejecting the whole write at this layer would be more disruptive
   // than the wrap, and WriteMemory already validates the wrap for the
-  // actual byte writes themselves). Off-by-one fix: use (len32 - 1) >
-  // (UINT32_MAX - address) so a 1-byte invalidate at 0xFFFFFFFF is accepted.
-  if (len32 - 1u > std::numeric_limits<u32>::max() - address)
+  // actual byte writes themselves).
+  // DESNOTE(jbarber, 2026-07-22): Use last_byte (inclusive) and iterate
+  // cachelines with `!=` so a 1-byte invalidate at 0xFFFFFFFF works: the
+  // previous `(end_addr + 31) & ~31` form computed `end_line = 0` when
+  // end_addr wrapped past u32 max, producing `start_line (0xFFFFFFE0) <
+  // end_line (0)` == false and skipping the loop entirely. The inclusive
+  // form: start_line, then increment-by-32 until we hit end_line_inclusive,
+  // then one final invalidate on end_line_inclusive. Loop never wraps
+  // because we already verified the range fits in u32. Bugbot #66.
+  const u64 last_byte_64 = static_cast<u64>(address) + static_cast<u64>(length) - 1;
+  if (last_byte_64 > static_cast<u64>(std::numeric_limits<u32>::max()))
     return;
+  const u32 last_byte = static_cast<u32>(last_byte_64);
   Core::CPUThreadGuard guard(m_system);
   auto& ppc_state = m_system.GetPPCState();
   auto& memory = m_system.GetMemory();
@@ -928,11 +936,14 @@ void DapDebugController::InvalidateCodeRange(u32 address, std::size_t length)
   // PPC L1 iCache lines are 32 bytes (CACHE_BLOCK_SIZE * 4). Round the range
   // out to the cacheline boundaries it overlaps and walk every line through
   // the icbi path -- same loop GeckoCode.cpp uses to flush its installer.
-  const u32 end_addr = address + len32;
   const u32 start_line = address & ~u32{31u};
-  const u32 end_line = (end_addr + 31u) & ~u32{31u};
-  for (u32 line = start_line; line < end_line; line += 32)
+  const u32 end_line_inclusive = last_byte & ~u32{31u};
+  for (u32 line = start_line; line != end_line_inclusive; line += 32)
     ppc_state.iCache.Invalidate(memory, jit_interface, line);
+  // Final iteration for the last cacheline. Always invoked (handles the
+  // start_line == end_line_inclusive single-line case as well as the
+  // post-loop case).
+  ppc_state.iCache.Invalidate(memory, jit_interface, end_line_inclusive);
 }
 
 std::optional<u32> DapDebugController::FindFreeMemory(u32 count)
@@ -1015,7 +1026,7 @@ u32 DapDebugController::InjectCode(std::optional<u32> address, std::vector<u8> c
 
 std::optional<DapDebugController::DetourResult>
 DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address,
-                            std::vector<u8> detour_body)
+                           std::vector<u8> detour_body)
 {
   if (detour_body.empty() || detour_body.size() % 4u != 0u)
     return std::nullopt;
@@ -1028,10 +1039,14 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
 
   // Region layout: [detour body][b trampoline][trampoline: original + b target+4]
   const u32 body_size = static_cast<u32>(detour_body.size());
-  const u32 detour_size = body_size + 12u;  // body + tail branch + 8-byte trampoline
+  // DESNOTE(jbarber, 2026-07-22): HandleDetour now pre-allocates the cave
+  // and passes a non-nullopt detour_address through; the internal
+  // FindFreeMemory fallback here only fires for in-process callers (tests)
+  // that pass nullopt. Bugbot #68.
   u32 detour_addr = detour_address.value_or(0);
   if (!detour_address)
   {
+    const u32 detour_size = body_size + 12u;  // body + tail branch + 8-byte trampoline
     auto alloc = FindFreeMemory(detour_size);
     if (!alloc)
       return std::nullopt;
