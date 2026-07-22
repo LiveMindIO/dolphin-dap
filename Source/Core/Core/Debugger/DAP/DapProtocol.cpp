@@ -99,10 +99,19 @@ std::optional<ReadMemoryArguments> ParseReadMemory(const picojson::object& argum
   if (!address || !count)
     return std::nullopt;
 
+  // DESNOTE(jbarber, 2026-07-22): Cap `count` at 1 MiB (1048576 bytes) so a
+  // pathological client can't request a multi-GB read that would exhaust
+  // memory on the session thread (ReadMemory reserves `count` bytes in a
+  // std::vector and iterates them under CPUThreadGuard). 1 MiB is generous
+  // — typical debug reads are <1 KiB, and clients paging through larger
+  // regions can make repeated requests. Mirrors the instructionCount cap on
+  // `disassemble` (65536). Bugbot #58.
+  constexpr u32 kMaxReadMemoryBytes = 1u << 20;  // 1 MiB
+
   ReadMemoryArguments result;
   result.address = *address;
   result.offset = ReadNumericFromJson<s64>(arguments, "offset").value_or(0);
-  result.count = *count;
+  result.count = std::min(*count, kMaxReadMemoryBytes);
   return result;
 }
 

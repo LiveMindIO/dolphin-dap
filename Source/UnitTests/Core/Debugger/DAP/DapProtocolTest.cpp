@@ -110,6 +110,55 @@ TEST(DapProtocol, ParseReadMemoryRejectsMissingCount)
   EXPECT_FALSE(Protocol::ParseReadMemory(args).has_value());
 }
 
+TEST(DapProtocol, ParseReadMemoryCapsOversizedCount)
+{
+  // DESNOTE(jbarber, 2026-07-22): ParseReadMemory caps `count` at 1 MiB so
+  // a pathological client can't request a multi-GB read that would exhaust
+  // memory on the session thread. Bugbot #58. A request for UINT32_MAX
+  // bytes should silently cap to 1 MiB (the client gets back what it asked
+  // for in shape, just bounded in size).
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference":"0x80003100", "count": 4294967295})");
+  const auto read = Protocol::ParseReadMemory(args);
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->address, 0x80003100u);
+  constexpr u32 kExpectedCap = 1u << 20;  // 1 MiB
+  EXPECT_EQ(read->count, kExpectedCap);
+}
+
+TEST(DapProtocol, ParseReadMemoryPassesThroughUnderCap)
+{
+  // A reasonable count well under the cap passes through unchanged.
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference":"0x80003100", "count": 4096})");
+  const auto read = Protocol::ParseReadMemory(args);
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->count, 4096u);
+}
+
+TEST(DapProtocol, ParseReadMemoryCapsAtExactBoundary)
+{
+  // The cap is inclusive: a request for exactly 1 MiB passes through
+  // unchanged (1 MiB is acceptable; 1 MiB + 1 byte caps down to 1 MiB).
+  constexpr u32 kCap = 1u << 20;
+  {
+    const std::string json =
+        R"({"memoryReference":"0x80003100", "count": )" + std::to_string(kCap) + "}";
+    const auto args = ParseObjectOrDie(json);
+    const auto read = Protocol::ParseReadMemory(args);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read->count, kCap);
+  }
+  {
+    const std::string json =
+        R"({"memoryReference":"0x80003100", "count": )" + std::to_string(kCap + 1) + "}";
+    const auto args = ParseObjectOrDie(json);
+    const auto read = Protocol::ParseReadMemory(args);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(read->count, kCap);
+  }
+}
+
 TEST(DapProtocol, ParseWriteMemoryDecodesData)
 {
   // "TWFu" decodes to "Man".

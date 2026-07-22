@@ -139,6 +139,19 @@ picojson::object MakeVariable(std::string_view name, u32 value)
   return variable;
 }
 
+// DESNOTE(jbarber, 2026-07-22): DAP supports multiple simultaneous client
+// sessions on the same core (see DAP.cpp AcceptLoop). Dolphin has one global
+// PPC BreakPoints / MemChecks store, so the teardown path that clears
+// debugger state on disconnect must NOT clobber breakpoints still in use by
+// other connected sessions. This counter is incremented when a Session
+// enters its Run loop and decremented when it exits; only the session that
+// observes the count reach zero (the last one out) calls ClearBreakpoints.
+// Front-loads the #57 fix (no stale state on exit) over the naive "wipe on
+// every disconnect" form that bugbot #59 flagged. Concurrent clients
+// installing breakpoints still clobber each other (one global store) -- that
+// is a documented architectural limitation in Tools/dap/README.md.
+std::atomic<int> s_active_session_count{0};
+
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
@@ -186,6 +199,16 @@ public:
   {
     if (!RunHandshake())
       return;
+
+    // DESNOTE(jbarber, 2026-07-22): Count this session so the teardown path
+    // knows whether other clients are still connected. Only the LAST session
+    // to exit clears the global breakpoint/memcheck stores -- otherwise a
+    // disconnecting client would wipe breakpoints still in use by a live
+    // session. Bugbot #59. Increment here (post-handshake) and decrement at
+    // every exit from this point. The only exit is the end of Run() (the
+    // main loop only returns on socket close or `disconnect`); if a future
+    // edit adds an early return, the decrement must precede it.
+    s_active_session_count.fetch_add(1);
 
     // DESNOTE(jbarber, 2026-07-21): Construct the realtime-watch sampler here
     // (not in the ctor) so its dispatch lambda can capture a weak_ptr to this
@@ -238,10 +261,19 @@ public:
     // before the transport/event-queue members are destroyed.
     m_watch_sampler.reset();
     // DESNOTE(jbarber, 2026-07-22): Clear debugger state this session
-    // installed in the global PPC BreakPoints / MemChecks stores. Without
-    // this, a disconnecting client leaves the core halting on stale
-    // breakpoints/watchpoints no DAP client is around to clear. Bugbot #57.
-    m_controller.ClearBreakpoints();
+    // installed in the global PPC BreakPoints / MemChecks stores, but ONLY
+    // if no other session is still connected -- otherwise we'd clobber
+    // breakpoints a live client is still using. Bugbot #59 refines the
+    // original #57 fix to handle the multi-client case. The decrement-
+    // and-test is atomic, so concurrent disconnects each see the correct
+    // count and at most one of them clears. Concurrent clients installing
+    // breakpoints still clobber each other (one global store) -- that is
+    // a documented architectural limitation in Tools/dap/README.md.
+    const bool is_last_session = (s_active_session_count.fetch_sub(1) - 1) == 0;
+    if (is_last_session)
+    {
+      m_controller.ClearBreakpoints();
+    }
     FlushEvents();
   }
 
