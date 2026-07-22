@@ -1,14 +1,13 @@
-# Dolphin - A GameCube and Wii Emulator
+## Vibecoded Fork. Be Warned.
 
-[Homepage](https://dolphin-emu.org/) | [Project Site](https://github.com/dolphin-emu/dolphin) | [Buildbot](https://dolphin.ci/) | [Forums](https://forums.dolphin-emu.org/) | [Wiki](https://wiki.dolphin-emu.org/) | [GitHub Wiki](https://github.com/dolphin-emu/dolphin/wiki) | [Issue Tracker](https://bugs.dolphin-emu.org/projects/emulator/issues) | [Coding Style](https://github.com/dolphin-emu/dolphin/blob/master/Contributing.md) | [Transifex Page](https://app.transifex.com/dolphinemu/dolphin-emu/dashboard/) | [Analytics](https://mon.dolphin-emu.org/)
+I'm a big vibecoding hater, but I can't deny that it works well for non-critical things. This would've never existed if
+not for vibecoding and it is objectively useful for my needs. I'm sure there are unhandled edgecases and bugs
+all over the place.
 
-Dolphin is an emulator for running GameCube and Wii games on Windows,
-Linux, macOS, and recent Android devices. It's licensed under the terms
-of the GNU General Public License, version 2 or later (GPLv2+).
-
-Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
-
----
+This DAP server does what I need it to do, and not much else. The code here is very likely not up to the standards
+that the dolphin upstream would like, so don't ask me to upstream it.  People who want a DAP server in dolphin can just
+use what's here. If any dedicated individual wants to add the functionality to official dolphin without vibecoding the
+whole thing, I would love it.
 
 ## Debug Adapter Protocol (DAP) Server
 
@@ -21,7 +20,21 @@ For build/run instructions, tests, known limitations, the operations summary,
 and per-operation request/response payload reference, see
 [`Tools/dap/`](Tools/dap/).
 
+
 ---
+
+# Dolphin - A GameCube and Wii Emulator
+
+[Homepage](https://dolphin-emu.org/) | [Project Site](https://github.com/dolphin-emu/dolphin) | [Buildbot](https://dolphin.ci/) | [Forums](https://forums.dolphin-emu.org/) | [Wiki](https://wiki.dolphin-emu.org/) | [GitHub Wiki](https://github.com/dolphin-emu/dolphin/wiki) | [Issue Tracker](https://bugs.dolphin-emu.org/projects/emulator/issues) | [Coding Style](https://github.com/dolphin-emu/dolphin/blob/master/Contributing.md) | [Transifex Page](https://app.transifex.com/dolphinemu/dolphin-emu/dashboard/) | [Analytics](https://mon.dolphin-emu.org/)
+
+Dolphin is an emulator for running GameCube and Wii games on Windows,
+Linux, macOS, and recent Android devices. It's licensed under the terms
+of the GNU General Public License, version 2 or later (GPLv2+).
+
+Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
+
+---
+
 
 ## System Requirements
 
@@ -69,10 +82,10 @@ The "Debug" solution configuration is significantly slower, more verbose and les
 
 ## Building for Linux and macOS
 
-Dolphin requires [CMake](https://cmake.org/) for systems other than Windows. 
+Dolphin requires [CMake](https://cmake.org/) for systems other than Windows.
 You need a recent version of GCC or Clang with decent c++20 support. CMake will
 inform you if your compiler is too old.
-Many libraries are bundled with Dolphin and used if they're not installed on 
+Many libraries are bundled with Dolphin and used if they're not installed on
 your system. CMake will inform you if a bundled library is used or if you need
 to install any missing packages yourself. You may refer to the [wiki](https://github.com/dolphin-emu/dolphin/wiki/Building-for-Linux) for more information.
 
@@ -83,7 +96,7 @@ git submodule update --init --recursive
 
 ### macOS Build Steps:
 
-A binary supporting a single architecture can be built using the following steps: 
+A binary supporting a single architecture can be built using the following steps:
 
 1. `mkdir build`
 2. `cd build`
@@ -101,8 +114,8 @@ application bundle using the following steps:
 4. Universal binaries will be available in the `universal` folder
 
 Doing this is more complex as it requires installation of library dependencies for both x64 and ARM (or universal library
-equivalents) and may require specifying additional arguments to point to relevant library locations. 
-Execute BuildMacOSUniversalBinary.py --help for more details.  
+equivalents) and may require specifying additional arguments to point to relevant library locations.
+Execute BuildMacOSUniversalBinary.py --help for more details.
 
 ### Linux Global Build Steps:
 
