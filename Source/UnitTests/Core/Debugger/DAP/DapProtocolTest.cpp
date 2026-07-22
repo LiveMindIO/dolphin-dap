@@ -200,6 +200,36 @@ TEST(DapProtocol, ParseWriteMemoryRejectsMissingData)
   EXPECT_FALSE(Protocol::ParseWriteMemory(args).has_value());
 }
 
+TEST(DapProtocol, ParseWriteMemoryCapsOversizedPayload)
+{
+  // DESNOTE(jbarber, 2026-07-22): Base64-decoded payload is capped at 1 MiB so
+  // a pathological client can't ship a multi-GB body that decodes into a
+  // multi-GB allocation on the session thread. Bugbot #60. Truncation is
+  // silent (the write partially applies; client can split oversized writes).
+  constexpr u32 kCap = 1u << 20;  // 1 MiB
+  std::vector<u8> raw(kCap + 64, 0xAB);
+  std::string b64 = Json::Base64Encode(raw);
+  const std::string json = R"({"memoryReference":"0x80003100", "data":")" + b64 + R"("})";
+  const auto args = ParseObjectOrDie(json);
+  const auto write = Protocol::ParseWriteMemory(args);
+  ASSERT_TRUE(write.has_value());
+  EXPECT_EQ(write->data.size(), static_cast<std::size_t>(kCap));
+  EXPECT_EQ(write->data.front(), 0xAB);
+}
+
+TEST(DapProtocol, ParseWriteMemoryPassesThroughUnderCap)
+{
+  // A small payload (well under 1 MiB) passes through unchanged.
+  std::vector<u8> raw(256, 0x42);
+  std::string b64 = Json::Base64Encode(raw);
+  const std::string json = R"({"memoryReference":"0x80003100", "data":")" + b64 + R"("})";
+  const auto args = ParseObjectOrDie(json);
+  const auto write = Protocol::ParseWriteMemory(args);
+  ASSERT_TRUE(write.has_value());
+  EXPECT_EQ(write->data.size(), 256u);
+  EXPECT_EQ(write->data.front(), 0x42);
+}
+
 TEST(DapProtocol, ParseDisassembleDefaults)
 {
   const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100"})");

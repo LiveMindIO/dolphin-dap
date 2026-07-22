@@ -11,11 +11,42 @@
 #include "Core/Core.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/Memmap.h"
+#include "Core/PowerPC/JitInterface.h"
+#include "Core/PowerPC/PPCCache.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "VideoCommon/VideoEvents.h"
 
 namespace DAP
 {
+namespace
+{
+// DESNOTE(jbarber, 2026-07-22): Mirrors DapDebugController::InvalidateCodeRange.
+// Freeze back-writes go through AddressSpace::WriteU8 -> MMU::HostWrite, which
+// does NOT fire icbi / erase JIT blocks. If the frozen region spans code (a
+// client pinning a code patch in place to defeat self-modifying code, or
+// freezing a region that just happens to be executable), the L1 iCache and JIT
+// block cache would keep serving stale instructions. Re-running the icbi loop
+// on every back-write keeps the freeze honest at field rate. Bugbot #61.
+// The body is a 4-line cacheline walk (PPC L1 lines are 32 bytes); duplicating
+// it here keeps RealtimeWatch decoupled from DapDebugController.
+void InvalidateCodeRange(Core::System& system, u32 address, u32 length)
+{
+  if (length == 0)
+    return;
+  if (length - 1u > std::numeric_limits<u32>::max() - address)
+    return;
+  auto& ppc_state = system.GetPPCState();
+  auto& memory = system.GetMemory();
+  auto& jit_interface = system.GetJitInterface();
+  const u32 end_addr = address + length;
+  const u32 start_line = address & ~u32{31u};
+  const u32 end_line = (end_addr + 31u) & ~u32{31u};
+  for (u32 line = start_line; line < end_line; line += 32)
+    ppc_state.iCache.Invalidate(memory, jit_interface, line);
+}
+}  // namespace
+
 RealtimeWatchSampler::RealtimeWatchSampler(Core::System& system, DispatchCallback dispatch)
     : m_system(system), m_dispatch(std::move(dispatch))
 {
@@ -150,6 +181,12 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   // routes through MMU::HostWrite which bypasses Memcheck (the freeze back-
   // write is not an emulated watchpoint trap). Done under CPUThreadGuard so
   // the writes are atomic with respect to the stepping CPU.
+  // DESNOTE(jbarber, 2026-07-22): Invalidate the iCache/JIT block cache over
+  // the written range so a frozen code region (a pinned patch or any
+  // executable bytes) doesn't leave the interpreter/JIT fetching stale
+  // instructions. Mirrors DapDebugController::WriteMemory's post-write
+  // flush. Bugbot #61.
+  u32 frozen_written = 0;
   if (it->count > 0)
   {
     AddressSpace::Accessors* accessors =
@@ -161,8 +198,11 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
       if (!accessors->IsValidAddress(guard, addr))
         break;
       accessors->WriteU8(guard, addr, frozen[i]);
+      ++frozen_written;
     }
   }
+  if (frozen_written > 0)
+    InvalidateCodeRange(m_system, it->address, frozen_written);
   return true;
 }
 
@@ -253,6 +293,15 @@ void RealtimeWatchSampler::Tick()
           accessors->WriteU8(guard, addr, frozen[i]);
           cur[i] = frozen[i];
         }
+        // DESNOTE(jbarber, 2026-07-22): Invalidate the iCache/JIT block cache
+        // over the frozen range so a frozen code region stays in sync -- the
+        // write-back above went through MMU::HostWrite (no icbi), so without
+        // this flush the interpreter/JIT would keep executing stale bytes for
+        // up to one field between back-writes. Over-invalidation is safe and
+        // cheap (32-byte cachelines); the bytes that were skipped (already
+        // matching) didn't change and re-flushing their lines is a no-op.
+        // Bugbot #61.
+        InvalidateCodeRange(m_system, sub.address, frozen_bytes);
         // Keep last_seen in lockstep with the restored prefix so a stable
         // value doesn't keep triggering the write-back path.
         std::memcpy(sub.last_seen.data(), frozen, frozen_bytes);

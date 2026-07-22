@@ -126,11 +126,24 @@ std::optional<WriteMemoryArguments> ParseWriteMemory(const picojson::object& arg
   if (!decoded)
     return std::nullopt;
 
+  // DESNOTE(jbarber, 2026-07-22): Cap the decoded payload at 1 MiB so a
+  // pathological client can't ship a multi-GB base64 body that decodes into
+  // a multi-GB allocation on the session thread. Mirrors the kMaxReadMemoryBytes
+  // cap on ParseReadMemory (Bugbot #58) and the 65536 cap on disassemble.
+  // Truncate silently rather than rejecting: a write that exceeds the cap
+  // still partially applies (the client can split oversized writes itself);
+  // a hard reject would discard bytes the client reasonably expected to
+  // land. Bugbot #60.
+  constexpr std::size_t kMaxWriteMemoryBytes = 1u << 20;  // 1 MiB
+  std::vector<u8> capped = *decoded;
+  if (capped.size() > kMaxWriteMemoryBytes)
+    capped.resize(kMaxWriteMemoryBytes);
+
   WriteMemoryArguments result;
   result.address = *address;
   result.offset = ReadNumericFromJson<s64>(arguments, "offset").value_or(0);
   result.allow_partial = ReadBoolFromJson(arguments, "allowPartial").value_or(false);
-  result.data = *decoded;
+  result.data = std::move(capped);
   return result;
 }
 
