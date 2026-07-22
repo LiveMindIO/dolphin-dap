@@ -502,3 +502,44 @@ behind).
 encodes a 24-bit signed displacement (±32 MiB); a detour layout placing the
 patch site farther than that from its target is rejected outright rather than
 silently encoding the wrong branch.
+
+### What the detour body can do
+
+The detour body is **raw PPC machine code**. It runs in the same register
+context as the patched instruction (r0–r31, cr, xer, lr, ctr, pc) and has full
+read/write access to PowerPC address space; the DAP server doesn't inspect
+or constrain it. What your body can do depends on what you do at the end:
+
+- **Inspect inputs and continue.** If you patch the first instruction of a
+  function, the body runs at function entry: arguments sit in `r3`–`r10`
+  per the PPC calling convention, the stack pointer is `r1`, the return
+  address is in `lr`. The body can read them, write them, log them to
+  memory, or pass them to another function. As long as it ends with
+  `b trampolineAddress` (or falls through to the implicit appended branch),
+  the trampoline replays the patched-out instruction and branches back to
+  `targetAddress + 4` so the original function body runs normally with
+  whatever register state the body left behind. Use this to observe inputs
+  or to mutate them before the function sees them.
+- **Replace the function entirely.** Write your body so its final instruction
+  is a branch (e.g. `b your_return_path`) or `blr` to return to the caller,
+  instead of `b trampolineAddress`. Control never reaches the appended
+  tail branch or the trampoline, so the original instruction is skipped and
+  the function's body never executes. Common pattern for "make a function
+  do something else altogether": set `r3` (the typical return value register)
+  to your desired value as the last thing the body does, then `blr`.
+- **Chain to other DAP commands.** A detour body can call any code in
+  addressable memory — including previously-injected code from
+  [`dolphin_injectCode`](#dolphin_injectcode) or another detour's body — so
+  you can compose: inject a helper routine, then install a detour whose
+  body calls it. Make sure to follow the PPC ABI if your body calls other
+  functions: save `lr`, set up a stack frame on `r1`, preserve non-volatile
+  registers (`r13`–`r31`, `cr2`–`cr4`, etc.) if appropriate.
+
+The detour mechanism itself is **call-transparent and minimal**. The server
+patches exactly four bytes (`b detour_addr`) at the target; the trampoline
+preserves the patched instruction's observable effect; everything else — what
+the body reads, writes, or calls — is up to the PPC code you supply. The body
+**must not** assume the patched memory layout stays alive across a `restart`
+or another `dolphin_detour` call that touches the same regions; the patched
+bytes don't survive PPC reset, and the rollback on a failed detour only
+restores regions touched by *that* detour.
