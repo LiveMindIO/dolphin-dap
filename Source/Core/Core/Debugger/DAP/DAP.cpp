@@ -285,7 +285,7 @@ void Init(u32 port)
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(static_cast<u16>(port));
-  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
   InitGeneric(PF_INET, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
   // DESNOTE(jbarber, 2026-07-21): InitGeneric sets s_active only after a
