@@ -683,6 +683,20 @@ private:
       // from, mirroring how VS Code's own client pauses before stepping.
       if (!m_system.GetCPU().IsStepping())
         m_controller.Pause();
+      // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason from the
+      // pre-step Pause above. That Pause fires the state hook which stashes
+      // GetStopInfo at the pre-step PC -- and if the pre-step PC has a code
+      // breakpoint (the user installed one AT the current instruction), the
+      // stash is CodeBreakpoint. After Step advances the PC, the stale
+      // CodeBreakpoint stash would misclassify this stop as a breakpoint hit
+      // instead of a step. Clearing here leaves SendClassifiedStoppedEvent
+      // with an empty stash, so it falls back to a fresh GetStopInfo at
+      // the post-step PC and classifies correctly (CodeBreakpoint only if
+      // the NEXT instruction has one, Step otherwise).
+      {
+        std::lock_guard lock(m_stop_info_mutex);
+        m_pending_stop_info.reset();
+      }
       const StepOverResult result = m_controller.StepOver();
       Respond(request->seq, command, picojson::object{});
       if (result == StepOverResult::Stepped)
@@ -717,6 +731,16 @@ private:
     {
       if (!m_system.GetCPU().IsStepping())
         m_controller.Pause();
+      // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason from the
+      // pre-step Pause above -- a CodeBreakpoint stash at the pre-step PC
+      // would misclassify this stop as a breakpoint hit instead of a step
+      // once Step advances the PC. Clearing leaves SendClassifiedStoppedEvent
+      // with an empty stash so it falls back to a fresh GetStopInfo at the
+      // post-step PC. (Same rationale as the `next` handler above.)
+      {
+        std::lock_guard lock(m_stop_info_mutex);
+        m_pending_stop_info.reset();
+      }
       // DESNOTE(jbarber, 2026-07-21): StepInto may return false when the
       // CPU thread can't acknowledge the StepOpcode signal within its 2s
       // wait (e.g. the emulator is mid-block or under load). Emitting a
