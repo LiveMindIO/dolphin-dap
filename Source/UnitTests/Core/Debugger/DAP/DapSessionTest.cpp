@@ -559,6 +559,70 @@ TEST_F(DapSessionTest, ReFreezeSameWatchDoesNotLeakMemcheck)
   (void)client.Receive();
 }
 
+// DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints wipes freeze memchecks from
+// the global store (memchecks.Clear). The session must unfreeze its watches
+// in the sampler to avoid a desync (sampler thinks it's frozen but MMU
+// suppression is gone). After SetDataBreakpoints, the freeze memcheck should
+// be gone and unfreeze should be a no-op (already unfrozen). Bugbot #81.
+TEST_F(DapSessionTest, SetDataBreakpointsClearsFreezeAndSampler)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  // Install a freeze.
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_freeze",
+    "arguments": {"memoryReference": "0x00004000", "count": 4,
+                  "data": "AAAAAA=="}
+  })");
+  const auto freeze = client.Receive();
+  ASSERT_TRUE(freeze.has_value());
+  ASSERT_TRUE(freeze->at("success").get<bool>());
+  EXPECT_TRUE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  // SetDataBreakpoints wipes the freeze memcheck and clears sampler freeze.
+  client.Send(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "0x00005000", "accessType": "write"}]
+    }
+  })");
+  const auto dbp = client.Receive();
+  ASSERT_TRUE(dbp.has_value());
+  ASSERT_TRUE(dbp->at("success").get<bool>());
+  // The data breakpoint should be installed.
+  EXPECT_NE(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(0x00005000),
+            nullptr);
+  // The freeze memcheck at 0x4000 should be gone.
+  EXPECT_EQ(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(0x00004000),
+            nullptr);
+
+  // Unfreeze should still succeed (idempotent — sampler was already unfrozen).
+  const double watch_id =
+      freeze->at("body").get<picojson::object>().at("watchId").get<double>();
+  client.Send(std::string(R"({
+    "seq": 5,
+    "type": "request",
+    "command": "dolphin_unfreeze",
+    "arguments": {"watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) + R"( }
+  })");
+  const auto unfreeze = client.Receive();
+  ASSERT_TRUE(unfreeze.has_value());
+  ASSERT_TRUE(unfreeze->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
 // DESNOTE(jbarber, 2026-07-26): Disconnecting a session with an active freeze
 // must remove the freeze memcheck via the session's Run() teardown path
 // (ClearFreezes for last session, per-session RemoveFreeze for non-last).

@@ -1487,6 +1487,19 @@ private:
 
     m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
 
+    // DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
+    // which wipes all freeze memchecks from the global store (collateral
+    // damage of the single global memcheck store). Clear this session's
+    // freeze tracking so the sampler doesn't desync — without this, the
+    // sampler's frozen_value stays set (Tick keeps restoring via HostWrite)
+    // while the MMU write suppression is gone (CPU writes reach RAM for up
+    // to ~16ms before Tick restores). Unfreezing in the sampler clears
+    // frozen_value so Tick dispatches change events normally again, matching
+    // the now-absent MMU memcheck. Bugbot #81.
+    for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
+      m_watch_sampler->Unfreeze(watch_id);
+    m_watch_to_freeze.clear();
+
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setDataBreakpoints", std::move(body));
