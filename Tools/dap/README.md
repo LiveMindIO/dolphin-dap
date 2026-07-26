@@ -216,11 +216,15 @@ cmake --build build --target tests
   the session loop's 50 ms poll, so a change is flushed to the socket within
   ~50 ms of being observed. Burst changes within a single frame are coalesced
   to one event per region.
-- **Freeze is field-rate, not atomic.** `dolphin_freeze` writes the frozen
-  value back at the next `vi_end_field_event` after the game drifts. For up to
-  one field (~16 ms NTSC) the game's value is visible in memory before the
-  restore. The canonical use cases (health/ammo/coins/timer) tolerate this
-  window; for atomicity you'd need an MMU write-hook, which isn't implemented.
+- **Freeze uses MMU write suppression + field-rate DMA fallback.**
+  `dolphin_freeze` installs an `is_freeze` memcheck on the watched range —
+  emulated CPU stores (`MMU::Write<T>`) that hit the range are silently
+  dropped before reaching RAM, so the game's own writes are perfectly
+  unobservable (no ~16 ms window). A field-rate `Tick()` re-applies the canon
+  as a fallback for DMA/peripheral writes that bypass `MMU::Write` (PI/DVD
+  transfers, `Memory::CopyToEmu`, etc.), where the ~16 ms window is DMA-only.
+  HostWrite (debugger/cheat writes, including DAP `WriteMemory`) bypasses the
+  memcheck by design, so the DAP client can update the frozen value itself.
   Freeze is a layer on top of a watch subscription — clearing the freeze via
   `dolphin_unfreeze` leaves the watch running and dispatching events normally.
 

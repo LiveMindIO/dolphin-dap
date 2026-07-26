@@ -209,6 +209,19 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   return true;
 }
 
+std::optional<RealtimeWatchSampler::SubscriptionInfo>
+RealtimeWatchSampler::GetSubscriptionInfo(int watch_id)
+{
+  std::lock_guard lock(m_mutex);
+  const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+                               [watch_id](const Subscription& sub) {
+                                 return sub.watch_id == watch_id;
+                               });
+  if (it == m_subscriptions.end())
+    return std::nullopt;
+  return SubscriptionInfo{.address = it->address, .count = it->count};
+}
+
 bool RealtimeWatchSampler::Unfreeze(int watch_id)
 {
   std::lock_guard lock(m_mutex);
@@ -259,6 +272,14 @@ void RealtimeWatchSampler::Tick()
       // Frozen path: if the cell drifts from the canon, write the canon back
       // and suppress the change event. The dispatch callback is never called
       // for a frozen subscription -- the freeze itself is the response.
+      // DESNOTE(jbarber, 2026-07-22): With MMU write suppression active
+      // (DapDebugController::InstallFreeze installed an `is_freeze` memcheck),
+      // CPU stores to this range are dropped before reaching RAM. Drift can
+      // only come from DMA/peripheral writes that bypass MMU::Write (PI/DVD
+      // transfers, Memory::CopyToEmu, etc.). The memcmp is cheap and ensures
+      // we only write-back + invalidate iCache when there's real drift,
+      // preserving bytes the DAP client may have set via HostWrite (which
+      // also bypasses Memcheck).
       if (sub.frozen_value)
       {
         u8* cur = sub.current.data();

@@ -1926,4 +1926,129 @@ TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
   const std::vector<u8> read = controller.ReadMemory(INJECT_BASE, bytes.size());
   EXPECT_EQ(read, bytes);
 }
+
+// DESNOTE(jbarber, 2026-07-22): Tests for MMU-level write suppression via
+// `is_freeze` TMemCheck. When a freeze is installed, emulated CPU stores
+// (through MMU::Write<T>) to the frozen range are silently dropped — the
+// frozen value persists in RAM. HostWrite (debugger/cheat writes) is NOT
+// suppressed because it bypasses the Memcheck path. The field-rate Tick
+// in RealtimeWatchSampler remains as a fallback for DMA writes.
+
+TEST_F(DapControllerTest, FreezeSuppressesEmulatedCpuWrite)
+{
+  // The canonical "freeze health at 99" scenario: install a freeze, then the
+  // game writes a different value via an emulated store (MMU::Write). The
+  // store is suppressed — RAM stays at the frozen value.
+  DAP::DapDebugController controller(System());
+  WriteRam(TEST_ADDRESS, {0x00, 0x00, 0x00, 0x00});
+  const std::vector<u8> frozen = {0xDE, 0xAD, 0xBE, 0xEF};
+  const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
+  ASSERT_NE(freeze_id, 0u);
+
+  // RAM now holds the frozen value (InstallFreeze writes it via HostWrite).
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), frozen);
+
+  // Emulated CPU store: the game writes 0x11223344 to TEST_ADDRESS.
+  // This goes through MMU::Write<u32>, which hits the freeze memcheck and
+  // returns early (WriteToHardware is never called).
+  {
+    Core::CPUThreadGuard guard(System());
+    System().GetMMU().Write<u32>(0x11223344, TEST_ADDRESS);
+  }
+
+  // RAM still holds the frozen value — the game's write was suppressed.
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), frozen);
+
+  controller.RemoveFreeze(freeze_id);
+}
+
+TEST_F(DapControllerTest, FreezeDoesNotSuppressHostWrite)
+{
+  // HostWrite (used by debugger/cheat/DAP WriteMemory) bypasses Memcheck,
+  // so a write via WriteMemory to a frozen address still lands. This lets
+  // the DAP client update the frozen value itself without first unfreezing.
+  DAP::DapDebugController controller(System());
+  WriteRam(TEST_ADDRESS, {0x00, 0x00, 0x00, 0x00});
+  const std::vector<u8> frozen = {0xDE, 0xAD, 0xBE, 0xEF};
+  const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
+  ASSERT_NE(freeze_id, 0u);
+
+  // WriteMemory uses HostWrite under the hood, which bypasses Memcheck.
+  const std::vector<u8> new_value = {0xCA, 0xFE, 0xBA, 0xBE};
+  EXPECT_EQ(controller.WriteMemory(TEST_ADDRESS, std::span<const u8>{new_value}),
+            new_value.size());
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), new_value);
+
+  // After HostWrite, the freeze memcheck is still active — an emulated CPU
+  // store to the same address is still suppressed.
+  {
+    Core::CPUThreadGuard guard(System());
+    System().GetMMU().Write<u32>(0x11223344, TEST_ADDRESS);
+  }
+  // RAM holds the HostWrite value, not the suppressed emulated write.
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), new_value);
+
+  controller.RemoveFreeze(freeze_id);
+}
+
+TEST_F(DapControllerTest, FreezeAllowsReadWriteAfterUnfreeze)
+{
+  // After RemoveFreeze, emulated CPU writes are no longer suppressed.
+  DAP::DapDebugController controller(System());
+  WriteRam(TEST_ADDRESS, {0x00, 0x00, 0x00, 0x00});
+  const std::vector<u8> frozen = {0xDE, 0xAD, 0xBE, 0xEF};
+  const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
+  ASSERT_NE(freeze_id, 0u);
+
+  EXPECT_TRUE(controller.RemoveFreeze(freeze_id));
+
+  // Emulated CPU store now goes through (no freeze memcheck).
+  {
+    Core::CPUThreadGuard guard(System());
+    System().GetMMU().Write<u32>(0x11223344, TEST_ADDRESS);
+  }
+  // The write landed — RAM holds the game's value.
+  const std::vector<u8> written = controller.ReadMemory(TEST_ADDRESS, 4);
+  EXPECT_EQ(written, (std::vector<u8>{0x11, 0x22, 0x33, 0x44}));
+}
+
+TEST_F(DapControllerTest, FreezeRejectsSizeMismatch)
+{
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> frozen = {0xDE, 0xAD, 0xBE};
+  // value.size() < count → rejected.
+  EXPECT_EQ(controller.InstallFreeze(TEST_ADDRESS, 4, frozen), 0u);
+}
+
+TEST_F(DapControllerTest, FreezeRejectsZeroCount)
+{
+  DAP::DapDebugController controller(System());
+  const std::vector<u8> frozen;
+  EXPECT_EQ(controller.InstallFreeze(TEST_ADDRESS, 0, frozen), 0u);
+}
+
+TEST_F(DapControllerTest, ClearFreezesRemovesAllFreezeMemchecks)
+{
+  DAP::DapDebugController controller(System());
+  WriteRam(TEST_ADDRESS, {0x00, 0x00, 0x00, 0x00});
+  WriteRam(TEST_ADDRESS + 0x100, {0x00, 0x00, 0x00, 0x00});
+
+  const std::vector<u8> frozen1 = {0xDE, 0xAD, 0xBE, 0xEF};
+  const std::vector<u8> frozen2 = {0xCA, 0xFE, 0xBA, 0xBE};
+  ASSERT_NE(controller.InstallFreeze(TEST_ADDRESS, 4, frozen1), 0u);
+  ASSERT_NE(controller.InstallFreeze(TEST_ADDRESS + 0x100, 4, frozen2), 0u);
+
+  controller.ClearFreezes();
+
+  // Emulated writes go through after ClearFreezes.
+  {
+    Core::CPUThreadGuard guard(System());
+    System().GetMMU().Write<u32>(0x11223344, TEST_ADDRESS);
+    System().GetMMU().Write<u32>(0x55667788, TEST_ADDRESS + 0x100);
+  }
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4),
+            (std::vector<u8>{0x11, 0x22, 0x33, 0x44}));
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS + 0x100, 4),
+            (std::vector<u8>{0x55, 0x66, 0x77, 0x88}));
+}
 }  // namespace

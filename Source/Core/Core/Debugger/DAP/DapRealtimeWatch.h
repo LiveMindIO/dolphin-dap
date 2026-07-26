@@ -52,11 +52,20 @@ struct RealtimeWatchChange
 //
 // Freeze layer: a subscription may optionally be "frozen" -- when set, Tick()
 // writes the frozen bytes back to memory whenever the region drifts instead of
-// dispatching a change event. The write happens at field rate on the CPU
-// thread, so the restoration is timely but not atomic: the game's write lands
-// for up to one field (~16 ms NTSC) before the next Tick restores it. That's
-// acceptable for the canonical use cases (health/ammo/coins/timer) and is
-// far cheaper than a per-write MMU interceptor would be.
+// dispatching a change event.
+//
+// DESNOTE(jbarber, 2026-07-22): Freeze now uses two layers of defense:
+// 1. MMU-level write suppression: DapDebugController::InstallFreeze installs
+//    a `is_freeze` TMemCheck on the frozen range. MMU::Write<T> checks this
+//    before WriteToHardware and silently drops the store — the game's CPU
+//    writes to the frozen range never reach RAM. CPU writes are perfectly
+//    unobservable.
+// 2. Field-rate Tick fallback: Tick() re-applies the frozen canon on drift.
+//    With layer 1 active, drift only comes from DMA/peripheral writes that
+//    bypass MMU::Write entirely (PI/DVD, Memory::CopyToEmu, etc.). The
+//    ~16ms window is now DMA-only, not CPU.
+// HostWrite (debugger/cheat writes) bypasses Memcheck by design, so DAP's
+// own WriteMemory and the freeze's initial canon write are NOT suppressed.
 class RealtimeWatchSampler
 {
 public:
@@ -85,7 +94,25 @@ public:
   // back to memory and suppresses the change event. `value.size()` must equal
   // the subscription's `count`. Returns false if no such watch_id or size
   // mismatch.
+  //
+  // DESNOTE(jbarber, 2026-07-22): With MMU-level write suppression now active
+  // (via a `is_freeze` TMemCheck installed by DapDebugController::InstallFreeze),
+  // CPU stores to the frozen range are silently dropped — they never reach RAM.
+  // The Tick's drift-detection and write-back path now only fires for DMA /
+  // peripheral writes that bypass MMU::Write entirely. The field-rate Tick
+  // remains as the fallback for those paths; the ~16ms window is now
+  // DMA-only, not CPU. CPU writes are perfectly unobservable.
   bool Freeze(int watch_id, std::vector<u8> value);
+
+  // Returns the (address, count) of a subscription, or nullopt if no such
+  // watch_id. Used by HandleFreeze to install the MMU-level freeze memcheck
+  // via DapDebugController::InstallFreeze.
+  struct SubscriptionInfo
+  {
+    u32 address;
+    u32 count;
+  };
+  std::optional<SubscriptionInfo> GetSubscriptionInfo(int watch_id);
 
   // Clears the freeze layer on an existing subscription; the watch continues
   // to live and dispatch change events normally. Returns true if the watch

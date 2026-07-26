@@ -305,6 +305,10 @@ public:
     if (is_last_session)
     {
       m_controller.ClearBreakpoints();
+      // ClearFreezes is redundant here (ClearBreakpoints wipes all memchecks
+      // including freeze memchecks), but explicit for documentation. The
+      // m_watch_to_freeze map is destroyed with the session.
+      m_controller.ClearFreezes();
       // DESNOTE(jbarber, 2026-07-22): Reset the entry-stop decision flag so a
       // future DAP re-init within the same process boot starts fresh -- the
       // first session of the new DAP lifetime makes the continue/stay-paused
@@ -1779,15 +1783,14 @@ private:
 
   void HandleFreeze(const Protocol::Request& request)
   {
-    // DESNOTE(jbarber, 2026-07-21): `dolphin_freeze` holds a memory region at
-    // a fixed value: the sampler writes the frozen bytes back into memory
-    // every field where it observes drift, instead of dispatching a
-    // `dolphin_memoryChanged` event. Two forms are accepted (see
-    // ParseFreeze): a standalone `memoryReference + count + data` that
-    // creates a new frozen subscription, or `watchId + data` that freezes an
-    // existing watch in place. The former's address/count are echoed back in
-    // the response so a client that doesn't track the subscription can still
-    // correlate freezes with addresses.
+    // DESNOTE(jbarber, 2026-07-22): `dolphin_freeze` now installs an MMU-level
+    // write suppression (via `is_freeze` TMemCheck) in addition to the
+    // existing field-rate Tick fallback. CPU stores to the frozen range are
+    // silently dropped at the MMU layer — the game never sees its own
+    // writes. The field-rate Tick remains as a fallback for DMA/peripheral
+    // writes that bypass MMU::Write. Two forms are accepted (see ParseFreeze):
+    // a standalone `memoryReference + count + data` that creates a new frozen
+    // subscription, or `watchId + data` that freezes an existing watch.
     const std::optional<Protocol::FreezeArguments> arguments =
         Protocol::ParseFreeze(request.arguments);
     if (!arguments)
@@ -1804,25 +1807,27 @@ private:
       // Form 2: freeze an existing watch. Address/count come from the
       // subscription itself; we can't trust anything the client supplied.
       watch_id = *arguments->watch_id;
-      if (!m_watch_sampler->Freeze(watch_id, std::move(arguments->value)))
+      if (!m_watch_sampler->Freeze(watch_id, arguments->value))
       {
         RespondError(request.seq, "dolphin_freeze",
                      "no such watch_id or value size mismatch");
         return;
       }
-      // Reuse the address/count from the subscription so the response can
-      // echo them; for this we lean on ParseFreeze not populating them in
-      // form 2. The response below does not include them in form 2.
+      // Get the subscription's address/count to install the MMU memcheck.
+      auto info = m_watch_sampler->GetSubscriptionInfo(watch_id);
+      if (!info)
+      {
+        // Shouldn't happen — Freeze just succeeded on this watch_id.
+        m_watch_sampler->Unfreeze(watch_id);
+        RespondError(request.seq, "dolphin_freeze", "internal error: subscription vanished");
+        return;
+      }
+      address = info->address;
+      count = info->count;
     }
     else
     {
       // Form 1: standalone freeze. Create the subscription and freeze it.
-      // AddSubscription seeds last_seen with the current memory contents;
-      // Freeze then overwrites last_seen with the frozen canon so the next
-      // Tick() treats the canon as the baseline and only writes back when
-      // the cell drifts. We pre-create the subscription under our own
-      // thread (no Tick contention because we hold no CPU-thread guard
-      // here -- AddSubscription takes its own).
       address = *arguments->address;
       count = *arguments->count;
       watch_id = m_watch_sampler->AddSubscription(address, count);
@@ -1831,15 +1836,34 @@ private:
         RespondError(request.seq, "dolphin_freeze", "rejected address/count (overflow?)");
         return;
       }
-      if (!m_watch_sampler->Freeze(watch_id, std::move(arguments->value)))
+      if (!m_watch_sampler->Freeze(watch_id, arguments->value))
       {
-        // Should be unreachable: AddSubscription just succeeded at this
-        // count, so Freeze's size check must pass. Defensively roll back.
         m_watch_sampler->RemoveSubscription(watch_id);
         RespondError(request.seq, "dolphin_freeze", "internal error: freeze-after-add failed");
         return;
       }
     }
+
+    // Install the MMU-level `is_freeze` memcheck so CPU writes to
+    // [address, address+count) are silently suppressed. The frozen value
+    // is written to RAM by InstallFreeze (via HostWrite, which bypasses
+    // the freeze memcheck). Bugbot-safe: Freeze already wrote the canon
+    // to RAM (in RealtimeWatchSampler::Freeze), and InstallFreeze writes
+    // it again via HostWrite — double-write is harmless.
+    const u32 freeze_id =
+        m_controller.InstallFreeze(address, count, arguments->value);
+    if (freeze_id == 0)
+    {
+      // MMU memcheck install failed — roll back the sampler freeze so
+      // the client gets a truthful error instead of a freeze that only
+      // has field-rate protection (no write suppression).
+      m_watch_sampler->Unfreeze(watch_id);
+      if (!arguments->watch_id)
+        m_watch_sampler->RemoveSubscription(watch_id);
+      RespondError(request.seq, "dolphin_freeze", "failed to install MMU freeze memcheck");
+      return;
+    }
+    m_watch_to_freeze[watch_id] = freeze_id;
 
     picojson::object body;
     body.emplace("watchId", static_cast<double>(watch_id));
@@ -1865,6 +1889,17 @@ private:
     {
       RespondError(request.seq, "dolphin_unfreeze", "no such watch");
       return;
+    }
+
+    // DESNOTE(jbarber, 2026-07-22): Also tear down the MMU-level `is_freeze`
+    // memcheck so CPU writes to the formerly-frozen range are no longer
+    // suppressed. The field-rate Tick (which was the DMA fallback) also
+    // stops restoring the value (Unfreeze cleared `frozen_value`).
+    auto it = m_watch_to_freeze.find(arguments->watch_id);
+    if (it != m_watch_to_freeze.end())
+    {
+      m_controller.RemoveFreeze(it->second);
+      m_watch_to_freeze.erase(it);
     }
 
     Respond(request.seq, "dolphin_unfreeze", picojson::object{});
@@ -2051,6 +2086,11 @@ private:
   Core::System& m_system;
   Common::EventHook m_state_hook;
   std::unique_ptr<RealtimeWatchSampler> m_watch_sampler;
+  // DESNOTE(jbarber, 2026-07-22): Maps watch_id → freeze_id returned by
+  // DapDebugController::InstallFreeze, so HandleUnfreeze can call
+  // RemoveFreeze to tear down the MMU-level `is_freeze` memcheck that
+  // suppresses CPU writes to the frozen range.
+  std::map<int, u32> m_watch_to_freeze;
    std::atomic<bool> m_running{true};
   // DESNOTE(jbarber, 2026-07-22): Set just before this session calls
   // m_controller.Continue(); the state hook consumes it via exchange so

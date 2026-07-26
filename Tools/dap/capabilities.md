@@ -396,12 +396,26 @@ created via `dolphin_realtimeWatch` or `dolphin_freeze`):
 ```
 
 The frozen canon (`data`) must always be exactly `count` bytes long. The
-adapter writes the canon back to memory at each video field where the
-watched region drifts from it; `dolphin_memoryChanged` events are suppressed
-for frozen subscriptions (the freeze *is* the response). The canon is written
-into guest RAM immediately at subscribe/Freeze time (under `CPUThreadGuard`)
-so the freeze takes effect at once even when the core is paused — the
-watched bytes are not left at the game value waiting for the next field.
+adapter enforces the freeze with two layers:
+
+1. **MMU write suppression** — an `is_freeze` memcheck is installed on the
+   watched range. Emulated CPU stores (`MMU::Write<T>`) that hit the range
+   are silently dropped before reaching RAM, so the game's own writes are
+   perfectly unobservable (no ~16 ms window).
+2. **Field-rate Tick fallback** — at each video field, `Tick()` re-applies
+   the canon if the region drifted. With layer 1 active, drift only comes
+   from DMA/peripheral writes that bypass `MMU::Write` (PI/DVD transfers,
+   `Memory::CopyToEmu`, etc.). The ~16 ms window is DMA-only, not CPU.
+
+HostWrite (debugger/cheat writes, including DAP `WriteMemory`) bypasses the
+memcheck by design, so the DAP client can update the frozen value itself
+without first unfreezing. The canon is written into guest RAM immediately at
+subscribe/Freeze time (under `CPUThreadGuard`) via `HostWrite` so the freeze
+takes effect at once even when the core is paused — the watched bytes are
+not left at the game value waiting for the next field.
+
+`dolphin_memoryChanged` events are suppressed for frozen subscriptions (the
+freeze *is* the response).
 
 ## `dolphin_unfreeze`
 

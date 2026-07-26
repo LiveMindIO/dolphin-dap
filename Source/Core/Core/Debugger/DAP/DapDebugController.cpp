@@ -825,6 +825,89 @@ void DapDebugController::ClearBreakpoints()
     m_system.GetPowerPC().GetBreakPoints().Clear();
     m_system.GetPowerPC().GetMemChecks().Clear();
   }
+  // Also clear any freezes this controller installed. ClearFreezes itself
+  // takes the guard and removes memchecks, so call it after the above guard
+  // scope ends to avoid nested guards (ClearFreezes opens its own).
+  // Actually -- ClearBreakpoints just wiped ALL memchecks via .Clear(), so
+  // the freeze memchecks are already gone from the global store. Just clear
+  // our tracking vector so RemoveFreeze/ClearFreezes don't try to remove
+  // already-gone entries. Bugbot-resistent: idempotent.
+  m_freezes.clear();
+}
+
+u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8> value)
+{
+  // DESNOTE(jbarber, 2026-07-22): Installs a `is_freeze` TMemCheck on
+  // [address, address+count) so MMU::Write<T> suppresses CPU stores to that
+  // range. The frozen `value` is written to RAM immediately (via HostWrite,
+  // which bypasses the freeze memcheck — so the freeze back-write itself
+  // isn't suppressed). The RealtimeWatchSampler's field-rate Tick remains as
+  // a fallback for DMA/peripheral writes that bypass MMU::Write.
+  if (count == 0)
+    return 0;
+  if (count - 1u > std::numeric_limits<u32>::max() - address)
+    return 0;
+  if (value.size() < count)
+    return 0;
+
+  const u32 freeze_id = m_next_freeze_id++;
+  m_freezes.push_back({freeze_id, address, count});
+
+  {
+    Core::CPUThreadGuard guard(m_system);
+    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
+    TMemCheck mc;
+    mc.start_address = address;
+    mc.end_address = address + count - 1;
+    mc.is_ranged = true;
+    mc.is_enabled = true;
+    mc.is_freeze = true;
+    // No break/log — freeze memchecks suppress silently.
+    memchecks.Add(std::move(mc));
+
+    // Write the frozen value into RAM so reads return the frozen bytes.
+    // HostWrite bypasses Memcheck (and thus the freeze suppression), so
+    // this write always lands.
+    for (u32 i = 0; i < count; ++i)
+      PowerPC::MMU::HostWrite<u8>(guard, value[i], address + i);
+  }
+
+  // Invalidate iCache/JIT for the range in case it's code.
+  InvalidateCodeRange(address, count);
+
+  return freeze_id;
+}
+
+bool DapDebugController::RemoveFreeze(u32 freeze_id)
+{
+  auto it = std::find_if(m_freezes.begin(), m_freezes.end(),
+                         [freeze_id](const FreezeEntry& e) {
+                           return e.freeze_id == freeze_id;
+                         });
+  if (it == m_freezes.end())
+    return false;
+  {
+    Core::CPUThreadGuard guard(m_system);
+    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
+    // Remove the freeze memcheck matching this address range. MemChecks
+    // doesn't have a RemoveById, so we remove by address.
+    memchecks.Remove(it->address);
+  }
+  m_freezes.erase(it);
+  return true;
+}
+
+void DapDebugController::ClearFreezes()
+{
+  if (m_freezes.empty())
+    return;
+  {
+    Core::CPUThreadGuard guard(m_system);
+    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
+    for (const FreezeEntry& e : m_freezes)
+      memchecks.Remove(e.address);
+  }
+  m_freezes.clear();
 }
 
 std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)

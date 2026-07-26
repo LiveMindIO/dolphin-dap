@@ -189,6 +189,19 @@ public:
   // disconnecting client doesn't leave the emulated core halting on stale
   // debugger state. Safe to call multiple times; no-op if never installed.
   void ClearBreakpoints();
+  // Installs a hardware-level write freeze on [address, address+count) via
+  // a `is_freeze` TMemCheck. The emulated CPU's stores to this range are
+  // silently dropped at the MMU layer (MMU::Write<T> returns before
+  // WriteToHardware). The frozen `value` is written to RAM immediately so
+  // reads return the frozen bytes. A lightweight field-rate Tick in
+  // RealtimeWatchSampler re-applies the canon as a fallback for DMA/peripheral
+  // writes that bypass MMU::Write. Returns a freeze id > 0, or 0 on
+  // rejection (count == 0 or address+count would wrap).
+  u32 InstallFreeze(u32 address, u32 count, std::span<const u8> value);
+  // Removes the freeze with the given id. Returns true on hit.
+  bool RemoveFreeze(u32 freeze_id);
+  // Removes all freezes installed by this controller.
+  void ClearFreezes();
   std::vector<u8> ReadMemory(u32 address, std::size_t size);
   // Writes as many leading bytes of `data` as map to valid addresses and
   // returns the number written; stops at the first invalid address. After
@@ -257,5 +270,21 @@ private:
   Core::System& m_system;
   std::map<std::string, std::vector<CodeBreakpointRequest>> m_source_breakpoints;
   std::vector<CodeBreakpointRequest> m_instruction_breakpoints;
+
+  // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
+  // `is_freeze` TMemCheck in the global MemChecks store (for MMU-level write
+  // suppression + JIT de-opt) and tracks the (address, count, id) here so
+  // RemoveFreeze/ClearFreezes can tear it down. The frozen value itself is
+  // owned by RealtimeWatchSampler (which needs it for the field-rate DMA
+  // fallback); the controller only needs the address+count to install/remove
+  // the memcheck.
+  struct FreezeEntry
+  {
+    u32 freeze_id = 0;
+    u32 address = 0;
+    u32 count = 0;
+  };
+  std::vector<FreezeEntry> m_freezes;
+  u32 m_next_freeze_id = 1;
 };
 }  // namespace DAP

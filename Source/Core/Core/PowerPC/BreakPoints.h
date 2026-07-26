@@ -44,6 +44,17 @@ struct TMemCheck
 
   std::optional<Expression> condition;
 
+  // DESNOTE(jbarber, 2026-07-22): When true, this memcheck represents a DAP
+  // "hard freeze" — writes to the range are silently suppressed (dropped
+  // before WriteToHardware) instead of pausing the CPU. Reads are unaffected
+  // (the frozen value persists in RAM because writes are suppressed).
+  // Piggy-backs on the existing TMemCheck infrastructure (range lookup, JIT
+  // de-optimization via OverlapsMemcheck/DBAT rebuild) so frozen pages are
+  // forced onto the slow MMU::Write<T> path where suppression can fire.
+  // The field-rate Tick in RealtimeWatchSampler remains as a fallback for
+  // DMA/peripheral writes that bypass MMU::Write entirely.
+  bool is_freeze = false;
+
   // returns whether to break
   bool Action(Core::System& system, u64 value, u32 addr, bool write, size_t size, u32 pc);
 };
