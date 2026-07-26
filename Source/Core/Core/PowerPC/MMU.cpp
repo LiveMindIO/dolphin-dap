@@ -599,26 +599,46 @@ std::optional<ReadResult<u32>> MMU::HostTryReadInstruction(const Core::CPUThread
   return std::nullopt;
 }
 
-void MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
+// DESNOTE(jbarber, 2026-07-22): Returns true when the access hits a
+// `is_freeze` memcheck AND this is a write — signals the caller (Write<T>)
+// to suppress the store entirely (skip WriteToHardware). Reads are never
+// suppressed; freeze memchecks on reads are a no-op (the frozen value
+// already persists in RAM because writes are suppressed). Non-freeze
+// memchecks follow the existing pause/log/DSI path and return false (the
+// write proceeds normally; the CPU may pause at the next instruction
+// boundary via EXCEPTION_FAKE_MEMCHECK_HIT, but the store itself is not
+// prevented — same behavior as before this change).
+bool MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
 {
   if (!m_power_pc.GetMemChecks().HasAny())
-    return;
+    return false;
 
   TMemCheck* mc = m_power_pc.GetMemChecks().GetMemCheck(address, size);
   if (mc == nullptr)
-    return;
+    return false;
+
+  // DESNOTE(jbarber, 2026-07-22): Freeze memchecks suppress writes but
+  // never pause the CPU. The IsStepping early-return below is skipped for
+  // freezes — a freeze should hold even while stepping (that's exactly
+  // when the game's own stores should be defeated). The write is dropped
+  // silently; no DSI, no Break(), no num_hits increment (freeze suppression
+  // is not a "hit" in the watchpoint sense). Read accesses to a freeze
+  // memcheck are also a no-op — reads return RAM, which holds the frozen
+  // value because writes are suppressed.
+  if (mc->is_freeze)
+    return write;  // suppress writes, allow reads through
 
   if (m_system.GetCPU().IsStepping())
   {
     // Disable when stepping so that resume works.
-    return;
+    return false;
   }
 
   mc->num_hits++;
 
   const bool pause = mc->Action(m_system, var, address, write, size, m_ppc_state.pc);
   if (!pause)
-    return;
+    return false;
 
   m_system.GetCPU().Break();
 
@@ -633,6 +653,7 @@ void MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
   // It doesn't matter if ReadFromHardware triggers its own DSI because
   // we'll take it after resuming.
   m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+  return false;
 }
 
 template <std::unsigned_integral T>
@@ -695,7 +716,8 @@ template std::optional<ReadResult<u64>> MMU::HostTryRead<u64>(const Core::CPUThr
 template <std::unsigned_integral T>
 void MMU::Write(const Common::MakeAtLeastU32<T> var, const u32 address)
 {
-  Memcheck(address, var, true, sizeof(T));
+  if (Memcheck(address, var, true, sizeof(T)))
+    return;  // write suppressed by freeze memcheck
   WriteToHardware<XCheckTLBFlag::Write>(address, var, sizeof(T));
 }
 template void MMU::Write<u8>(const u32 var, const u32 address);
@@ -704,7 +726,8 @@ template void MMU::Write<u32>(const u32 var, const u32 address);
 template <>
 void MMU::Write<u64>(const u64 var, const u32 address)
 {
-  Memcheck(address, var, true, 8);
+  if (Memcheck(address, var, true, 8))
+    return;  // write suppressed by freeze memcheck
   WriteToHardware<XCheckTLBFlag::Write>(address, static_cast<u32>(var >> 32), 4);
   WriteToHardware<XCheckTLBFlag::Write>(address + sizeof(u32), static_cast<u32>(var), 4);
 }

@@ -62,6 +62,28 @@ add_library(core
   CoreTiming.h
   CPUThreadConfigCallback.cpp
   CPUThreadConfigCallback.h
+  Debugger/DAP/DAP.cpp
+  Debugger/DAP/DAP.h
+  Debugger/DAP/DapDebugController.cpp
+  Debugger/DAP/DapDebugController.h
+  Debugger/DAP/DapFraming.cpp
+  Debugger/DAP/DapFraming.h
+  Debugger/DAP/DapJson.cpp
+  Debugger/DAP/DapJson.h
+  Debugger/DAP/DapProtocol.cpp
+  Debugger/DAP/DapProtocol.h
+  Debugger/DAP/DapRealtimeWatch.cpp
+  Debugger/DAP/DapRealtimeWatch.h
+  Debugger/DAP/DapSession.cpp
+  Debugger/DAP/DapSession.h
+  Debugger/DAP/DapTransport.cpp
+  Debugger/DAP/DapTransport.h
+  Debugger/DWARF/DwarfImport.cpp
+  Debugger/DWARF/DwarfImport.h
+  Debugger/DWARF/DwarfReader.cpp
+  Debugger/DWARF/DwarfReader.h
+  Debugger/Entrypoints/EntrypointsImport.cpp
+  Debugger/Entrypoints/EntrypointsImport.h
   Debugger/BranchWatch.cpp
   Debugger/BranchWatch.h
   Debugger/CodeTrace.cpp

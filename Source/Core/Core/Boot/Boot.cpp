@@ -583,8 +583,17 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
 
       AchievementManager::GetInstance().LoadGame(nullptr);
 
-      SConfig::OnTitleDirectlyBooted(guard);
-
+      // DESNOTE(jbarber, 2026-07-21): The previous order called
+      // OnTitleDirectlyBooted (which imports the configured DwarfElf and
+      // entrypoints sidecars) and then ran ppc_symbol_db.Clear() before
+      // LoadSymbols, silently discarding the sidecar imports. Order is now:
+      // set PC, clear the symbol DB, load the executable's own symbols
+      // (and any .debug DWARF it carries), THEN hand off to
+      // OnTitleDirectlyBooted so the sidecar imports layer on top. The
+      // symbol DB is additive -- OnTitleDirectlyBooted calls
+      // ImportConfiguredDwarfElf / ImportConfiguredEntrypoints without
+      // clearing, and its HLE::Reload re-runs PatchFunctions with all
+      // symbols available.
       ppc_state.pc = executable.reader->GetEntryPoint();
 
       const std::string filename = PathToFileName(executable.path);
@@ -598,6 +607,10 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
         HLE::PatchFunctions(system);
       }
 
+      SConfig::OnTitleDirectlyBooted(guard);
+      // OnTitleDirectlyBooted may have imported sidecar symbols; surface
+      // any change to the host UI. PatchFunctions already ran above and
+      // inside OnTitleDirectlyBooted's HLE::Reload, so symbols are live.
       if (symbols_changed)
         Host_PPCSymbolsChanged();
 

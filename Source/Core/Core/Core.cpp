@@ -66,6 +66,7 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/PatchEngine.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -359,13 +360,15 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     s_state.compare_exchange_strong(expected, State::Running);
   }
 
+
+  bool debugger_enabled = false;
   {
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
     if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
+      debugger_enabled = true;
       GDBStub::InitLocal(gdb_socket.data());
-      CPUSetInitialExecutionState(system, true);
     }
     else
 #endif
@@ -373,14 +376,39 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
       int gdb_port = Config::Get(Config::MAIN_GDB_PORT);
       if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
       {
+        debugger_enabled = true;
         GDBStub::Init(gdb_port);
-        CPUSetInitialExecutionState(system, true);
       }
       else
       {
-        CPUSetInitialExecutionState(system);
+#ifndef _WIN32
+        std::string dap_socket = Config::Get(Config::MAIN_DAP_SOCKET);
+        if (!dap_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
+        {
+          // DESNOTE(jbarber, 2026-07-21): Only mark the debugger as enabled
+          // after the listener is actually bound. InitLocal can fail (e.g.
+          // sun_path overflow, permission, port in use); setting
+          // debugger_enabled=true unconditionally would force
+          // CPUSetInitialExecutionState below to pause the core with no DAP
+          // server to ever resume it, hanging emulation on a bad config.
+          DAP::InitLocal(dap_socket.data());
+          if (DAP::IsActive())
+            debugger_enabled = true;
+        }
+        else
+#endif
+        {
+          int dap_port = Config::Get(Config::MAIN_DAP_PORT);
+          if (dap_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
+          {
+            DAP::Init(dap_port);
+            if (DAP::IsActive())
+              debugger_enabled = true;
+          }
+        }
       }
     }
+    CPUSetInitialExecutionState(system, debugger_enabled);
   }
 
   // Enter CPU run loop. When we leave it - we are done.
@@ -399,6 +427,13 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     GDBStub::Deinit();
     INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "GDB stopped."));
     INFO_LOG_FMT(GDB_STUB, "Killed by CPU shutdown");
+  }
+
+  if (DAP::IsActive())
+  {
+    INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "Stopping DAP ..."));
+    DAP::Deinit();
+    INFO_LOG_FMT(CONSOLE, "{}", StopMessage(true, "DAP stopped."));
   }
 }
 

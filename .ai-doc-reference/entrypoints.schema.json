@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dolphin-emu.org/dev/entrypoints.schema.json",
+  "title": "Dolphin entrypoints sidecar",
+  "description": "Function entrypoint-only source mapping for decomp sidecar debugging.",
+  "type": "object",
+  "required": ["schema_version", "precision", "game_id", "dwarf_elf", "functions"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "precision": {
+      "type": "string",
+      "const": "entrypoint"
+    },
+    "game_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dwarf_elf": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "generated_from": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tool": { "type": "string" },
+        "tool_version": { "type": "string" },
+        "report": { "type": "string" },
+        "objdiff_version": { "type": "string" }
+      }
+    },
+    "match_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "include_complete_units": {
+      "type": "boolean"
+    },
+    "units": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/unit" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/function" }
+    }
+  },
+  "$defs": {
+    "function": {
+      "type": "object",
+      "required": ["name", "address", "size", "file"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "address": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unit": {
+          "type": "string"
+        },
+        "match_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "object_offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "required": ["name", "file"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "file": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "function_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -181,6 +181,7 @@ private:
   void LoadSymbolMap();
   void LoadOtherSymbolMap();
   void LoadBadSymbolMap();
+  void LoadDwarfDebugInfo();
   void SaveSymbolMap();
   void SaveSymbolMapAs();
   void SaveCode();

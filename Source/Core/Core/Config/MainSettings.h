@@ -215,6 +215,14 @@ extern const Info<bool> MAIN_SHOW_FRAME_COUNT;
 extern const Info<std::string> MAIN_WIRELESS_MAC;
 extern const Info<std::string> MAIN_GDB_SOCKET;
 extern const Info<int> MAIN_GDB_PORT;
+extern const Info<std::string> MAIN_DAP_SOCKET;
+extern const Info<int> MAIN_DAP_PORT;
+// Default stop-on-entry policy for an attached DAP debugger. True (the
+// historical behavior) pauses the core at entry so the client can set
+// breakpoints before any code runs; false lets the game run immediately. A
+// `stopOnEntry` field on a `launch`/`attach` request overrides this per
+// session. Set at launch via `-C Dolphin.General.DAPStopOnEntry=false`.
+extern const Info<bool> MAIN_DAP_STOP_ON_ENTRY;
 extern const Info<int> MAIN_ISO_PATH_COUNT;
 extern const Info<std::string> MAIN_SKYLANDERS_PATH;
 std::vector<std::string> GetIsoPaths();
@@ -363,6 +371,8 @@ extern const Info<bool> MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
+extern const Info<std::string> MAIN_DEBUG_DWARF_ELF;
+extern const Info<std::string> MAIN_DEBUG_ENTRYPOINTS;
 
 // Main.BluetoothPassthrough
 

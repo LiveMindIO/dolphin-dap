@@ -27,6 +27,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/Debugger/RSO.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HW/AddressSpace.h"
@@ -1081,6 +1082,7 @@ void MenuBar::AddSymbolsMenu()
 
   m_symbols->addAction(tr("Load &Other Map File..."), this, &MenuBar::LoadOtherSymbolMap);
   m_symbols->addAction(tr("Load &Bad Map File..."), this, &MenuBar::LoadBadSymbolMap);
+  m_symbols->addAction(tr("Load DWARF/&Debug Info..."), this, &MenuBar::LoadDwarfDebugInfo);
   m_symbols->addAction(tr("Save Symbol Map &As..."), this, &MenuBar::SaveSymbolMapAs);
   m_symbols->addSeparator();
 
@@ -1794,6 +1796,27 @@ void MenuBar::LoadBadSymbolMap()
 
   auto& system = Core::System::GetInstance();
   HLE::PatchFunctions(system);
+  emit Host::GetInstance()->PPCSymbolsChanged();
+}
+
+void MenuBar::LoadDwarfDebugInfo()
+{
+  const QString file =
+      DolphinFileDialog::getOpenFileName(this, tr("Load DWARF/Debug Info"), QDir::homePath(),
+                                         tr("ELF Object Files (*.elf *.o);;All Files (*)"));
+
+  if (file.isEmpty())
+    return;
+
+  auto& system = Core::System::GetInstance();
+  if (!Core::Debug::ImportDwarfFromElf(Core::CPUThreadGuard{system}, system.GetPPCSymbolDB(),
+                                       file.toStdString()))
+  {
+    ModalMessageBox::warning(this, tr("Error"),
+                             tr("Failed to load DWARF debug info from '%1'").arg(file));
+    return;
+  }
+
   emit Host::GetInstance()->PPCSymbolsChanged();
 }
 

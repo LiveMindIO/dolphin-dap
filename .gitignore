@@ -11,6 +11,18 @@ Source/Core/Common/scmrev.h
 /[Bb]uild*/
 /[Bb]inary*/
 /obj/
+# Accidental in-source CMake at repo root (prefer: cmake -B build ...)
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/CPackConfig.cmake
+/CPackSourceConfig.cmake
+/.qt/
+/compile_commands.json
+/cmake_install.cmake
+/exports/
+**/CTestTestfile.cmake
+/Flatpak/org.DolphinEmu.dolphin-emu.metainfo.xml
 # Ignore files output by Android cmake build
 /Source/Android/app/.cxx/
 /libs/
