@@ -70,7 +70,7 @@ public:
   ExpansionInterfaceManager& operator=(ExpansionInterfaceManager&&) = delete;
   ~ExpansionInterfaceManager();
 
-  void Init(const Sram* override_sram);
+  void Init(const Sram* override_sram, const std::string current_file_name);
   void Shutdown();
   void DoState(PointerWrap& p);
 

@@ -37,6 +37,34 @@
 
 namespace Config
 {
+// Main.Slippi
+
+// Netplay Settings
+const Info<int> SLIPPI_ONLINE_DELAY{{System::Main, "Slippi", "OnlineDelay"}, 2};
+const Info<bool> SLIPPI_ENABLE_SPECTATOR{{System::Main, "Slippi", "EnableSpectator"}, true};
+const Info<int> SLIPPI_SPECTATOR_LOCAL_PORT{{System::Main, "Slippi", "SpectatorLocalPort"}, 51441};
+const Info<bool> SLIPPI_SAVE_REPLAYS{{System::Main, "Slippi", "SaveReplays"}, true};
+const Info<Slippi::Chat> SLIPPI_ENABLE_QUICK_CHAT{{System::Main, "Slippi", "EnableQuickChat"},
+                                                  Slippi::Chat::CHAT_ON};
+const Info<bool> SLIPPI_FORCE_NETPLAY_PORT{{System::Main, "Slippi", "ForceNetplayPort"}, false};
+const Info<int> SLIPPI_NETPLAY_PORT{{System::Main, "Slippi", "NetplayPort"}, 2626};
+const Info<bool> SLIPPI_FORCE_LAN_IP{{System::Main, "Slippi", "ForceLanIP"}, false};
+const Info<std::string> SLIPPI_LAN_IP{{System::Main, "Slippi", "LanIP"}, ""};
+const Info<bool> SLIPPI_REPLAY_MONTHLY_FOLDERS{{System::Main, "Slippi", "ReplayMonthlyFolders"},
+                                               true};
+const Info<std::string> SLIPPI_REPLAY_DIR{{System::Main, "Slippi", "ReplayDir"},
+                                          File::GetHomeDirectory() + DIR_SEP + "Slippi"};
+const Info<bool> SLIPPI_ENABLE_FRAME_INDEX{{System::Main, "Slippi", "EnableFrameIndex"}, false};
+const Info<bool> SLIPPI_BLOCKING_PIPES{{System::Main, "Slippi", "BlockingPipes"}, false};
+const Info<bool> SLIPPI_ENABLE_JUKEBOX{{System::Main, "Slippi", "EnableJukebox"}, true};
+const Info<int> SLIPPI_JUKEBOX_VOLUME{{System::Main, "Slippi", "JukeboxVolume"}, 100};
+
+const Info<bool> SLIPPI_ENABLE_RANK_LOCAL{{System::Main, "Slippi", "ShowLocalRankInfo"}, true};
+const Info<bool> SLIPPI_ENABLE_RANK_OPP{{System::Main, "Slippi", "ShowOpponentRankInfo"}, true};
+
+// Playback Settings
+const Info<bool> SLIPPI_ENABLE_SEEK{{System::Main, "Slippi", "EnableSeek"}, true};
+
 // Main.Core
 
 const Info<bool> MAIN_SKIP_IPL{{System::Main, "Core", "SkipIPL"}, true};
@@ -50,23 +78,26 @@ const Info<bool> MAIN_LARGE_ENTRY_POINTS_MAP{{System::Main, "Core", "LargeEntryP
 const Info<bool> MAIN_ACCURATE_CPU_CACHE{{System::Main, "Core", "AccurateCPUCache"}, false};
 const Info<bool> MAIN_DSP_HLE{{System::Main, "Core", "DSPHLE"}, true};
 const Info<int> MAIN_MAX_FALLBACK{{System::Main, "Core", "MaxFallback"}, 100};
-const Info<int> MAIN_TIMING_VARIANCE{{System::Main, "Core", "TimingVariance"}, 40};
-const Info<bool> MAIN_CORRECT_TIME_DRIFT{{System::Main, "Core", "CorrectTimeDrift"}, false};
+// slippi change: lower timing variance to 8 to improve audio latency
+// enable CorrectTimeDrift, RushFramePresentation, and SmoothEarlyPresentation to lower visual lag
+// enable Dual Core on all platforms
+const Info<int> MAIN_TIMING_VARIANCE{{System::Main, "Core", "TimingVariance"}, 8};
+const Info<bool> MAIN_CORRECT_TIME_DRIFT{{System::Main, "Core", "CorrectTimeDrift"}, true};
 const Info<bool> MAIN_RUSH_FRAME_PRESENTATION{{System::Main, "Core", "RushFramePresentation"},
-                                              false};
+                                              true};
 const Info<bool> MAIN_SMOOTH_EARLY_PRESENTATION{{System::Main, "Core", "SmoothEarlyPresentation"},
-                                                false};
+                                                true};
 #if defined(ANDROID)
 // Currently enabled by default on Android because the performance boost is really needed.
 constexpr bool DEFAULT_CPU_THREAD = true;
 #else
-constexpr bool DEFAULT_CPU_THREAD = false;
+constexpr bool DEFAULT_CPU_THREAD = true;
 #endif
 const Info<bool> MAIN_CPU_THREAD{{System::Main, "Core", "CPUThread"}, DEFAULT_CPU_THREAD};
 const Info<bool> MAIN_LOAD_GAME_INTO_MEMORY{{System::Main, "Core", "LoadGameIntoMemory"}, false};
 const Info<bool> MAIN_SYNC_ON_SKIP_IDLE{{System::Main, "Core", "SyncOnSkipIdle"}, true};
 const Info<std::string> MAIN_DEFAULT_ISO{{System::Main, "Core", "DefaultISO"}, ""};
-const Info<bool> MAIN_ENABLE_CHEATS{{System::Main, "Core", "EnableCheats"}, false};
+const Info<bool> MAIN_ENABLE_CHEATS{{System::Main, "Core", "EnableCheats"}, true};
 const Info<int> MAIN_GC_LANGUAGE{{System::Main, "Core", "SelectedLanguage"}, 0};
 const Info<bool> MAIN_OVERRIDE_REGION_SETTINGS{{System::Main, "Core", "OverrideRegionSettings"},
                                                false};
@@ -130,10 +161,10 @@ const Info<std::string>& GetInfoForGCIPathOverride(ExpansionInterface::Slot slot
 
 const Info<int> MAIN_MEMORY_CARD_SIZE{{System::Main, "Core", "MemoryCardSize"}, -1};
 
-const Info<ExpansionInterface::EXIDeviceType> MAIN_SLOT_A{
-    {System::Main, "Core", "SlotA"}, ExpansionInterface::EXIDeviceType::MemoryCardFolder};
-const Info<ExpansionInterface::EXIDeviceType> MAIN_SLOT_B{{System::Main, "Core", "SlotB"},
+const Info<ExpansionInterface::EXIDeviceType> MAIN_SLOT_A{{System::Main, "Core", "SlotA"},
                                                           ExpansionInterface::EXIDeviceType::None};
+const Info<ExpansionInterface::EXIDeviceType> MAIN_SLOT_B{
+    {System::Main, "Core", "SlotB"}, ExpansionInterface::EXIDeviceType::Slippi};
 const Info<ExpansionInterface::EXIDeviceType> MAIN_SERIAL_PORT_1{
     {System::Main, "Core", "SerialPort1"}, ExpansionInterface::EXIDeviceType::None};
 const Info<ExpansionInterface::EXIDeviceType> MAIN_SERIAL_PORT_2{
@@ -169,25 +200,34 @@ const Info<SerialInterface::SIDevices>& GetInfoForSIDevice(int channel)
 {
   static const std::array<const Info<SerialInterface::SIDevices>, 4> infos{
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice0"},
-                                       SerialInterface::SIDEVICE_GC_CONTROLLER},
+                                       SerialInterface::SIDEVICE_WIIU_ADAPTER},
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice1"},
-                                       SerialInterface::SIDEVICE_NONE},
+                                       SerialInterface::SIDEVICE_WIIU_ADAPTER},
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice2"},
-                                       SerialInterface::SIDEVICE_NONE},
+                                       SerialInterface::SIDEVICE_WIIU_ADAPTER},
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice3"},
-                                       SerialInterface::SIDEVICE_NONE},
+                                       SerialInterface::SIDEVICE_WIIU_ADAPTER},
   };
   return infos[channel];
 }
 
 const Info<bool>& GetInfoForAdapterRumble(int channel)
 {
+#ifndef IS_PLAYBACK
   static const std::array<const Info<bool>, 4> infos{
       Info<bool>{{System::Main, "Core", "AdapterRumble0"}, true},
       Info<bool>{{System::Main, "Core", "AdapterRumble1"}, true},
       Info<bool>{{System::Main, "Core", "AdapterRumble2"}, true},
       Info<bool>{{System::Main, "Core", "AdapterRumble3"}, true},
   };
+#else
+  static const std::array<const Info<bool>, 4> infos{
+      Info<bool>{{System::Main, "Core", "AdapterRumble0"}, false},
+      Info<bool>{{System::Main, "Core", "AdapterRumble1"}, false},
+      Info<bool>{{System::Main, "Core", "AdapterRumble2"}, false},
+      Info<bool>{{System::Main, "Core", "AdapterRumble3"}, false},
+  };
+#endif
   return infos[channel];
 }
 
@@ -293,7 +333,11 @@ const Info<std::string> MAIN_WII_NUS_SHOP_URL{{System::Main, "Core", "WiiNusShop
 
 const Info<std::string> MAIN_FULLSCREEN_DISPLAY_RES{
     {System::Main, "Display", "FullscreenDisplayRes"}, "Auto"};
+#ifdef IS_PLAYBACK
 const Info<bool> MAIN_FULLSCREEN{{System::Main, "Display", "Fullscreen"}, false};
+#else
+const Info<bool> MAIN_FULLSCREEN{{System::Main, "Display", "Fullscreen"}, true};
+#endif
 const Info<bool> MAIN_RENDER_TO_MAIN{{System::Main, "Display", "RenderToMain"}, false};
 const Info<int> MAIN_RENDER_WINDOW_XPOS{{System::Main, "Display", "RenderWindowXPos"}, -1};
 const Info<int> MAIN_RENDER_WINDOW_YPOS{{System::Main, "Display", "RenderWindowYPos"}, -1};
@@ -314,7 +358,7 @@ const Info<bool> MAIN_DUMP_AUDIO_SILENT{{System::Main, "DSP", "DumpAudioSilent"}
 const Info<bool> MAIN_DUMP_UCODE{{System::Main, "DSP", "DumpUCode"}, false};
 const Info<std::string> MAIN_AUDIO_BACKEND{{System::Main, "DSP", "Backend"},
                                            AudioCommon::GetDefaultSoundBackend()};
-const Info<int> MAIN_AUDIO_VOLUME{{System::Main, "DSP", "Volume"}, 100};
+const Info<int> MAIN_AUDIO_VOLUME{{System::Main, "DSP", "Volume"}, 10};
 const Info<bool> MAIN_AUDIO_MUTED{{System::Main, "DSP", "Muted"}, false};
 const Info<bool> MAIN_AUDIO_MUTE_ON_DISABLED_SPEED_LIMIT{
     {System::Main, "DSP", "MuteOnDisabledSpeedLimit"}, false};
@@ -432,12 +476,14 @@ const Info<int> MAIN_NETWORK_TIMEOUT{{System::Main, "Network", "NetworkTimeout"}
 
 const Info<bool> MAIN_USE_HIGH_CONTRAST_TOOLTIPS{
     {System::Main, "Interface", "UseHighContrastTooltips"}, true};
-const Info<bool> MAIN_USE_PANIC_HANDLERS{{System::Main, "Interface", "UsePanicHandlers"}, true};
+const Info<bool> MAIN_USE_PANIC_HANDLERS{{System::Main, "Interface", "UsePanicHandlers"}, false};
 const Info<bool> MAIN_ABORT_ON_PANIC_ALERT{{System::Main, "Interface", "AbortOnPanicAlert"}, false};
 const Info<bool> MAIN_OSD_MESSAGES{{System::Main, "Interface", "OnScreenDisplayMessages"}, true};
 const Info<int> MAIN_OSD_FONT_SIZE{{System::Main, "Settings", "OSDFontSize"}, 13};
-const Info<bool> MAIN_SKIP_NKIT_WARNING{{System::Main, "Interface", "SkipNKitWarning"}, false};
-const Info<bool> MAIN_CONFIRM_ON_STOP{{System::Main, "Interface", "ConfirmStop"}, true};
+// slippi change: SkipNKitWarning = true, ConfirmStop = false
+const Info<bool> MAIN_SKIP_NKIT_WARNING{{System::Main, "Interface", "SkipNKitWarning"}, true};
+const Info<bool> MAIN_CONFIRM_ON_STOP{{System::Main, "Interface", "ConfirmStop"}, false};
+// slippi change: end
 const Info<ShowCursor> MAIN_SHOW_CURSOR{{System::Main, "Interface", "CursorVisibility"},
                                         ShowCursor::OnMovement};
 const Info<bool> MAIN_LOCK_CURSOR{{System::Main, "Interface", "LockCursor"}, false};
@@ -456,6 +502,7 @@ const Info<std::string> MAIN_ANALYTICS_ID{{System::Main, "Analytics", "ID"}, ""}
 const Info<bool> MAIN_ANALYTICS_ENABLED{{System::Main, "Analytics", "Enabled"}, false};
 const Info<bool> MAIN_ANALYTICS_PERMISSION_ASKED{{System::Main, "Analytics", "PermissionAsked"},
                                                  false};
+const Info<bool> MAIN_ANALYTICS_WILL_PROMPT{{System::Main, "Analytics", "WillPrompt"}, false};
 
 // Main.GameList
 

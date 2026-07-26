@@ -35,10 +35,14 @@ else()
 endif()
 
 target_link_libraries(dolphin-nogui
+PUBLIC
+  slippi_rust_extensions
+  z
 PRIVATE
   core
   uicommon
   cpp-optparse
+	ZLIB::ZLIB
 )
 
 if(APPLE)
@@ -66,4 +70,3 @@ endif()
 
 set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} dolphin-nogui)
 install(TARGETS dolphin-nogui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-

@@ -40,6 +40,11 @@ signals:
   void RequestStop();
   void RequestRenderSize(int w, int h);
   void UpdateDisasmDialog();
+  void NotifyMapLoaded();
+  void RequestLowerWindow();
+  void RequestExit();
+  void RequestSeek();
+  void RequestFullscreen();
   void JitCacheInvalidation();
   void JitProfileDataWiped();
   void PPCSymbolsChanged();

@@ -366,7 +366,14 @@ void CoreTimingManager::Advance()
     Event evt = m_event_queue.front();
     std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
     m_event_queue.pop_back();
-    evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+
+    // commented out the old setup
+    Throttle(evt.time);
+    if (evt.type != nullptr)  // slippi change
+    {
+      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+    }
+    // evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
   }
 
   m_is_global_timer_sane = false;

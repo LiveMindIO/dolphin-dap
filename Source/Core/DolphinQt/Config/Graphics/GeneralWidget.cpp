@@ -62,7 +62,7 @@ void GeneralWidget::CreateWidgets()
   m_backend_combo = new ConfigStringChoice(options, Config::MAIN_GFX_BACKEND, m_game_layer);
   m_previous_backend = m_backend_combo->currentIndex();
 
-  m_aspect_combo = new ConfigChoice({tr("Auto"), tr("Force 16:9"), tr("Force 4:3"),
+  m_aspect_combo = new ConfigChoice({tr("Auto"), tr("Force 16:9"), tr("Force 4:3"), tr("Force 73:60 (Melee)"),
                                      tr("Stretch to Window"), tr("Custom"), tr("Custom (Stretch)")},
                                     Config::GFX_ASPECT_RATIO, m_game_layer);
   m_custom_aspect_label = new QLabel(tr("Custom Aspect Ratio:"));
@@ -260,6 +260,7 @@ void GeneralWidget::AddDescriptions()
       "type of TV the game seems to be targeting."
       "<br><br><b>Force 16:9</b>: Mimics a TV with a 16:9 (widescreen) aspect ratio."
       "<br><br><b>Force 4:3</b>: Mimics a TV with a 4:3 aspect ratio."
+      "<br><br><b>Force 73:60 (Melee)</b>: Melee's standard."
       "<br><br><b>Stretch to Window</b>: Stretches the image to the window size. "
       "This will usually distort the image's proportions."
       "<br><br><b>Custom</b>: Mimics a TV with the specified aspect ratio. "

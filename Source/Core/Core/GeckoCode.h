@@ -69,4 +69,7 @@ void RunCodeHandler(const Core::CPUThreadGuard& guard);
 void Shutdown();
 void DoState(PointerWrap&);
 
+u32 GetGctLength();
+std::vector<u8> GenerateGct();
+
 }  // namespace Gecko

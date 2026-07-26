@@ -31,6 +31,16 @@ if (WIN32 AND ENABLE_AUTOUPDATE)
   add_subdirectory(WinUpdater)
 endif()
 
+# slippi change: Build SlippiRustExtensions for DolphinQt and DolphinNoGui
+#
+#set(RUST_FEATURES "")
+#if(DIS_PLAYBACK)
+#    set(RUST_FEATURES "playback")
+#endif()
+
+corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/Externals/SlippiRustExtensions/Cargo.toml ${RUST_FEATURES})
+# slippi change: end
+
 if (APPLE AND ENABLE_QT)
   set(DOLPHIN_MAC_BUNDLE "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Dolphin.app")
 

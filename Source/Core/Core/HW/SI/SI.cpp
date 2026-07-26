@@ -548,10 +548,6 @@ void SerialInterfaceManager::UpdateDevices()
     }
   }
 
-  // Hinting NetPlay that all controllers will be polled in
-  // succession, in order to optimize networking
-  NetPlay::SetSIPollBatching(true);
-
   // Update inputs at the rate of SI
   // Typically 120hz but is variable
   g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
@@ -580,9 +576,6 @@ void SerialInterfaceManager::UpdateDevices()
   }
 
   UpdateInterrupts();
-
-  // Polling finished
-  NetPlay::SetSIPollBatching(false);
 }
 
 SIDevices SerialInterfaceManager::GetDeviceType(int channel) const

@@ -28,12 +28,15 @@ void GCPadWiiUConfigDialog::CreateLayout()
 
   m_layout = new QVBoxLayout();
   m_status_label = new QLabel();
-  m_poll_rate_label = new QLabel;
+  m_poll_rate_label = new QLabel();
   m_rumble = new QCheckBox(tr("Enable Rumble"));
   m_simulate_bongos = new QCheckBox(tr("Simulate DK Bongos"));
   m_button_box = new QDialogButtonBox(QDialogButtonBox::Ok);
 
   UpdateAdapterStatus();
+  UpdatePollRate();
+
+  m_poll_rate_timer = new QTimer(this);
 
   auto* const timer = new QTimer{this};
   connect(timer, &QTimer::timeout, this, &GCPadWiiUConfigDialog::UpdateAdapterStatus);
@@ -42,7 +45,8 @@ void GCPadWiiUConfigDialog::CreateLayout()
   m_layout->addWidget(m_status_label);
   m_layout->addWidget(m_poll_rate_label);
   m_layout->addWidget(m_rumble);
-  m_layout->addWidget(m_simulate_bongos);
+  // slippi change: no need to let users turn on bongos
+  // m_layout->addWidget(m_simulate_bongos);
   m_layout->addWidget(m_button_box);
 
   setLayout(m_layout);
@@ -50,6 +54,8 @@ void GCPadWiiUConfigDialog::CreateLayout()
 
 void GCPadWiiUConfigDialog::ConnectWidgets()
 {
+  connect(m_poll_rate_timer, &QTimer::timeout, this, &GCPadWiiUConfigDialog::UpdatePollRate);
+  m_poll_rate_timer->start(1500);
   connect(m_rumble, &QCheckBox::toggled, this, &GCPadWiiUConfigDialog::SaveSettings);
   connect(m_simulate_bongos, &QCheckBox::toggled, this, &GCPadWiiUConfigDialog::SaveSettings);
   connect(m_button_box, &QDialogButtonBox::accepted, this, &GCPadWiiUConfigDialog::accept);
@@ -84,6 +90,13 @@ void GCPadWiiUConfigDialog::UpdateAdapterStatus()
 
   m_rumble->setEnabled(detected);
   m_simulate_bongos->setEnabled(detected);
+  m_poll_rate_label->setHidden(!detected);
+}
+
+void GCPadWiiUConfigDialog::UpdatePollRate()
+{
+  QString poll_rate_text = tr("Poll Rate: %1 hz").arg(1000.0 / GCAdapter::ReadRate());
+  m_poll_rate_label->setText(poll_rate_text);
 }
 
 void GCPadWiiUConfigDialog::LoadSettings()

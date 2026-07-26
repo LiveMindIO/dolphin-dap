@@ -1078,4 +1078,16 @@ double GetCurrentPollRate()
   return s_adapter_poll_rate.load(std::memory_order_relaxed);
 }
 
+// slippi change: for poll rate display
+bool IsReadingAtReducedRate()
+{
+  return false;
+}
+
+double ReadRate()
+{
+  return GetCurrentPollRate();
+}
+// slippi change: for poll rate display
+
 }  // namespace GCAdapter

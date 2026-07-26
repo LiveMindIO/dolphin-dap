@@ -46,6 +46,7 @@
 #include "Core/Movie.h"
 #include "Core/NetPlayProto.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/Slippi/SlippiNetplay.h"
 #include "Core/System.h"
 
 #include "UICommon/UICommon.h"
@@ -168,6 +169,7 @@ static void DoState(Core::System& system, PointerWrap& p)
     return;
   }
 
+  // SLIPPITODO: David disabled this for some reason, should check why
   // Movie must be done before the video backend, because the window is redrawn in the video backend
   // state load, and the frame number must be up-to-date.
   system.GetMovie().DoState(p);
@@ -212,6 +214,13 @@ static bool CheckIfStateLoadIsAllowed(Core::System& system)
     return false;
   }
 
+  // slippi change
+  if (IsOnline())
+  {
+    return false;
+  }
+  // slippi change: end
+
   if (AchievementManager::GetInstance().IsHardcoreModeActive())
   {
     OSD::AddMessage("Loading savestates is disabled in RetroAchievements hardcore mode");
@@ -221,7 +230,7 @@ static bool CheckIfStateLoadIsAllowed(Core::System& system)
   return true;
 }
 
-static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
+bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
 {
   u8* ptr = buffer.data();
   PointerWrap p(&ptr, buffer.size(), PointerWrap::Mode::Read);
@@ -230,7 +239,7 @@ static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
 }
 
 // Returns the required size, or 0 on failure.
-static std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer)
+std::size_t SaveToBuffer(Core::System& system, Common::UniqueBuffer<u8>& buffer)
 {
   // Attempt to save to our provided buffer as-is.
   // If buffer isn't large enough, PointerWrap transitions to MeasureMode,
@@ -824,10 +833,18 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
       File::Delete(dtmpath);
   }
 
+  // slippi change
+  if (IsOnline())
+  {
+    return;
+  }
+  // slippi change: end
+
   bool was_file_read = false;
   bool loaded_successfully = false;
 
   // brackets here are so buffer gets freed ASAP
+  if (AchievementManager::GetInstance().IsHardcoreModeActive())
   {
     Common::UniqueBuffer<u8> buffer;
     LoadFileStateData(filename, buffer);

@@ -34,6 +34,12 @@ static float SourceAspectRatioToWidescreen(float source_aspect)
   return source_aspect * ((16.0f / 9.0f) / (4.0f / 3.0f));
 }
 
+// Fixes the aspect ratio of Melee after apply the Normal Lag Reduction code
+static float SourceAspectRatioToMelee(float aspect)
+{
+  return aspect * ((73.0f / 60.0f) / (4.0f / 3.0f));
+}
+
 static std::tuple<int, int> FindClosestIntegerResolution(float width, float height,
                                                          float aspect_ratio)
 {
@@ -517,6 +523,10 @@ float Presenter::CalculateDrawAspectRatio(bool allow_stretch) const
     {
       resulting_aspect_ratio =
           m_xfb_entry ? (static_cast<float>(m_last_xfb_width) / m_last_xfb_height) : 1.f;
+    }
+    else if (aspect_mode == AspectMode::ForceMelee)
+    {
+      resulting_aspect_ratio = SourceAspectRatioToMelee(source_aspect_ratio);
     }
     else
     {

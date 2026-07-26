@@ -21,6 +21,22 @@
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
 
+#include "SlippiRustExtensions.h"
+
+// See the notes in the header definition for why this exists.
+void SlippiRustExtensionsLogger(int level, int slp_log_type, const char* msg)
+{
+  Common::Log::LogLevel log_level = static_cast<Common::Log::LogLevel>(level);
+  Common::Log::LogType log_type = static_cast<Common::Log::LogType>(slp_log_type);
+
+  // mainline is notably different in logging, but we will try this method for now
+  // if this fails we should fall back to GENERIC_LOG_FMT(log_level, log_type, msg);
+  if (Common::Log::LogManager::GetInstance())
+  {
+    Common::Log::LogManager::GetInstance()->LogPreformatted(log_level, log_type, msg);
+  }
+}
+
 namespace Common::Log
 {
 const Config::Info<bool> LOGGER_WRITE_TO_FILE{{Config::System::Logger, "Options", "WriteToFile"},
@@ -94,6 +110,10 @@ static size_t DeterminePathCutOffPoint()
 
 LogManager::LogManager()
 {
+  // We want this called before we create any `LogContainer`s below that may register with the Rust
+  // side of things.
+  slprs_logging_init(SlippiRustExtensionsLogger);
+
   // create log containers
   m_log[LogType::ACHIEVEMENTS] = {"RetroAchievements", "Achievements"};
   m_log[LogType::ACTIONREPLAY] = {"ActionReplay", "Action Replay"};
@@ -147,6 +167,13 @@ LogManager::LogManager()
   m_log[LogType::SERIALINTERFACE_AMBB] = {"SI_AMBB", "AMBB Interface"};
   m_log[LogType::SERIALINTERFACE_CARD] = {"SI_CARD", "CARD Interface"};
   m_log[LogType::SERIALINTERFACE_JVSIO] = {"SI_JVS", "JVS-I/O"};
+  m_log[LogType::SLIPPI] = {"SLIPPI", "Slippi"};
+  m_log[LogType::SLIPPI_ONLINE] = {"SLIPPI_ONLINE", "Slippi Online"};
+  m_log[LogType::SLIPPI_RUST_DEPENDENCIES] = {"SLIPPI_RUST_DEPENDENCIES",
+                                              "[Rust] Slippi Dependencies", false, true};
+  m_log[LogType::SLIPPI_RUST_ONLINE] = {"SLIPPI_RUST_ONLINE", "[Rust] Slippi Online", false, true};
+  m_log[LogType::SLIPPI_RUST_JUKEBOX] = {"SLIPPI_RUST_JUKEBOX", "[Rust] Slippi Jukebox", false,
+                                         true};
   m_log[LogType::SP1] = {"SP1", "Serial Port 1"};
   m_log[LogType::SYMBOLS] = {"SYMBOLS", "Symbols"};
   m_log[LogType::VIDEO] = {"Video", "Video Backend"};
@@ -168,6 +195,18 @@ LogManager::LogManager()
   {
     container.m_enable = Config::Get(
         Config::Info<bool>{{Config::System::Logger, "Logs", container.m_short_name}, false});
+  }
+
+  // SLIPPITODO: this section ideally should be less awkward
+  for (int log_type = static_cast<int>(LogType::SLIPPI);
+       log_type != static_cast<int>(LogType::NUMBER_OF_LOGS); log_type++)
+  {
+    auto& container = m_log[static_cast<LogType>(log_type)];
+    if (container.m_is_rust_log)
+    {
+      slprs_logging_register_container(container.m_short_name, log_type, container.m_enable,
+                                       static_cast<int>(GetEffectiveLogLevel()));
+    }
   }
 
   m_path_cutoff_point = DeterminePathCutOffPoint();
@@ -198,6 +237,29 @@ void LogManager::SaveSettings()
   }
 
   Config::Save();
+}
+
+// Extensions that need to log across the boundary often have to allocate
+// an owned String on their side; if they can vend us a c_str then we can avoid
+// duplicating the allocation over here for the logger.
+//
+// The alternative here would be opening up `m_log` and `m_listeners` to be public,
+// but this feels like it'll transplant easier onto mainline.
+// MAINLINE NOTE
+// i have no clue if this is needed anymore when we can just use GENERIC_LOG_FMT
+// but i'm leaving it here for now
+void LogManager::LogPreformatted(LogLevel level, LogType type, const char* msg)
+{
+  LogContainer& container = m_log[type];
+
+  if (!container.m_enable || level > GetEffectiveLogLevel())
+    return;
+
+  for (const auto listener_id : m_listener_ids)
+  {
+    if (m_listeners[listener_id])
+      m_listeners[listener_id]->Log(level, msg);
+  }
 }
 
 void LogManager::Log(LogLevel level, LogType type, const char* file, int line, const char* message)
@@ -250,11 +312,17 @@ void LogManager::SetEffectiveLogLevel()
   const LogLevel clamped_level =
       std::clamp(Config::Get(LOGGER_VERBOSITY), LogLevel::LNOTICE, MAX_EFFECTIVE_LOGLEVEL);
   m_effective_level.store(clamped_level, std::memory_order_relaxed);
+  slprs_mainline_logging_update_log_level(static_cast<int>(m_effective_level.load()));
 }
 
 void LogManager::SetEnable(LogType type, bool enable)
 {
   m_log[type].m_enable = enable;
+  if (m_log[type].m_is_rust_log)
+  {
+    slprs_logging_update_container(m_log[type].m_short_name, m_log[type].m_enable,
+                                   static_cast<int>(GetEffectiveLogLevel()));
+  }
 }
 
 bool LogManager::IsEnabled(LogType type, LogLevel level) const

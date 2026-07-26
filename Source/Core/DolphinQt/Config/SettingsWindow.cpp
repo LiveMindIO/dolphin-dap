@@ -29,6 +29,7 @@
 #include "DolphinQt/Settings/InterfacePane.h"
 #include "DolphinQt/Settings/OnScreenDisplayPane.h"
 #include "DolphinQt/Settings/PathPane.h"
+#include "DolphinQt/Settings/SlippiPane.h"
 #include "DolphinQt/Settings/TriforcePane.h"
 #include "DolphinQt/Settings/WiiPane.h"
 
@@ -192,6 +193,7 @@ SettingsWindow::SettingsWindow(MainWindow* parent) : StackedSettingsWindow{paren
 
   // If you change the order, don't forget to update the SettingsWindowPaneIndex enum.
   AddWrappedPane(new GeneralPane, tr("General"));
+  AddWrappedPane(new SlippiPane, tr("Slippi"));
   AddPane(new GraphicsPane{parent, nullptr}, tr("Graphics"));
   AddWrappedPane(new ControllersPane, tr("Controllers"));
   AddWrappedPane(new InterfacePane, tr("Interface"));

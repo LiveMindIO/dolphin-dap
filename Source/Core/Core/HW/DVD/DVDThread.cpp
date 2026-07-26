@@ -26,7 +26,9 @@
 #include "Core/IOS/ES/Formats.h"
 #include "Core/System.h"
 
+#include "DiscIO/DiscExtractor.h"
 #include "DiscIO/Enums.h"
+#include "DiscIO/Filesystem.h"
 #include "DiscIO/Volume.h"
 
 namespace DVD
@@ -304,5 +306,29 @@ void DVDThread::ProcessReadRequest(ReadRequest&& request)
   request.realtime_done_us = Common::Timer::NowUs();
 
   m_result_queue.Push(ReadResult(std::move(request), std::move(buffer)));
+}
+
+// slippi change
+void DVDThread::ReadFile(std::string& fileName, std::vector<u8>& buf)
+{
+  if (HasDisc())
+  {
+    WaitUntilIdle();
+    const DiscIO::FileSystem* filesystem = m_disc->GetFileSystem(DiscIO::PARTITION_NONE);
+    auto fileInfo = filesystem->FindFileInfo(fileName);
+    auto fileSize = fileInfo->GetSize();
+    buf.resize(fileSize);
+    DiscIO::ReadFile(*m_disc, DiscIO::PARTITION_NONE, fileInfo.get(), buf.data(), fileSize);
+  }
+  else
+  {
+    INFO_LOG_FMT(SLIPPI, "Failed to open file: {}", fileName.c_str());
+  }
+}
+// end slippi change
+
+std::string DVDThread::GetFileName(const DiscIO::Partition& partition, u64 offset)
+{
+  return m_disc->GetFileSystem(partition)->FindFileInfo(offset)->GetName();
 }
 }  // namespace DVD

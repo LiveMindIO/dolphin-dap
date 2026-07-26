@@ -18,6 +18,7 @@
 #include "Common/ScopeGuard.h"
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
+#include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/Host.h"
@@ -122,6 +123,18 @@ void Host_TitleChanged()
 #endif
 }
 
+void Host_LowerWindow()
+{
+}
+void Host_Exit()
+{
+}
+void Host_PlaybackSeek()
+{
+}
+void Host_Fullscreen()
+{
+}
 void Host_UpdateDiscordClientID(const std::string& client_id)
 {
 #ifdef USE_DISCORD_PRESENCE
@@ -211,6 +224,7 @@ int main(const int argc, char* argv[])
       });
 
   optparse::Values& options = CommandLineParse::ParseArguments(parser.get(), argc, argv);
+
   std::vector<std::string> args = parser->args();
 
   std::optional<std::string> save_state_path;
@@ -258,6 +272,18 @@ int main(const int argc, char* argv[])
   std::string user_directory;
   if (options.is_set("user"))
     user_directory = static_cast<const char*>(options.get("user"));
+
+  UICommon::SetUserDirectory(user_directory);
+  UICommon::Init();
+
+#ifdef IS_PLAYBACK
+  std::optional<std::string> slippi_input_path;
+  if (options.is_set("slippi_input"))
+  {
+    slippi_input_path = static_cast<const char*>(options.get("slippi_input"));
+    SConfig::GetSlippiConfig().slippi_input = slippi_input_path.value();
+  }
+#endif
 
   s_platform = GetPlatform(options);
   if (!s_platform || !s_platform->Init())

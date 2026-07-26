@@ -141,6 +141,8 @@ public:
   // The way the hash is calculated may change with updates to Dolphin.
   virtual std::array<u8, 20> GetSyncHash() const = 0;
 
+  bool FileExists(std::string file_name);
+
 protected:
   std::string DecodeString(std::span<const char> data) const;
   static std::string FilterGameID(std::span<const char> data);

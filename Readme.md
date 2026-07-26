@@ -23,6 +23,18 @@ and per-operation request/response payload reference, see
 
 ---
 
+# Slippi Mainline
+
+This is a WIP effort to port the functionality of https://github.com/project-slippi/Ishiiruka to Mainline Dolphin. Currently, we are even with upstream release 2506 and with project-slippi/Ishiiruka's main branch. Netplay functionality is cross compatible, playback is WIP, rust code is hooked up *Last updated 2025-11-08*
+
+## How can I contribute?
+
+Read through the issues and comment on it to claim it. Discuss the changes with maintainers to ensure they meet expectations. Create a Pull Request with the changes and follow up on any comments until approval and merge.
+
+### Other questions
+
+Ping or message nikki (metonym) in the Slippi Discord. https://slippi.gg/discord
+
 # Dolphin - A GameCube and Wii Emulator
 
 [Homepage](https://dolphin-emu.org/) | [Project Site](https://github.com/dolphin-emu/dolphin) | [Buildbot](https://dolphin.ci/) | [Forums](https://forums.dolphin-emu.org/) | [Wiki](https://wiki.dolphin-emu.org/) | [GitHub Wiki](https://github.com/dolphin-emu/dolphin/wiki) | [Issue Tracker](https://bugs.dolphin-emu.org/projects/emulator/issues) | [Coding Style](https://github.com/dolphin-emu/dolphin/blob/master/Contributing.md) | [Transifex Page](https://app.transifex.com/dolphinemu/dolphin-emu/dashboard/) | [Analytics](https://mon.dolphin-emu.org/)
@@ -43,7 +55,7 @@ Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
 * OS
     * Windows (10 1903 or higher).
     * Linux.
-    * macOS (11.0 Big Sur or higher).
+    * macOS (13.0 Ventura or higher).
     * Unix-like systems other than Linux are not officially supported but might work.
 * Processor
     * A CPU with SSE2 support.
@@ -64,13 +76,24 @@ Please read the [FAQ](https://dolphin-emu.org/docs/faq/) before using Dolphin.
 
 Dolphin can only be installed on devices that satisfy the above requirements. Attempting to install on an unsupported device will fail and display an error message.
 
-## Building for Windows
+## Build Process
 
-Use the solution file `Source/dolphin-emu.sln` to build Dolphin on Windows.
-Dolphin targets the latest MSVC shipped with Visual Studio or Build Tools.
-Other compilers might be able to build Dolphin on Windows but have not been
-tested and are not recommended to be used. Git and latest Windows SDK must be
-installed when building.
+Dolphin requires [CMake](https://cmake.org/) for all systems. Many libraries are
+bundled with Dolphin and used if they're not installed on your system. CMake
+will inform you if a bundled library is used or if you need to install any
+missing packages yourself.
+
+### Rust
+This fork includes a [Rust submodule](https://github.com/project-slippi/slippi-rust-extensions) that needs to be built and linked to the final executable.
+This means that you will need to install a Rust compiler for your current system; to do this, simply visit 
+[rustup.rs](https://rustup.rs). Once installed, CMake should be able to automatically handle the rest for you. Installing rust via your distro's package manager is workable but we only support rustup since it handles multi toolchain installs better.
+
+### Windows
+
+Visual Studio 2022 or later is a hard requirement.
+Open the folder that contains the base CMakeLists.txt file to build Dolphin on Windows.
+Other compilers might able to build Dolphin on Windows but have not been tested and are not
+recommended to be used. Git and Windows 11 SDK must be installed when building.
 
 Make sure to pull submodules before building:
 ```sh
@@ -82,7 +105,7 @@ The "Debug" solution configuration is significantly slower, more verbose and les
 
 ## Building for Linux and macOS
 
-Dolphin requires [CMake](https://cmake.org/) for systems other than Windows.
+Dolphin requires [CMake 3](https://cmake.org/) for systems other than Windows. CMake 4 is unsupported at this time.
 You need a recent version of GCC or Clang with decent c++20 support. CMake will
 inform you if your compiler is too old.
 Many libraries are bundled with Dolphin and used if they're not installed on
@@ -134,8 +157,8 @@ Useful for development as root access is not required.
 1. `mkdir Build`
 2. `cd Build`
 3. `cmake .. -DLINUX_LOCAL_DEV=true`
-4. `make -j $(nproc)`
-5. `ln -s ../../Data/Sys Binaries/`
+4. `make`
+5. `ln -s ../../Overwrite/{Sys,User} Binaries/`
 
 ### Linux Portable Build Steps:
 
@@ -145,25 +168,9 @@ Or useful for having multiple distinct Dolphin setups for testing/development/TA
 1. `mkdir Build`
 2. `cd Build`
 3. `cmake .. -DLINUX_LOCAL_DEV=true`
-4. `make -j $(nproc)`
-5. `cp -r ../Data/Sys/ Binaries/`
+4. `make`
+5. `cp -r ../Overwrite/{Sys,User} Binaries/`
 6. `touch Binaries/portable.txt`
-
-## Building for Android
-
-These instructions assume familiarity with Android development. If you do not have an
-Android dev environment set up, see [AndroidSetup.md](AndroidSetup.md).
-
-Make sure to pull submodules before building:
-```sh
-git submodule update --init --recursive
-```
-
-If using Android Studio, import the Gradle project located in `./Source/Android`.
-
-Android apps are compiled using a build system called Gradle. Dolphin's native component,
-however, is compiled using CMake. The Gradle script will attempt to run a CMake build
-automatically while building the Java code.
 
 ## Uninstalling
 
@@ -196,6 +203,8 @@ Options:
                         Set a configuration option
   -s <file>, --save_state=<file>
                         Load the initial save state
+  -i <file>, --slippi_input=<file>
+                        Load replay
   -d, --debugger        Show the debugger pane and additional View menu options
   -l, --logger          Open the logger
   -b, --batch           Run Dolphin without the user interface (Requires

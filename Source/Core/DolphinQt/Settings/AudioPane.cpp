@@ -37,6 +37,11 @@
 
 #include "DolphinQt/Settings.h"
 
+#ifndef IS_PLAYBACK
+#include "Core/HW/EXI/EXI.h"
+#include "Core/HW/EXI/EXI_DeviceSlippi.h"
+#endif
+
 static QString GetVolumeLabelText(int volume_level)
 {
   return QWidget::tr("%1%").arg(volume_level);
@@ -264,6 +269,22 @@ void AudioPane::ConnectWidgets()
   connect(m_backend_combo, &QComboBox::currentIndexChanged, this, &AudioPane::OnBackendChanged);
   connect(m_dolby_pro_logic, &ConfigBool::toggled, this, &AudioPane::OnDspChanged);
   connect(m_dsp_combo, &ConfigComplexChoice::currentIndexChanged, this, &AudioPane::OnDspChanged);
+  // slippi change
+  connect(m_volume_slider, &QSlider::valueChanged, this, [](int value) {
+#ifndef IS_PLAYBACK
+    if (Core::GetState(Core::System::GetInstance()) == Core::State::Running)
+    {
+      auto& system = Core::System::GetInstance();
+      auto& exi_manager = system.GetExpansionInterface();
+      ExpansionInterface::CEXISlippi* slippi_exi = static_cast<ExpansionInterface::CEXISlippi*>(
+          exi_manager.GetDevice(ExpansionInterface::Slot::B));
+
+      if (slippi_exi != nullptr)
+        slippi_exi->UpdateJukeboxDolphinSystemVolume(value);
+    }
+#endif
+  });
+  // slippi change: end
   connect(m_volume_slider, &QSlider::valueChanged, this,
           [] { AudioCommon::UpdateSoundStream(Core::System::GetInstance()); });
 

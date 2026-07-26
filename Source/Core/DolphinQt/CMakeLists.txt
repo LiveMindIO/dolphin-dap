@@ -382,6 +382,8 @@ add_executable(dolphin-emu
   Settings/OnScreenDisplayPane.h
   Settings/PathPane.cpp
   Settings/PathPane.h
+  Settings/SlippiPane.cpp
+  Settings/SlippiPane.h
   Settings/TriforcePane.cpp
   Settings/TriforcePane.h
   Settings/USBDevicePicker.cpp
@@ -500,7 +502,7 @@ if(WIN32)
 
   set_target_properties(dolphin-emu PROPERTIES
     DEBUG_POSTFIX    D
-    OUTPUT_NAME      Dolphin
+    OUTPUT_NAME      Slippi_Dolphin
     WIN32_EXECUTABLE TRUE
   )
 
@@ -531,6 +533,14 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/build_info.txt" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/build_info.txt"
     )
   endif()
+  # slippi change
+  add_dependencies(dolphin-emu copy_rust_dll)
+  # end slippi change
+
+  # create portable.txt automatically for Windows since we always use portable builds for dev and release
+  add_custom_command(TARGET dolphin-emu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E touch "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/portable.txt"
+  )
 
   # Delegate to Qt's official deployment binary on Windows to copy over the necessary Qt-specific libraries, etc.
   get_target_property(MOC_EXECUTABLE_LOCATION Qt6::moc IMPORTED_LOCATION)
@@ -616,16 +626,24 @@ if(GETTEXT_MSGFMT_EXECUTABLE)
   endforeach()
 endif()
 
+target_link_libraries(dolphin-emu PUBLIC slippi_rust_extensions)
+
 if(APPLE)
   include(BundleUtilities)
+  # slippi change: specify OUTPUT_NAME
+  set(OUTPUT_NAME "Slippi_Dolphin")
+  set(BUNDLE_PATH "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${OUTPUT_NAME}.app")
 
   # Ask for an application bundle.
   set_target_properties(dolphin-emu PROPERTIES
     MACOSX_BUNDLE true
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
+    XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/DolphinEmu.entitlements"
+    XCODE_ATTRIBUTE_OTHER_CODE_SIGN_FLAGS "--deep --options=runtime"
     XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
-    OUTPUT_NAME DolphinQt
+    OUTPUT_NAME "${OUTPUT_NAME}"
     )
+  # end slippi change
 
   # Copy qt.conf into the bundle
   target_sources(dolphin-emu PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf")
@@ -670,7 +688,7 @@ if(APPLE)
       target_sources(dolphin-emu PRIVATE "${SOURCE_DIR}/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib")
       set_source_files_properties("${SOURCE_DIR}/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" PROPERTIES MACOSX_PACKAGE_LOCATION Frameworks GENERATED ON)
     else()
-      find_file(MOLTENVK_DYLIB NAMES libMoltenVK.dylib PATH_SUFFIXES lib)
+      find_file(MOLTENVK_DYLIB NAMES libMoltenVK.dylib PATH_SUFFIXES lib PATHS "${CMAKE_SOURCE_DIR}/Externals/MoltenVK/") # slippi change: added in tree path
       if(NOT MOLTENVK_DYLIB)
         message(FATAL_ERROR "Couldn't find libMoltenVK.dylib.  Enable USE_BUNDLED_MOLTENVK?")
       endif()
@@ -691,6 +709,20 @@ if(APPLE)
   endif()
 
   if(MACOS_CODE_SIGNING)
+    # Code sign make file builds
+    # pre-merge slippi: the commented section is what we used to do, keeping it for reference until
+    # add_custom_command(TARGET dolphin-emu
+    #   POST_BUILD COMMAND
+    #   /usr/bin/codesign -f -s "${MACOS_CODE_SIGNING_IDENTITY}" --deep --options=runtime --entitlements "${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/DolphinEmu$<$<CONFIG:Debug>:Debug>.entitlements" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${OUTPUT_NAME}.app" || true)
+
+    # # Code sign builds for build systems that do have release/debug variants (Xcode)
+    # add_custom_command(TARGET dolphin-emu
+    #   POST_BUILD COMMAND
+    #   /usr/bin/codesign -f -s "${MACOS_CODE_SIGNING_IDENTITY}" --deep --options=runtime --entitlements "${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/DolphinEmuDebug.entitlements" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG}/${OUTPUT_NAME}.app" || true)
+
+    # add_custom_command(TARGET dolphin-emu
+    #   POST_BUILD COMMAND
+    #   /usr/bin/codesign -f -s "${MACOS_CODE_SIGNING_IDENTITY}" --deep --options=runtime --entitlements "${CMAKE_SOURCE_DIR}/Source/Core/DolphinQt/DolphinEmu.entitlements" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE}/${OUTPUT_NAME}.app" || true)
     add_custom_command(TARGET dolphin-emu
       POST_BUILD
       COMMAND "${CMAKE_SOURCE_DIR}/Tools/mac-codesign.sh"
@@ -714,6 +746,19 @@ endif()
 
 if(USE_DISCORD_PRESENCE)
   target_compile_definitions(dolphin-emu PRIVATE -DUSE_DISCORD_PRESENCE)
+endif()
+
+# Copy Playback Codes if needed
+if (SLIPPI_PLAYBACK)
+  #add_custom_command(TARGET dolphin-emu POST_BUILD
+  #  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/Data/PlaybackGeckoCodes/GALE01r2.ini" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys/GameSettings/GALE01r2.ini"
+  #)
+  #add_custom_command(TARGET dolphin-emu POST_BUILD
+  #  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/Data/PlaybackGeckoCodes/GALJ01r2.ini" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys/GameSettings/GALJ01r2.ini"
+  #)
+  add_custom_command(TARGET dolphin-emu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Data/PlaybackGeckoCodes/" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys/GameSettings/"
+  )
 endif()
 
 if(USE_RETRO_ACHIEVEMENTS)

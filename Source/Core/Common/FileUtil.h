@@ -65,6 +65,7 @@ enum
   D_BACKUP_IDX,
   D_RESOURCEPACK_IDX,
   D_DYNAMICINPUT_IDX,
+  D_SLIPPI_IDX,
   D_GRAPHICSMOD_IDX,
   D_FIRMWARE_IDX,
   D_GBAUSER_IDX,
@@ -92,6 +93,7 @@ enum
   F_GCSRAM_IDX,
   F_MEMORYWATCHERLOCATIONS_IDX,
   F_MEMORYWATCHERSOCKET_IDX,
+  F_USERJSON_IDX,
   F_WIISDCARDIMAGE_IDX,
   F_WIISYSCONF_IDX,
   F_DUALSHOCKUDPCLIENTCONFIG_IDX,
@@ -201,6 +203,9 @@ bool DeleteDirRecursively(const std::string& directory);
 // Returns the current directory
 std::string GetCurrentDir();
 
+// Gets the last modified time of a file
+u64 GetFileModTime(const std::string& path);
+
 // Copies source_path to dest_path, as if by std::filesystem::copy(). Returns true on success or if
 // the source and destination are already the same (as determined by std::filesystem::equivalent()).
 bool Copy(std::string_view source_path, std::string_view dest_path,
@@ -244,10 +249,12 @@ const std::string GetGpuDriverDirectory(unsigned int dir_index);
 
 #ifdef __APPLE__
 std::string GetBundleDirectory();
+std::string GetApplicationSupportDirectory();
 #endif
 
 std::string GetExePath();
 std::string GetExeDirectory();
+std::string GetHomeDirectory();
 
 bool WriteStringToFile(const std::string& filename, std::string_view str);
 bool ReadFileToString(const std::string& filename, std::string& str);

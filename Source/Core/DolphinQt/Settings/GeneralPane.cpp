@@ -16,8 +16,11 @@
 #include "Core/AchievementManager.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/UISettings.h"
+#include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
+#include "Core/PowerPC/PowerPC.h"
+#include "Core/Slippi/SlippiNetplay.h"
 #include "Core/System.h"
 
 #include "DolphinQt/Config/ConfigControls/ConfigBool.h"
@@ -28,10 +31,10 @@
 #include "DolphinQt/QtUtils/SignalBlocking.h"
 #include "DolphinQt/Settings.h"
 
-#include "UICommon/AutoUpdate.h"
 #ifdef USE_DISCORD_PRESENCE
 #include "UICommon/DiscordPresence.h"
 #endif
+#include <UICommon/AutoUpdate.h>
 
 constexpr int AUTO_UPDATE_DISABLE_INDEX = 0;
 constexpr int AUTO_UPDATE_RELEASE_INDEX = 1;
@@ -70,9 +73,6 @@ void GeneralPane::CreateLayout()
   // Create layout here
   CreateBasic();
 
-  if (AutoUpdateChecker::SystemSupportsAutoUpdates())
-    CreateAutoUpdate();
-
   CreateFallbackRegion();
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
@@ -106,14 +106,6 @@ void GeneralPane::ConnectLayout()
 #ifdef USE_DISCORD_PRESENCE
   connect(m_checkbox_discord_presence, &QCheckBox::toggled, this, &GeneralPane::OnSaveConfig);
 #endif
-
-  if (AutoUpdateChecker::SystemSupportsAutoUpdates())
-  {
-    connect(m_combobox_update_track, &QComboBox::currentIndexChanged, this,
-            &GeneralPane::OnSaveConfig);
-    connect(&Settings::Instance(), &Settings::AutoUpdateTrackChanged, this,
-            &GeneralPane::LoadConfig);
-  }
 
   // Advanced
   connect(m_combobox_speedlimit, &QComboBox::currentIndexChanged, [this] {
@@ -190,29 +182,6 @@ void GeneralPane::CreateBasic()
   speed_limit_layout->addRow(tr("&Speed Limit:"), m_combobox_speedlimit);
 }
 
-void GeneralPane::CreateAutoUpdate()
-{
-  auto* auto_update_group = new QGroupBox(tr("Auto Update Settings"));
-  auto* auto_update_group_layout = new QFormLayout;
-  auto_update_group->setLayout(auto_update_group_layout);
-  m_main_layout->addWidget(auto_update_group);
-
-  auto_update_group_layout->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
-  auto_update_group_layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-
-  m_combobox_update_track = new ToolTipComboBox();
-
-  auto_update_group_layout->addRow(tr("&Auto Update:"), m_combobox_update_track);
-
-  for (const QString& option :
-       {tr("Don't Update"),
-        // i18n: Releases is a noun.
-        tr("Releases (every few months)"), tr("Dev (multiple times a day)")})
-  {
-    m_combobox_update_track->addItem(option);
-  }
-}
-
 void GeneralPane::CreateFallbackRegion()
 {
   auto* fallback_region_group = new QGroupBox(tr("Fallback Region"));
@@ -270,6 +239,12 @@ void GeneralPane::LoadConfig()
       ->setChecked(Settings::Instance().IsAnalyticsEnabled());
 #endif
 
+  SignalBlocking(m_checkbox_dualcore)->setChecked(Config::Get(Config::MAIN_CPU_THREAD));
+  SignalBlocking(m_checkbox_cheats)->setChecked(Settings::Instance().GetCheatsEnabled());
+  SignalBlocking(m_checkbox_override_region_settings)
+      ->setChecked(Config::Get(Config::MAIN_OVERRIDE_REGION_SETTINGS));
+  SignalBlocking(m_checkbox_auto_disc_change)
+      ->setChecked(Config::Get(Config::MAIN_AUTO_DISC_CHANGE));
 #ifdef USE_DISCORD_PRESENCE
   SignalBlocking(m_checkbox_discord_presence)
       ->setChecked(Config::Get(Config::MAIN_USE_DISCORD_PRESENCE));
@@ -345,6 +320,7 @@ void GeneralPane::OnSaveConfig()
     Settings::Instance().SetAutoUpdateTrack(
         UpdateTrackFromIndex(m_combobox_update_track->currentIndex()));
   }
+  auto& settings = SConfig::GetInstance();
 
 #ifdef USE_DISCORD_PRESENCE
   Discord::SetDiscordPresenceEnabled(m_checkbox_discord_presence->isChecked());
@@ -356,6 +332,8 @@ void GeneralPane::OnSaveConfig()
 #endif
   Settings::Instance().SetFallbackRegion(
       UpdateFallbackRegionFromIndex(m_combobox_fallback_region->currentIndex()));
+
+  settings.SaveSettings();
 }
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS

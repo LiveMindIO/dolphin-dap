@@ -6,9 +6,10 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
-
 #include "Common/CommonTypes.h"
 #include "Common/SPSCQueue.h"
 
@@ -83,6 +84,8 @@ public:
   void StartReadToEmulatedRAM(u32 output_address, u64 dvd_offset, u32 length,
                               const DiscIO::Partition& partition, DVD::ReplyType reply_type,
                               s64 ticks_until_completion);
+  // SLIPPINOTES: Used for checking if the MxDt.dat file exists
+  void ReadFile(std::string& fileName, std::vector<u8>& buf);
 
 private:
   void WaitUntilIdle();
@@ -93,6 +96,11 @@ private:
 
   static void GlobalFinishRead(Core::System& system, u64 id, s64 cycles_late);
   void FinishRead(u64 id, s64 cycles_late);
+
+  // slippi change
+  // used for getting the mex files i think, but also might not be relevant anymore
+  std::string GetFileName(const DiscIO::Partition& partition, u64 offset);
+  // end slippi change
 
   struct ReadRequest
   {
