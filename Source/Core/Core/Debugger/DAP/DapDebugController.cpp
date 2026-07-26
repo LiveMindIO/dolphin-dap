@@ -410,11 +410,14 @@ void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> b
   // fallback, so the frozen value is still restored on DMA drift — only the
   // MMU-level CPU write suppression is lost (collateral damage of the global
   // memcheck store being wiped). Bugbot #77.
+  // DESNOTE(jbarber, 2026-07-26): Clear() and Add() each take their own
+  // CPUThreadGuard. Since the DAP session runs on the CPU thread (declared
+  // via DeclareAsCPUThread), these guards are no-ops — the core isn't
+  // unpaused between calls. On a non-CPU thread, there would be a brief
+  // window with no memchecks between Clear and Add, but that doesn't apply
+  // here. Bugbot #80.
   auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-  {
-    Core::CPUThreadGuard guard(m_system);
-    memchecks.Clear();
-  }
+  memchecks.Clear();
   m_freezes.clear();
   for (const DataBreakpointRequest& request : breakpoints)
   {

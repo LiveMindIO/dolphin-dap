@@ -1769,6 +1769,12 @@ private:
     body.emplace("watchId", static_cast<double>(watch_id));
     body.emplace("address", Json::FormatAddress(arguments->address));
     body.emplace("count", static_cast<double>(arguments->count));
+    // DESNOTE(jbarber, 2026-07-26): If `count` was capped, surface the
+    // original request size so the client knows it's watching fewer bytes
+    // than it asked for (mirrors readMemory's requested_count/unreadableBytes
+    // pattern). Bugbot #79.
+    if (arguments->requested_count > arguments->count)
+      body.emplace("requestedCount", static_cast<double>(arguments->requested_count));
     Respond(request.seq, "dolphin_realtimeWatch", std::move(body));
   }
 

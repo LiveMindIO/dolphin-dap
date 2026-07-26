@@ -439,6 +439,7 @@ std::optional<RealtimeWatchArguments> ParseRealtimeWatch(const picojson::object&
   RealtimeWatchArguments result;
   result.address = *address;
   result.count = capped_count;
+  result.requested_count = *count;
   return result;
 }
 
@@ -555,6 +556,13 @@ std::optional<InjectCodeArguments> ParseInjectCode(const picojson::object& argum
   const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
   if (!decoded || decoded->empty())
     return std::nullopt;
+  // DESNOTE(jbarber, 2026-07-26): Cap decoded payload at 1 MiB — the 16 MiB
+  // framing limit allows requests that decode to ~12 MiB, allocating that
+  // much on the session thread before the write even starts. Mirrors the
+  // readMemory/writeMemory/freeze caps. Bugbot #78.
+  constexpr std::size_t kMaxInjectCodeBytes = 1u << 20;  // 1 MiB
+  if (decoded->size() > kMaxInjectCodeBytes)
+    return std::nullopt;
   // Instructions are 4 bytes. Allow non-multiple-of-4 lengths for integrators
   // who pass trailing data or hand-crafted trampolines; the server won't
   // complain but PC alignment will be on them.
@@ -580,6 +588,10 @@ std::optional<DetourArguments> ParseDetour(const picojson::object& arguments)
     return std::nullopt;
   const std::optional<std::vector<u8>> decoded = Json::Base64Decode(*data);
   if (!decoded || decoded->empty() || decoded->size() % 4u != 0u)
+    return std::nullopt;
+  // DESNOTE(jbarber, 2026-07-26): Cap decoded payload at 1 MiB. Bugbot #78.
+  constexpr std::size_t kMaxDetourBodyBytes = 1u << 20;  // 1 MiB
+  if (decoded->size() > kMaxDetourBodyBytes)
     return std::nullopt;
 
   DetourArguments result;
