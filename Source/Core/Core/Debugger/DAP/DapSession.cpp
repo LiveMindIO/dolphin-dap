@@ -318,6 +318,17 @@ public:
       // Bugbot #67.
       s_entry_stop_handled.store(false);
     }
+    else
+    {
+      // DESNOTE(jbarber, 2026-07-26): Non-last session: remove only this
+      // session's own freezes so they don't outlive their owner. The global
+      // memcheck store is shared, so we can't Clear() without clobbering
+      // other sessions' state. RemoveFreeze targets the specific freeze
+      // memcheck by address, leaving other sessions' freezes intact.
+      // Bugbot #75.
+      for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
+        m_controller.RemoveFreeze(freeze_id);
+    }
     FlushEvents();
   }
 
@@ -1772,6 +1783,17 @@ private:
       return;
     }
 
+    // DESNOTE(jbarber, 2026-07-26): Remove the MMU-level freeze memcheck
+    // before cancelling the subscription. Without this, cancelling a frozen
+    // watch leaves the freeze memcheck active — CPU writes to the range stay
+    // suppressed with no owning watch to manage or unfreeze it. Bugbot #74.
+    auto freeze_it = m_watch_to_freeze.find(arguments->watch_id);
+    if (freeze_it != m_watch_to_freeze.end())
+    {
+      m_controller.RemoveFreeze(freeze_it->second);
+      m_watch_to_freeze.erase(freeze_it);
+    }
+
     if (!m_watch_sampler->RemoveSubscription(arguments->watch_id))
     {
       RespondError(request.seq, "dolphin_realtimeWatchCancel", "no such watch");
@@ -1841,6 +1863,20 @@ private:
         m_watch_sampler->RemoveSubscription(watch_id);
         RespondError(request.seq, "dolphin_freeze", "internal error: freeze-after-add failed");
         return;
+      }
+    }
+
+    // DESNOTE(jbarber, 2026-07-26): If this watch was already frozen, remove
+    // the old freeze memcheck before installing the new one. Without this,
+    // re-freezing leaks a memcheck entry in the global store — the old
+    // freeze_id is overwritten in m_watch_to_freeze and can never be torn
+    // down. Bugbot #76.
+    {
+      auto existing = m_watch_to_freeze.find(watch_id);
+      if (existing != m_watch_to_freeze.end())
+      {
+        m_controller.RemoveFreeze(existing->second);
+        m_watch_to_freeze.erase(existing);
       }
     }
 

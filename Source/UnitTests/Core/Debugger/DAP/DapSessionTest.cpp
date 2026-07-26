@@ -416,6 +416,159 @@ TEST_F(DapSessionTest, RealtimeWatchSubscribeAndCancelRoundTrip)
   (void)client.Receive();
 }
 
+// DESNOTE(jbarber, 2026-07-26): dolphin_freeze installs an is_freeze memcheck
+// in the global memchecks store. dolphin_unfreeze must remove it. Bugbot #74.
+TEST_F(DapSessionTest, FreezeAndUnfreezeRemovesMemcheck)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_freeze",
+    "arguments": {"memoryReference": "0x00004000", "count": 4,
+                  "data": "AAAAAA=="}
+  })");
+  const auto freeze = client.Receive();
+  ASSERT_TRUE(freeze.has_value());
+  ASSERT_TRUE(freeze->at("success").get<bool>());
+  const double watch_id =
+      freeze->at("body").get<picojson::object>().at("watchId").get<double>();
+  EXPECT_GT(watch_id, 0.0);
+  // Freeze memcheck is installed.
+  EXPECT_TRUE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(std::string(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "dolphin_unfreeze",
+    "arguments": {"watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) + R"( }
+  })");
+  const auto unfreeze = client.Receive();
+  ASSERT_TRUE(unfreeze.has_value());
+  ASSERT_TRUE(unfreeze->at("success").get<bool>());
+  // Freeze memcheck removed.
+  EXPECT_FALSE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+// DESNOTE(jbarber, 2026-07-26): Cancelling a frozen watch must also remove the
+// freeze memcheck — without this, the memcheck is orphaned with no owning
+// watch. Bugbot #74.
+TEST_F(DapSessionTest, CancelFrozenWatchRemovesFreezeMemcheck)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_freeze",
+    "arguments": {"memoryReference": "0x00004000", "count": 4,
+                  "data": "AAAAAA=="}
+  })");
+  const auto freeze = client.Receive();
+  ASSERT_TRUE(freeze.has_value());
+  ASSERT_TRUE(freeze->at("success").get<bool>());
+  const double watch_id =
+      freeze->at("body").get<picojson::object>().at("watchId").get<double>();
+  EXPECT_TRUE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  // Cancel the frozen watch — should remove the freeze memcheck.
+  client.Send(std::string(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "dolphin_realtimeWatchCancel",
+    "arguments": {"watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) + R"( }
+  })");
+  const auto cancel = client.Receive();
+  ASSERT_TRUE(cancel.has_value());
+  ASSERT_TRUE(cancel->at("success").get<bool>());
+  EXPECT_FALSE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+// DESNOTE(jbarber, 2026-07-26): Re-freezing the same watch must not leak a
+// memcheck entry — the old freeze must be removed before installing the new.
+// Bugbot #76.
+TEST_F(DapSessionTest, ReFreezeSameWatchDoesNotLeakMemcheck)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "dolphin_freeze",
+    "arguments": {"memoryReference": "0x00004000", "count": 4,
+                  "data": "AAAAAA=="}
+  })");
+  const auto freeze1 = client.Receive();
+  ASSERT_TRUE(freeze1.has_value());
+  ASSERT_TRUE(freeze1->at("success").get<bool>());
+  const double watch_id =
+      freeze1->at("body").get<picojson::object>().at("watchId").get<double>();
+
+  // Re-freeze with a different value — should not leak the old memcheck.
+  client.Send(std::string(R"({
+    "seq": 4,
+    "type": "request",
+    "command": "dolphin_freeze",
+    "arguments": {"watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) +
+              R"(, "data": "BBBBBB=="} 
+  })");
+  const auto freeze2 = client.Receive();
+  ASSERT_TRUE(freeze2.has_value());
+  ASSERT_TRUE(freeze2->at("success").get<bool>());
+
+  // Unfreeze — should succeed and leave no memcheck behind. If the old
+  // freeze leaked, there'd be a stale entry after unfreeze.
+  client.Send(std::string(R"({
+    "seq": 5,
+    "type": "request",
+    "command": "dolphin_unfreeze",
+    "arguments": {"watchId": )") +
+              std::to_string(static_cast<int>(watch_id)) + R"( }
+  })");
+  const auto unfreeze = client.Receive();
+  ASSERT_TRUE(unfreeze.has_value());
+  ASSERT_TRUE(unfreeze->at("success").get<bool>());
+  EXPECT_FALSE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
+
+  client.Send(R"({
+    "seq": 9,
+    "type": "request",
+    "command": "disconnect"
+  })");
+  (void)client.Receive();
+}
+
+// DESNOTE(jbarber, 2026-07-26): Disconnecting a session with an active freeze
+// must remove the freeze memcheck via the session's Run() teardown path
+// (ClearFreezes for last session, per-session RemoveFreeze for non-last).
+// We can't check this in the test body (races with the session thread
+// teardown), but we verify the freeze is present while alive and that
+// unfreeze removes it (covered by FreezeAndUnfreezeRemovesMemcheck). The
+// Run() teardown is straightforward: last session calls ClearBreakpoints
+// (wipes all memchecks) + ClearFreezes; non-last iterates m_watch_to_freeze
+// and calls RemoveFreeze per entry. Bugbot #75.
+
 TEST_F(DapSessionTest, VariablesReturnsRegisters)
 {
   Core::System::GetInstance().GetPPCState().gpr[3] = 0x12345678;

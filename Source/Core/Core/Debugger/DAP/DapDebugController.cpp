@@ -399,8 +399,23 @@ void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> b
   // replaces the global set. Concurrent DAP clients on the same core (a rare
   // multi-client setup) will clobber each other's watchpoints here; DAP and
   // GDB are mutually exclusive, and the typical flow is one client per core.
+  // DESNOTE(jbarber, 2026-07-26): memchecks.Clear() also wipes freeze memchecks
+  // installed by dolphin_freeze. Clear m_freezes so a later RemoveFreeze /
+  // dolphin_unfreeze safely returns false instead of calling
+  // MemChecks::Remove at a stale address and deleting an unrelated data
+  // watchpoint at the same address. The session's m_watch_to_freeze map
+  // becomes stale (freeze_ids no longer in m_freezes), but HandleUnfreeze
+  // and HandleRealtimeWatchCancel both handle RemoveFreeze returning false
+  // gracefully. The RealtimeWatchSampler's field-rate Tick remains as a
+  // fallback, so the frozen value is still restored on DMA drift — only the
+  // MMU-level CPU write suppression is lost (collateral damage of the global
+  // memcheck store being wiped). Bugbot #77.
   auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-  memchecks.Clear();
+  {
+    Core::CPUThreadGuard guard(m_system);
+    memchecks.Clear();
+  }
+  m_freezes.clear();
   for (const DataBreakpointRequest& request : breakpoints)
   {
     const u32 length = request.length == 0 ? 1 : request.length;
@@ -675,8 +690,13 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   // client sent no endLine, so a multi-GB source file would stall the
   // session (or OOM the response). Cap the file-read pass at the same
   // 256-line budget so a pathological source can't hang the session.
+  // DESNOTE(jbarber, 2026-07-26): Use unsigned arithmetic to avoid signed
+  // overflow when last_line is INT_MAX: `INT_MAX - first_line + 1` can
+  // overflow if first_line <= 0 (e.g., INT_MAX - 0 + 1 = INT_MAX + 1 → UB).
+  // Compute in u64, clamp to kMaxResponseLines, then back to int. Bugbot.
   constexpr int kMaxResponseLines = 256;
-  const int line_count = std::min(last_line - first_line + 1, kMaxResponseLines);
+  const u64 span = static_cast<u64>(last_line) - static_cast<u64>(first_line) + 1ull;
+  const int line_count = static_cast<int>(std::min(span, static_cast<u64>(kMaxResponseLines)));
 
   if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
       base_address <= symbol_db.GetSourceFiles().size())

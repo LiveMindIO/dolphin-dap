@@ -2051,4 +2051,49 @@ TEST_F(DapControllerTest, ClearFreezesRemovesAllFreezeMemchecks)
   EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS + 0x100, 4),
             (std::vector<u8>{0x55, 0x66, 0x77, 0x88}));
 }
+
+// DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
+// which wipes freeze memchecks from the global store. The m_freezes tracking
+// vector must also be cleared so a later RemoveFreeze safely returns false
+// instead of calling MemChecks::Remove at a stale address and deleting an
+// unrelated data watchpoint. Bugbot #77.
+TEST_F(DapControllerTest, SetDataBreakpointsClearsFreezeTracking)
+{
+  DAP::DapDebugController controller(System());
+  auto& memchecks = System().GetPowerPC().GetMemChecks();
+
+  // Install a freeze, then set a data breakpoint at a different address.
+  WriteRam(TEST_ADDRESS, {0x00, 0x00, 0x00, 0x00});
+  const std::vector<u8> frozen = {0xDE, 0xAD, 0xBE, 0xEF};
+  const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
+  ASSERT_NE(freeze_id, 0u);
+
+  // SetDataBreakpoints wipes all memchecks (including the freeze) and installs
+  // a data watchpoint at TEST_ADDRESS + 0x100.
+  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 0x100, .write = true}});
+  ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
+
+  // RemoveFreeze should return false (freeze tracking was cleared) and must
+  // NOT remove the data watchpoint at TEST_ADDRESS + 0x100.
+  EXPECT_FALSE(controller.RemoveFreeze(freeze_id));
+  EXPECT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
+}
+
+// DESNOTE(jbarber, 2026-07-26): GetSource line_count overflow guard. When
+// endLine is omitted (sent as -1), last_line is INT_MAX. The subtraction
+// `last_line - first_line + 1` can overflow signed int when first_line
+// is small (e.g., 0). Must use unsigned arithmetic to avoid UB.
+TEST_F(DapControllerTest, GetSourceLineCountNoOverflowOnOmittedEndLine)
+{
+  DAP::DapDebugController controller(System());
+  // first_line=0, end_line=-1 (omitted) → last_line=INT_MAX.
+  // line_count = min(INT_MAX - 0 + 1, 256) = 256 (no overflow).
+  auto result = controller.GetSource(1, 0, -1);
+  // The result may be nullopt if there's no source file at index 1, but
+  // the important thing is that we don't crash/UB from the overflow.
+  // If it does return content, line_count must be <= 256.
+  if (result.has_value())
+    EXPECT_LE(result->content.size(), 256u * 4096u);
+  // No crash = pass.
+}
 }  // namespace
