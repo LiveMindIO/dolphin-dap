@@ -182,6 +182,10 @@ struct RealtimeWatchArguments
 {
   u32 address = 0;
   u32 count = 0;
+  // The original count before the 1 MiB cap. Surfaces truncation in the
+  // response so the client knows it's watching fewer bytes than requested.
+  // Bugbot #79.
+  u32 requested_count = 0;
 };
 
 std::optional<RealtimeWatchArguments> ParseRealtimeWatch(const picojson::object& arguments);

@@ -340,6 +340,10 @@ the current contents so the first frame doesn't echo back as a spurious change.
 //  → {"watchId": 1, "address": "0xdeadb33f", "count": 256}
 ```
 
+`count` is capped at 1 MiB; if the original request exceeds the cap, the
+response includes `requestedCount` (the original value) alongside the capped
+`count` so the client knows it's watching fewer bytes than it asked for.
+
 Each frame in which any byte in `[address, address+count)` differs from the
 previous value, the server pushes:
 

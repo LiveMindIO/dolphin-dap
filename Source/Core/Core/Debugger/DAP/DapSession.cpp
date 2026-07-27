@@ -318,6 +318,17 @@ public:
       // Bugbot #67.
       s_entry_stop_handled.store(false);
     }
+    else
+    {
+      // DESNOTE(jbarber, 2026-07-26): Non-last session: remove only this
+      // session's own freezes so they don't outlive their owner. The global
+      // memcheck store is shared, so we can't Clear() without clobbering
+      // other sessions' state. RemoveFreeze targets the specific freeze
+      // memcheck by address, leaving other sessions' freezes intact.
+      // Bugbot #75.
+      for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
+        m_controller.RemoveFreeze(freeze_id);
+    }
     FlushEvents();
   }
 
@@ -1476,6 +1487,19 @@ private:
 
     m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
 
+    // DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
+    // which wipes all freeze memchecks from the global store (collateral
+    // damage of the single global memcheck store). Clear this session's
+    // freeze tracking so the sampler doesn't desync — without this, the
+    // sampler's frozen_value stays set (Tick keeps restoring via HostWrite)
+    // while the MMU write suppression is gone (CPU writes reach RAM for up
+    // to ~16ms before Tick restores). Unfreezing in the sampler clears
+    // frozen_value so Tick dispatches change events normally again, matching
+    // the now-absent MMU memcheck. Bugbot #81.
+    for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
+      m_watch_sampler->Unfreeze(watch_id);
+    m_watch_to_freeze.clear();
+
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setDataBreakpoints", std::move(body));
@@ -1758,6 +1782,12 @@ private:
     body.emplace("watchId", static_cast<double>(watch_id));
     body.emplace("address", Json::FormatAddress(arguments->address));
     body.emplace("count", static_cast<double>(arguments->count));
+    // DESNOTE(jbarber, 2026-07-26): If `count` was capped, surface the
+    // original request size so the client knows it's watching fewer bytes
+    // than it asked for (mirrors readMemory's requested_count/unreadableBytes
+    // pattern). Bugbot #79.
+    if (arguments->requested_count > arguments->count)
+      body.emplace("requestedCount", static_cast<double>(arguments->requested_count));
     Respond(request.seq, "dolphin_realtimeWatch", std::move(body));
   }
 
@@ -1770,6 +1800,17 @@ private:
       RespondError(request.seq, "dolphin_realtimeWatchCancel",
                    "invalid dolphin_realtimeWatchCancel arguments");
       return;
+    }
+
+    // DESNOTE(jbarber, 2026-07-26): Remove the MMU-level freeze memcheck
+    // before cancelling the subscription. Without this, cancelling a frozen
+    // watch leaves the freeze memcheck active — CPU writes to the range stay
+    // suppressed with no owning watch to manage or unfreeze it. Bugbot #74.
+    auto freeze_it = m_watch_to_freeze.find(arguments->watch_id);
+    if (freeze_it != m_watch_to_freeze.end())
+    {
+      m_controller.RemoveFreeze(freeze_it->second);
+      m_watch_to_freeze.erase(freeze_it);
     }
 
     if (!m_watch_sampler->RemoveSubscription(arguments->watch_id))
@@ -1841,6 +1882,20 @@ private:
         m_watch_sampler->RemoveSubscription(watch_id);
         RespondError(request.seq, "dolphin_freeze", "internal error: freeze-after-add failed");
         return;
+      }
+    }
+
+    // DESNOTE(jbarber, 2026-07-26): If this watch was already frozen, remove
+    // the old freeze memcheck before installing the new one. Without this,
+    // re-freezing leaks a memcheck entry in the global store — the old
+    // freeze_id is overwritten in m_watch_to_freeze and can never be torn
+    // down. Bugbot #76.
+    {
+      auto existing = m_watch_to_freeze.find(watch_id);
+      if (existing != m_watch_to_freeze.end())
+      {
+        m_controller.RemoveFreeze(existing->second);
+        m_watch_to_freeze.erase(existing);
       }
     }
 

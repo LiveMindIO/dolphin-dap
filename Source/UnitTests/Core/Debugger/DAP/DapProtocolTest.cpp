@@ -249,6 +249,10 @@ TEST(DapProtocol, ParseRealtimeWatchCapsCount)
   EXPECT_EQ(watch->address, 0x80003100u);
   constexpr u32 kExpectedCap = 1u << 20;  // 1 MiB
   EXPECT_EQ(watch->count, kExpectedCap);
+  // DESNOTE(jbarber, 2026-07-26): requested_count retains the original value
+  // so HandleRealtimeWatch can surface the cap via requestedCount in the
+  // response body. Bugbot #79.
+  EXPECT_EQ(watch->requested_count, 4294967295u);
 }
 
 TEST(DapProtocol, ParseRealtimeWatchPassesThroughUnderCap)
@@ -259,6 +263,8 @@ TEST(DapProtocol, ParseRealtimeWatchPassesThroughUnderCap)
   const auto watch = Protocol::ParseRealtimeWatch(args);
   ASSERT_TRUE(watch.has_value());
   EXPECT_EQ(watch->count, 4096u);
+  // requested_count == count when no cap was applied. Bugbot #79.
+  EXPECT_EQ(watch->requested_count, 4096u);
 }
 
 TEST(DapProtocol, ParseRealtimeWatchRejectsZeroCount)
@@ -944,6 +950,44 @@ TEST(DapProtocol, ParseDetourRejectsNonMultipleOfFourBodyLength)
   // "AAE=" decodes to one byte -- not a 4-byte aligned instruction sequence.
   const auto args = ParseObjectOrDie(
       R"({"memoryReference": "0x80001000", "detourBody": "AAE="})");
+  EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
+}
+
+// DESNOTE(jbarber, 2026-07-26): ParseInjectCode and ParseDetour must reject
+// decoded payloads > 1 MiB — the 16 MiB framing limit allows requests that
+// decode to ~12 MiB, allocating that much on the session thread before guest
+// writes start. Bugbot #78.
+TEST(DapProtocol, ParseInjectCodeRejectsOversizedDecode)
+{
+  // Build a 1 MiB + 4 byte payload (4-byte aligned), base64-encode it.
+  constexpr std::size_t kCap = 1u << 20;  // 1 MiB
+  std::vector<u8> raw(kCap + 4, 0x60);  // nop padding
+  const std::string b64 = DAP::Json::Base64Encode(raw);
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
+  EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
+}
+
+TEST(DapProtocol, ParseInjectCodeAcceptsAtCap)
+{
+  // Exactly 1 MiB is allowed (boundary check is >, not >=).
+  constexpr std::size_t kCap = 1u << 20;  // 1 MiB
+  std::vector<u8> raw(kCap, 0x60);
+  const std::string b64 = DAP::Json::Base64Encode(raw);
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
+  const auto parsed = Protocol::ParseInjectCode(args);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->code.size(), kCap);
+}
+
+TEST(DapProtocol, ParseDetourRejectsOversizedDecode)
+{
+  constexpr std::size_t kCap = 1u << 20;
+  std::vector<u8> raw(kCap + 4, 0x60);
+  const std::string b64 = DAP::Json::Base64Encode(raw);
+  const auto args = ParseObjectOrDie(
+      R"({"memoryReference": "0x80001000", "detourBody": ")" + b64 + R"("})");
   EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
 }
 
