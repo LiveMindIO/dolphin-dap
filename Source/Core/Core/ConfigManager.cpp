@@ -28,6 +28,8 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Core/Debugger/DWARF/DwarfImport.h"
+#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
@@ -279,7 +281,28 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
 
   auto& ppc_symbol_db = system.GetPPCSymbolDB();
 
+  // DESNOTE(jbarber, 2026-07-22): Clear source line info before any sidecar
+  // import so a previously-booted title's DWARF/entrypoints data doesn't
+  // merge with this title's. LoadMap below atomic-swaps m_functions /
+  // m_notes (so stale function symbols are handled there), but the PPC-
+  // specific m_source_files / m_line_table are additive and only ever
+  // populated by ImportConfiguredDwarfElf / ImportConfiguredEntrypoints
+  // below — without this clear, switching games leaves the previous title's
+  // line info sitting in the DB and DAP source mapping can hand back stale
+  // file/line lookups. The executable boot path already clears via the
+  // explicit PPCSymbolDB::Clear() in CBoot; this is a no-op there and
+  // covers Disc/WAD/NAND/IPL/MIOS boots (which never clear before reaching
+  // here).
+  ppc_symbol_db.ClearSourceLineInfo();
+
+  bool symbols_changed = false;
   if (ppc_symbol_db.LoadMapOnBoot(guard))
+    symbols_changed = true;
+  if (Core::Debug::ImportConfiguredDwarfElf(guard, ppc_symbol_db))
+    symbols_changed = true;
+  if (Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
+    symbols_changed = true;
+  if (symbols_changed)
     Host_PPCSymbolsChanged();
   HLE::Reload(system);
 

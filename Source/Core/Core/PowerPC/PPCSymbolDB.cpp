@@ -7,7 +7,9 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <ranges>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -32,6 +34,182 @@
 PPCSymbolDB::PPCSymbolDB() = default;
 
 PPCSymbolDB::~PPCSymbolDB() = default;
+
+bool PPCSymbolDB::Clear(const char* prefix)
+{
+  ClearSourceLineInfo();
+  return Common::SymbolDB::Clear(prefix);
+}
+
+u32 PPCSymbolDB::AddSourceFile(std::string file)
+{
+  std::lock_guard lock(m_mutex);
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (m_source_files[i] == file)
+      return i;
+  }
+  const u32 index = static_cast<u32>(m_source_files.size());
+  m_source_files.push_back(std::move(file));
+  return index;
+}
+
+void PPCSymbolDB::AddLineEntry(u32 address, u32 file_index, u32 line)
+{
+  std::lock_guard lock(m_mutex);
+  m_line_table[address] = LineEntry{file_index, line};
+}
+
+void PPCSymbolDB::ClearSourceLineInfo()
+{
+  std::lock_guard lock(m_mutex);
+  m_source_files.clear();
+  m_line_table.clear();
+}
+
+bool PPCSymbolDB::HasSourceLineInfo() const
+{
+  std::lock_guard lock(m_mutex);
+  return !m_line_table.empty();
+}
+
+std::optional<PPCSymbolDB::SourceLine> PPCSymbolDB::GetSourceLine(u32 addr) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty())
+    return std::nullopt;
+
+  auto it = m_line_table.upper_bound(addr);
+  if (it == m_line_table.begin())
+    return std::nullopt;
+
+  --it;
+  const LineEntry& entry = it->second;
+  if (entry.file_index >= m_source_files.size())
+    return std::nullopt;
+
+  return SourceLine{it->first, m_source_files[entry.file_index], entry.line};
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddress(std::string_view file, u32 line) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty() || m_source_files.empty())
+    return std::nullopt;
+
+  std::optional<u32> file_index;
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (m_source_files[i] == file)
+    {
+      file_index = i;
+      break;
+    }
+  }
+  if (!file_index)
+    return std::nullopt;
+
+  std::optional<u32> best_address;
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (entry.file_index != *file_index)
+      continue;
+    if (entry.line == line)
+      return address;
+    if (entry.line < line)
+      best_address = address;
+  }
+  return best_address;
+}
+
+namespace
+{
+bool SourcePathsMatch(std::string_view registered, std::string_view query)
+{
+  if (registered == query)
+    return true;
+
+  const auto basename = [](std::string_view path) -> std::string_view {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string_view::npos ? path : path.substr(slash + 1);
+  };
+
+  const std::string_view registered_name = basename(registered);
+  const std::string_view query_name = basename(query);
+  if (!registered_name.empty() && registered_name == query_name)
+    return true;
+
+  if (query.size() > registered.size())
+  {
+    const char separator = query[query.size() - registered.size() - 1];
+    if ((separator == '/' || separator == '\\') && query.substr(query.size() - registered.size()) == registered)
+      return true;
+  }
+
+  return false;
+}
+}  // namespace
+
+std::optional<u32> PPCSymbolDB::FindSourceFileIndex(const std::string_view file_query) const
+{
+  std::lock_guard lock(m_mutex);
+  if (file_query.empty() || m_source_files.empty())
+    return std::nullopt;
+
+  for (u32 i = 0; i < m_source_files.size(); ++i)
+  {
+    if (SourcePathsMatch(m_source_files[i], file_query))
+      return i;
+  }
+  return std::nullopt;
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddressForQuery(const std::string_view file_query,
+                                                        const u32 line) const
+{
+  const std::optional<u32> file_index = FindSourceFileIndex(file_query);
+  if (!file_index)
+    return std::nullopt;
+
+  std::string file;
+  {
+    std::lock_guard lock(m_mutex);
+    if (*file_index >= m_source_files.size())
+      return std::nullopt;
+    file = m_source_files[*file_index];
+  }
+  return GetLineAddress(file, line);
+}
+
+const std::vector<std::string>& PPCSymbolDB::GetSourceFiles() const
+{
+  std::lock_guard lock(m_mutex);
+  return m_source_files;
+}
+
+bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
+{
+  std::lock_guard lock(m_mutex);
+  if (m_line_table.empty() || size == 0)
+    return false;
+
+  // DESNOTE(jbarber, 2026-07-21): Compute the exclusive end in u64 so a range
+  // spanning the very top of the 32-bit address space doesn't wrap to 0 and
+  // erroneously match low-memory line entries.
+  const u64 end = static_cast<u64>(start) + static_cast<u64>(size);
+  std::set<u32> distinct_lines;
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (static_cast<u64>(address) < start || static_cast<u64>(address) >= end)
+      continue;
+
+    distinct_lines.insert(entry.line);
+    if (distinct_lines.size() > 1)
+      return true;
+  }
+
+  return false;
+}
 
 // Adds the function to the list, unless it's already there
 const Common::Symbol* PPCSymbolDB::AddFunction(const Core::CPUThreadGuard& guard, u32 start_addr)

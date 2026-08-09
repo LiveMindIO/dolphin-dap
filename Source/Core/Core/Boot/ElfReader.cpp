@@ -6,12 +6,15 @@
 #include <string>
 #include <utility>
 
+#include <span>
+
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/Swap.h"
 
+#include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/System.h"
@@ -224,7 +227,25 @@ bool ElfReader::LoadSymbols(const Core::CPUThreadGuard& guard, PPCSymbolDB& ppc_
     }
   }
   ppc_symbol_db.Index();
-  return hasSymbols;
+
+  bool dwarf_loaded = false;
+  const SectionID debug_section = GetSectionByName(".debug");
+  if (debug_section >= 0)
+  {
+    const u8* debug_data = GetSectionDataPtr(debug_section);
+    const SectionID line_section = GetSectionByName(".line");
+    const u8* line_data = line_section >= 0 ? GetSectionDataPtr(line_section) : nullptr;
+    if (debug_data)
+    {
+      const size_t debug_size = GetSectionSize(debug_section);
+      const size_t line_size = line_data ? GetSectionSize(line_section) : 0;
+      dwarf_loaded = Core::Debug::ImportDwarf(
+          guard, ppc_symbol_db, {debug_data, debug_size},
+          line_data ? std::span<const u8>{line_data, line_size} : std::span<const u8>{}, filename);
+    }
+  }
+
+  return hasSymbols || dwarf_loaded;
 }
 
 bool ElfReader::IsWii() const

@@ -3,6 +3,26 @@ add_dolphin_test(PageFaultTest PageFaultTest.cpp)
 add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 
+add_dolphin_test(DapFramingTest Debugger/DAP/DapFramingTest.cpp)
+add_dolphin_test(DapJsonTest Debugger/DAP/DapJsonTest.cpp)
+add_dolphin_test(DapProtocolTest Debugger/DAP/DapProtocolTest.cpp)
+add_dolphin_test(DapControllerTest Debugger/DAP/DapControllerTest.cpp)
+
+target_sources(DapControllerTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+add_dolphin_test(DapSessionTest Debugger/DAP/DapSessionTest.cpp)
+
+target_sources(DapSessionTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+add_dolphin_test(RealtimeWatchTest Debugger/DAP/RealtimeWatchTest.cpp)
+
+add_dolphin_test(DwarfReaderTest Debugger/DWARF/DwarfReaderTest.cpp)
+add_dolphin_test(PPCSymbolDBLineTest Debugger/DWARF/PPCSymbolDBLineTest.cpp)
+
+add_dolphin_test(EntrypointsImportTest Debugger/Entrypoints/EntrypointsImportTest.cpp)
+target_sources(EntrypointsImportTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+
+target_sources(DwarfReaderTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+target_sources(PPCSymbolDBLineTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+
 add_dolphin_test(DSPAcceleratorTest DSP/DSPAcceleratorTest.cpp)
 add_dolphin_test(DSPAssemblyTest
   DSP/DSPAssemblyTest.cpp

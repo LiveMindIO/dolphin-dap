@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "precision": "entrypoint",
+  "game_id": "GALE01",
+  "dwarf_elf": "main.elf",
+  "generated_at": "2026-07-04T20:50:00Z",
+  "generated_from": {
+    "tool": "entrypoints.py",
+    "tool_version": "0.0.0-fixture",
+    "report": "report.json"
+  },
+  "match_threshold": 100.0,
+  "include_complete_units": false,
+  "units": [
+    {
+      "name": "main/melee/gm/gm_16AE",
+      "file": "src/melee/gm/gm_16AE.c",
+      "complete": false,
+      "function_count": 2
+    }
+  ],
+  "functions": [
+    {
+      "name": "GetMatchTimer",
+      "address": 2148970376,
+      "size": 124,
+      "file": "src/melee/gm/gm_16AE.c",
+      "line": 117,
+      "unit": "main/melee/gm/gm_16AE",
+      "match_percent": 100.0,
+      "object_offset": 336
+    },
+    {
+      "name": "gm_8016AE80",
+      "address": 2148970112,
+      "size": 20,
+      "file": "src/melee/gm/gm_16AE.c",
+      "line": 42,
+      "unit": "main/melee/gm/gm_16AE",
+      "match_percent": 100.0,
+      "object_offset": 72
+    }
+  ]
+}
