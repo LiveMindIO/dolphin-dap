@@ -21,7 +21,6 @@
 #include "Core/Slippi/SlippiUser.h"
 #include "EXI_Device.h"
 
-#define ROLLBACK_MAX_FRAMES 7
 #define MAX_NAME_LENGTH 15
 #define MAX_MESSAGE_LENGTH 25
 #define CONNECT_CODE_LENGTH 8
@@ -241,6 +240,7 @@ private:
   void prepareOnlineMatchState();
   void setMatchSelections(u8* payload);
   bool shouldSkipOnlineFrame(s32 frame, s32 finalized_frame);
+  void handlePoorMatchPerformance(s32 frame);
   bool shouldAdvanceOnlineFrame(s32 frame);
   bool opponentRunahead();
   void handleLogInRequest();
@@ -291,8 +291,10 @@ private:
   std::vector<u8> playback_savestate_payload;
   std::vector<u8> gecko_list;
 
-  u32 stall_frame_count = 0;
-  bool is_connection_stalled = false;
+  u32 stall_frame_counts[SLIPPI_REMOTE_PLAYER_MAX] = {};
+  u64 last_interval_time_us = 0;
+  // Leaky accumulator of poor-performance intervals (see handlePoorMatchPerformance)
+  s32 perf_debt = 0;
 
   std::vector<u8> m_read_queue;
   std::unique_ptr<Slippi::SlippiGame> m_current_game = nullptr;

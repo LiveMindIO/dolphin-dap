@@ -1,7 +1,6 @@
 #include "SlippiMatchmaking.h"
 #include <string>
 #include <vector>
-#include "SlippiRustExtensions.h"
 #include "Common/Common.h"
 #include "Common/ENet.h"
 #include "Common/Logging/Log.h"
@@ -9,6 +8,8 @@
 #include "Common/Version.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
+#include "SlippiRustExtensions.h"
+
 
 #if defined __linux__ && HAVE_ALSA
 #elif defined __APPLE__
@@ -93,7 +94,8 @@ std::unique_ptr<SlippiNetplayClient> SlippiMatchmaking::GetNetplayClient()
 bool SlippiMatchmaking::IsFixedRulesMode(SlippiMatchmaking::OnlinePlayMode mode)
 {
   return mode == SlippiMatchmaking::OnlinePlayMode::UNRANKED ||
-         mode == SlippiMatchmaking::OnlinePlayMode::RANKED;
+         mode == SlippiMatchmaking::OnlinePlayMode::RANKED ||
+         mode == SlippiMatchmaking::OnlinePlayMode::PARTY;
 }
 
 void SlippiMatchmaking::sendMessage(json msg)
@@ -284,6 +286,33 @@ void SlippiMatchmaking::startMatchmaking()
   m_client = nullptr;
 
   int retry_count = 0;
+
+  // If IsFixedRules mode, don't allow ISO's that are known to desync
+  if (IsFixedRulesMode(m_search_settings.mode))
+  {
+    auto check = slprs_get_iso_md5_check(slprs_exi_device_ptr);
+    while (check.result == 0)
+    {
+      Common::SleepCurrentThread(500);
+      retry_count++;
+      if (retry_count > 10)
+      {
+        m_state = ProcessState::ERROR_ENCOUNTERED;
+        m_error_msg = "Could not validate ISO";
+        return;
+      }
+      check = slprs_get_iso_md5_check(slprs_exi_device_ptr);
+    }
+
+    if (check.result == 2)
+    {
+      m_state = ProcessState::ERROR_ENCOUNTERED;
+      m_error_msg = "Cannot queue for this mode with a modded ISO known to desync";
+      return;
+    }
+  }
+
+  retry_count = 0;
   auto user_info = m_user->GetUserInfo();
   while (m_client == nullptr && retry_count < 15)
   {
@@ -640,6 +669,7 @@ void SlippiMatchmaking::handleMatchmaking()
   m_mm_result.id = match_id;
   m_mm_result.players = m_player_info;
   m_mm_result.stages = m_allowed_stages;
+  m_mm_result.items = get_resp.value<u32>("items", 0);
 
   // Disconnect and destroy enet client to mm server
   terminateMmConnection();
