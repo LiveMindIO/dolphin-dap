@@ -47,7 +47,6 @@ public:
 
 private:
   void CloseDisplay();
-  void UpdateWindowPosition();
   void ProcessEvents();
 
   Display* m_display = nullptr;
@@ -137,7 +136,6 @@ bool PlatformX11::Init()
     ProcessEvents();
   }
 
-  UpdateWindowPosition();
   return true;
 }
 
@@ -153,7 +151,6 @@ void PlatformX11::MainLoop()
     UpdateRunningFlag();
     Core::HostDispatchJobs(Core::System::GetInstance());
     ProcessEvents();
-    UpdateWindowPosition();
 
     // TODO: Is this sleep appropriate?
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -168,17 +165,6 @@ WindowSystemInfo PlatformX11::GetWindowSystemInfo() const
   wsi.render_window = reinterpret_cast<void*>(m_window);
   wsi.render_surface = reinterpret_cast<void*>(m_window);
   return wsi;
-}
-
-void PlatformX11::UpdateWindowPosition()
-{
-  if (m_window_fullscreen)
-    return;
-
-  Window winDummy;
-  unsigned int borderDummy, depthDummy;
-  XGetGeometry(m_display, m_window, &winDummy, &m_window_x, &m_window_y, &m_window_width,
-               &m_window_height, &borderDummy, &depthDummy);
 }
 
 void PlatformX11::ProcessEvents()
@@ -218,7 +204,6 @@ void PlatformX11::ProcessEvents()
 #ifdef HAVE_XRANDR
         m_xrr_config->ToggleDisplayMode(m_window_fullscreen);
 #endif
-        UpdateWindowPosition();
       }
       else if (key >= XK_F1 && key <= XK_F8)
       {
@@ -266,7 +251,14 @@ void PlatformX11::ProcessEvents()
     break;
     case ConfigureNotify:
     {
-      if (g_presenter)
+      const unsigned int width = static_cast<unsigned int>(event.xconfigure.width);
+      const unsigned int height = static_cast<unsigned int>(event.xconfigure.height);
+      const bool size_changed = m_window_width != width || m_window_height != height;
+      m_window_x = event.xconfigure.x;
+      m_window_y = event.xconfigure.y;
+      m_window_width = width;
+      m_window_height = height;
+      if (size_changed && g_presenter)
         g_presenter->ResizeSurface();
     }
     break;
