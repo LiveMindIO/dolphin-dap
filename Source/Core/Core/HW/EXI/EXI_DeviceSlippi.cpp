@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <atomic>
 #include <semver/include/semver200.h>
 #include <utility>  // std::move
 
@@ -50,7 +51,7 @@
 // #define LOCAL_TESTING
 extern std::unique_ptr<SlippiPlaybackStatus> g_playback_status;
 extern std::unique_ptr<SlippiReplayComm> g_replay_comm;
-bool g_need_input_for_frame;
+std::atomic_bool g_need_input_for_frame;
 
 #ifdef LOCAL_TESTING
 bool is_local_connected = false;
@@ -3346,7 +3347,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     configureCommands(&mem_ptr[1], receive_commands_len);
     writeToFileAsync(&mem_ptr[0], receive_commands_len + 1, "create");
     buf_loc += receive_commands_len + 1;
-    g_need_input_for_frame = true;
+    g_need_input_for_frame.store(true);
     SlippiSpectateServer::getInstance().startGame();
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], receive_commands_len + 1);
     if (slippi_netplay)
@@ -3357,7 +3358,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
   if (byte == CMD_MENU_FRAME)
   {
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], _uSize);
-    g_need_input_for_frame = true;
+    g_need_input_for_frame.store(true);
     return;
   }
 
@@ -3397,7 +3398,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       prepareFrameData(&mem_ptr[buf_loc + 1]);
       break;
     case CMD_FRAME_BOOKEND:
-      g_need_input_for_frame = true;
+      g_need_input_for_frame.store(true);
       writeToFileAsync(&mem_ptr[buf_loc], payload_len + 1, "");
       SlippiSpectateServer::getInstance().write(&mem_ptr[buf_loc], payload_len + 1);
       if (slippi_netplay)

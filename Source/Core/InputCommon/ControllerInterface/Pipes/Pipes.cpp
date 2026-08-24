@@ -5,11 +5,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
 #include <iostream>
 #include <locale>
 #include <map>
+#include <poll.h>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -18,7 +21,12 @@
 
 #include "Common/FileUtil.h"
 #include "Common/StringUtil.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Core.h"
+#include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
+
+extern std::atomic_bool g_need_input_for_frame;  // From EXI_DeviceSlippi.cpp
 
 namespace ciface::Pipes
 {
@@ -100,24 +108,51 @@ PipeDevice::~PipeDevice()
 
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
-  // Read any pending characters off the pipe. If we hit a newline,
-  // then dequeue a command off the front of m_buf and parse it.
-  char buf[32];
-  ssize_t bytes_read = read(m_fd, buf, sizeof buf);
-  while (bytes_read > 0)
+  const bool wait_for_input =
+      Config::Get(Config::SLIPPI_BLOCKING_PIPES) && g_need_input_for_frame.load();
+  while (true)
   {
-    m_buf.append(buf, bytes_read);
-    bytes_read = read(m_fd, buf, sizeof buf);
+    std::size_t newline = m_buf.find('\n');
+    while (newline != std::string::npos)
+    {
+      std::string command = m_buf.substr(0, newline);
+      m_buf.erase(0, newline + 1);
+      if (ParseCommand(command) && wait_for_input)
+        return Core::DeviceRemoval::Keep;
+      newline = m_buf.find('\n');
+    }
+
+    char buf[32];
+    const ssize_t bytes_read = read(m_fd, buf, sizeof buf);
+    if (bytes_read > 0)
+    {
+      m_buf.append(buf, bytes_read);
+      continue;
+    }
+    if (bytes_read == 0)
+      return Core::DeviceRemoval::Keep;
+    if (errno == EINTR)
+      continue;
+    if (errno != EAGAIN)
+      return Core::DeviceRemoval::Keep;
+    if (!wait_for_input)
+      return Core::DeviceRemoval::Keep;
+
+    pollfd descriptor{m_fd, POLLIN, 0};
+    const int poll_result = poll(&descriptor, 1, 100);
+    if (poll_result < 0 && errno != EINTR)
+      return Core::DeviceRemoval::Keep;
+    if (poll_result == 0)
+    {
+      const ::Core::State state = ::Core::GetState(::Core::System::GetInstance());
+      if (state == ::Core::State::Stopping || state == ::Core::State::Uninitialized)
+        return Core::DeviceRemoval::Keep;
+    }
+    else if (descriptor.revents & (POLLERR | POLLNVAL))
+    {
+      return Core::DeviceRemoval::Keep;
+    }
   }
-  std::size_t newline = m_buf.find("\n");
-  while (newline != std::string::npos)
-  {
-    std::string command = m_buf.substr(0, newline);
-    ParseCommand(command);
-    m_buf.erase(0, newline + 1);
-    newline = m_buf.find("\n");
-  }
-  return Core::DeviceRemoval::Keep;
 }
 
 void PipeDevice::AddAxis(const std::string& name, double value)
@@ -145,11 +180,14 @@ void PipeDevice::SetAxis(const std::string& entry, double value)
     search_lo->second->SetState(lo);
 }
 
-void PipeDevice::ParseCommand(const std::string& command)
+bool PipeDevice::ParseCommand(const std::string& command)
 {
+  if (command == "FLUSH")
+    return true;
+
   const std::vector<std::string> tokens = SplitString(command, ' ');
   if (tokens.size() < 2 || tokens.size() > 4)
-    return;
+    return false;
   if (tokens[0] == "PRESS" || tokens[0] == "RELEASE")
   {
     auto search = m_buttons.find(tokens[1]);
@@ -171,5 +209,6 @@ void PipeDevice::ParseCommand(const std::string& command)
       SetAxis(tokens[1] + " Y", y);
     }
   }
+  return false;
 }
 }  // namespace ciface::Pipes

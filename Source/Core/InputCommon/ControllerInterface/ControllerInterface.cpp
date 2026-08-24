@@ -4,6 +4,7 @@
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
@@ -38,7 +39,7 @@
 #endif
 
 ControllerInterface g_controller_interface;
-extern bool g_need_input_for_frame;  // From EXI_DeviceSlippi.cpp
+extern std::atomic_bool g_need_input_for_frame;  // From EXI_DeviceSlippi.cpp
 
 // We need to save which input channel we are in by thread, so we can access the correct input
 // update values in different threads by input channel. We start from InputChannel::Host on all
@@ -356,7 +357,7 @@ void ControllerInterface::UpdateInput()
     tls_is_updating_devices = false;
 
     // All needed inputs have been read.
-    g_need_input_for_frame = false;
+    g_need_input_for_frame.store(false);
   }
 
   if (devices_to_remove.size() > 0)

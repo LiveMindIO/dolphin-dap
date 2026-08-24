@@ -48,7 +48,7 @@ private:
   };
 
   void AddAxis(const std::string& name, double value);
-  void ParseCommand(const std::string& command);
+  bool ParseCommand(const std::string& command);
   void SetAxis(const std::string& entry, double value);
 
   const int m_fd;
