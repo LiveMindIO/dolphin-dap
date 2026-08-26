@@ -195,6 +195,7 @@ const Info<std::string> MAIN_BBA_TAPSERVER_DESTINATION{
 const Info<std::string> MAIN_MODEM_TAPSERVER_DESTINATION{
     {System::Main, "Core", "MODEM_TAPSERVER_DESTINATION"}, "/tmp/dolphin-modem-tap"};
 const Info<std::string> MAIN_BBA_BUILTIN_IP{{System::Main, "Core", "BBA_BUILTIN_IP"}, ""};
+const Info<std::string> MAIN_POLLING_METHOD{{System::Main, "Core", "PollingMethod"}, "Console"};
 
 const Info<SerialInterface::SIDevices>& GetInfoForSIDevice(int channel)
 {

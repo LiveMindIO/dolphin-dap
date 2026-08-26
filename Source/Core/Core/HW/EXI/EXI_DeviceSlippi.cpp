@@ -26,6 +26,7 @@
 #include "Core/Debugger/Debugger_SymbolMap.h"
 #include "Core/GeckoCode.h"
 #include "Core/HW/EXI/EXI_DeviceSlippi.h"
+#include "Core/HW/EXI/SlippiInputState.h"
 #include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Host.h"
@@ -40,6 +41,7 @@
 #include "Core/Slippi/SlippiReplayComm.h"
 #include "Core/State.h"
 #include "Core/System.h"
+#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 #include "VideoCommon/OnScreenDisplay.h"
 
 // The Rust library that houses a "shadow" EXI Device that we can call into.
@@ -52,8 +54,7 @@
 // #define LOCAL_TESTING
 extern std::unique_ptr<SlippiPlaybackStatus> g_playback_status;
 extern std::unique_ptr<SlippiReplayComm> g_replay_comm;
-std::atomic_bool g_need_input_for_frame;
-std::atomic_bool g_synchronize_input_for_gameplay;
+std::atomic<u8> ciface::Pipes::g_input_state;
 
 #ifdef LOCAL_TESTING
 bool is_local_connected = false;
@@ -3349,8 +3350,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     configureCommands(&mem_ptr[1], receive_commands_len);
     writeToFileAsync(&mem_ptr[0], receive_commands_len + 1, "create");
     buf_loc += receive_commands_len + 1;
-    g_synchronize_input_for_gameplay.store(true);
-    g_need_input_for_frame.store(true);
+    ciface::Pipes::PublishInputState(true, true);
     SlippiSpectateServer::getInstance().startGame();
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], receive_commands_len + 1);
     if (slippi_netplay)
@@ -3361,12 +3361,10 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
   if (byte == CMD_MENU_FRAME)
   {
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], _uSize);
-    const u16 scene = _uSize >= 3 ? Common::swap16(&mem_ptr[1]) : 0;
-    // Gameplay 0x3E payloads are telemetry; frame bookends already synchronize their input.
-    const bool is_in_game_telemetry = scene == 0x0202 || scene == 0x0208 || scene == 0x0302;
-    g_synchronize_input_for_gameplay.store(is_in_game_telemetry);
-    if (!is_in_game_telemetry)
-      g_need_input_for_frame.store(true);
+    // Ordinary gameplay telemetry is synchronized by frame bookends. Pause transitions are not:
+    // game frames stop while controller input still needs to reach the pause menu.
+    const auto input_state = GetMenuFrameInputState({mem_ptr, _uSize});
+    ciface::Pipes::PublishInputState(input_state.synchronize_gameplay, input_state.input_requested);
     return;
   }
 
@@ -3406,8 +3404,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       prepareFrameData(&mem_ptr[buf_loc + 1]);
       break;
     case CMD_FRAME_BOOKEND:
-      g_synchronize_input_for_gameplay.store(true);
-      g_need_input_for_frame.store(true);
+      ciface::Pipes::PublishInputState(true, true);
       writeToFileAsync(&mem_ptr[buf_loc], payload_len + 1, "");
       SlippiSpectateServer::getInstance().write(&mem_ptr[buf_loc], payload_len + 1);
       if (slippi_netplay)

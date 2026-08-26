@@ -25,9 +25,7 @@
 #include "Core/Core.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
-
-extern std::atomic_bool g_need_input_for_frame;            // From EXI_DeviceSlippi.cpp
-extern std::atomic_bool g_synchronize_input_for_gameplay;  // From EXI_DeviceSlippi.cpp
+#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 
 namespace ciface::Pipes
 {
@@ -110,8 +108,8 @@ PipeDevice::~PipeDevice()
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
   const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
-  const bool wait_for_input = blocking_pipes && g_need_input_for_frame.load();
-  if (blocking_pipes && g_synchronize_input_for_gameplay.load() && !wait_for_input)
+  const bool wait_for_input = blocking_pipes && g_current_input_update.input_requested;
+  if (blocking_pipes && g_current_input_update.synchronize_gameplay && !wait_for_input)
     return Core::DeviceRemoval::Keep;
 
   while (true)

@@ -4,11 +4,10 @@
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 
 #include <algorithm>
-#include <atomic>
-
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
+#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 
 #ifdef CIFACE_USE_WIN32
 #include "InputCommon/ControllerInterface/Win32/Win32.h"
@@ -39,7 +38,7 @@
 #endif
 
 ControllerInterface g_controller_interface;
-extern std::atomic_bool g_need_input_for_frame;  // From EXI_DeviceSlippi.cpp
+thread_local ciface::Pipes::InputUpdateState ciface::Pipes::g_current_input_update;
 
 // We need to save which input channel we are in by thread, so we can access the correct input
 // update values in different threads by input channel. We start from InputChannel::Host on all
@@ -341,6 +340,12 @@ void ControllerInterface::UpdateInput()
   {
     std::lock_guard lk_devices(m_devices_mutex);
 
+    // Only SI updates may consume Slippi's frame request. Host and hotkey updates run on other
+    // threads and must not steal the request before the emulated CPU reaches its SI poll.
+    if (GetCurrentInputChannel() == ciface::InputChannel::SerialInterface)
+      ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+    else
+      ciface::Pipes::g_current_input_update = {};
     tls_is_updating_devices = true;
 
     for (auto& backend : m_input_backends)
@@ -355,9 +360,7 @@ void ControllerInterface::UpdateInput()
     }
 
     tls_is_updating_devices = false;
-
-    // All needed inputs have been read.
-    g_need_input_for_frame.store(false);
+    ciface::Pipes::g_current_input_update = {};
   }
 
   if (devices_to_remove.size() > 0)

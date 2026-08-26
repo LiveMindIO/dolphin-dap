@@ -1,7 +1,7 @@
 // Copyright 2026 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <atomic>
+#include <array>
 #include <memory>
 #include <string_view>
 
@@ -12,13 +12,57 @@
 
 #include "Common/Config/Config.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/HW/EXI/SlippiInputState.h"
+#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 #include "InputCommon/ControllerInterface/Pipes/Pipes.h"
-
-extern std::atomic_bool g_need_input_for_frame;
-extern std::atomic_bool g_synchronize_input_for_gameplay;
 
 namespace
 {
+TEST(MenuFrameInputStateTest, ShortPayloadRequestsUnsynchronizedInput)
+{
+  const std::array<u8, 2> payload{};
+  const auto state = ExpansionInterface::GetMenuFrameInputState(payload);
+
+  EXPECT_TRUE(state.input_requested);
+  EXPECT_FALSE(state.synchronize_gameplay);
+}
+
+TEST(MenuFrameInputStateTest, GameplayTelemetryRemainsSynchronized)
+{
+  std::array<u8, ExpansionInterface::MENU_FRAME_PAYLOAD_KIND_OFFSET + 1> payload{};
+  payload[1] = 0x02;
+  payload[2] = 0x02;
+  const auto state = ExpansionInterface::GetMenuFrameInputState(payload);
+
+  EXPECT_FALSE(state.input_requested);
+  EXPECT_TRUE(state.synchronize_gameplay);
+}
+
+TEST(MenuFrameInputStateTest, PauseTransitionsRequestUnsynchronizedInput)
+{
+  std::array<u8, ExpansionInterface::MENU_FRAME_PAYLOAD_KIND_OFFSET + 1> payload{};
+  payload[1] = 0x02;
+  payload[2] = 0x02;
+
+  for (const u8 payload_kind : {ExpansionInterface::MENU_FRAME_PAYLOAD_KIND_PAUSE_OPEN,
+                                ExpansionInterface::MENU_FRAME_PAYLOAD_KIND_PAUSE_CLOSE})
+  {
+    payload[ExpansionInterface::MENU_FRAME_PAYLOAD_KIND_OFFSET] = payload_kind;
+    const auto state = ExpansionInterface::GetMenuFrameInputState(payload);
+    EXPECT_TRUE(state.input_requested);
+    EXPECT_FALSE(state.synchronize_gameplay);
+  }
+}
+
+TEST(MenuFrameInputStateTest, NonGameplaySceneRequestsUnsynchronizedInput)
+{
+  const std::array<u8, 3> payload{0, 0x01, 0x02};
+  const auto state = ExpansionInterface::GetMenuFrameInputState(payload);
+
+  EXPECT_TRUE(state.input_requested);
+  EXPECT_FALSE(state.synchronize_gameplay);
+}
+
 class PipesTest : public testing::Test
 {
 protected:
@@ -29,8 +73,8 @@ protected:
     ASSERT_NE(fcntl(m_fds[0], F_SETFL, fcntl(m_fds[0], F_GETFL) | O_NONBLOCK), -1);
     m_device = std::make_unique<ciface::Pipes::PipeDevice>(m_fds[0], "TestPipe");
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, true);
-    g_need_input_for_frame.store(false);
-    g_synchronize_input_for_gameplay.store(false);
+    ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_current_input_update = {};
   }
 
   void TearDown() override
@@ -39,8 +83,8 @@ protected:
     if (m_fds[1] >= 0)
       close(m_fds[1]);
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
-    g_need_input_for_frame.store(false);
-    g_synchronize_input_for_gameplay.store(false);
+    ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_current_input_update = {};
     Config::Shutdown();
   }
 
@@ -67,7 +111,7 @@ TEST_F(PipesTest, DoesNotConsumeWhileUnarmed)
 {
   Write("PRESS A\nFLUSH\n");
   const int pending = PendingBytes();
-  g_synchronize_input_for_gameplay.store(true);
+  ciface::Pipes::g_current_input_update.synchronize_gameplay = true;
 
   m_device->UpdateInput();
 
@@ -78,19 +122,49 @@ TEST_F(PipesTest, DoesNotConsumeWhileUnarmed)
 TEST_F(PipesTest, ConsumesOneBatchPerArm)
 {
   Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
-  g_synchronize_input_for_gameplay.store(true);
+  ciface::Pipes::g_current_input_update.synchronize_gameplay = true;
 
-  g_need_input_for_frame.store(true);
+  ciface::Pipes::g_current_input_update.input_requested = true;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 1.0);
 
-  g_need_input_for_frame.store(false);
+  ciface::Pipes::g_current_input_update.input_requested = false;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 1.0);
 
-  g_need_input_for_frame.store(true);
+  ciface::Pipes::g_current_input_update.input_requested = true;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 0.0);
+}
+
+TEST_F(PipesTest, DefersRequestRaisedDuringCurrentUpdate)
+{
+  Write("PRESS A\nFLUSH\n");
+  ciface::Pipes::g_current_input_update.synchronize_gameplay = true;
+
+  // EXI raises this request after ControllerInterface captured the current update's false value.
+  ciface::Pipes::PublishInputState(true, true);
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 0.0);
+
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
+}
+
+TEST_F(PipesTest, DefersModeChangeUntilNextUpdate)
+{
+  Write("PRESS A\nFLUSH\n");
+  ciface::Pipes::g_current_input_update.synchronize_gameplay = true;
+
+  // EXI leaves gameplay after ControllerInterface captured this update's synchronized mode.
+  ciface::Pipes::PublishInputState(false, true);
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 0.0);
+
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
 }
 
 TEST_F(PipesTest, ConsumesWhileUnarmedOutsideGameplay)

@@ -79,6 +79,8 @@ private:
   };
 
   void SetNoResponse(u32 channel);
+  bool IsPollingOnSIRead() const;
+  void PollDevice(u32 channel);
   void UpdateInterrupts();
   void GenerateSIInterrupt(SIInterruptType type);
 
@@ -133,6 +135,7 @@ private:
     std::unique_ptr<ISIDevice> device;
 
     bool has_recent_device_unplug = false;
+    bool poll_pending = false;
   };
 
   // SI Poll: Controls how often a device is polled

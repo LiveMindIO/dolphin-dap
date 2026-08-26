@@ -30,6 +30,7 @@
 #include "Core/System.h"
 
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
+#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 
 namespace SerialInterface
 {
@@ -202,12 +203,21 @@ void SerialInterfaceManager::RunSIBuffer(u64 user_data, s64 cycles_late)
 
 void SerialInterfaceManager::DoState(PointerWrap& p)
 {
+  u8 pipe_input_state = ciface::Pipes::g_input_state.load(std::memory_order_acquire);
+  p.Do(pipe_input_state);
+  if (p.IsReadMode())
+  {
+    ciface::Pipes::g_input_state.store(pipe_input_state, std::memory_order_release);
+    ciface::Pipes::g_current_input_update = {};
+  }
+
   for (int i = 0; i < MAX_SI_CHANNELS; i++)
   {
     p.Do(m_channel[i].in_hi.hex);
     p.Do(m_channel[i].in_lo.hex);
     p.Do(m_channel[i].out.hex);
     p.Do(m_channel[i].has_recent_device_unplug);
+    p.Do(m_channel[i].poll_pending);
 
     const std::unique_ptr<ISIDevice>& device = m_channel[i].device;
     SIDevices type = device->GetDeviceType();
@@ -268,6 +278,7 @@ void SerialInterfaceManager::Init()
     m_channel[i].in_hi.hex = 0;
     m_channel[i].in_lo.hex = 0;
     m_channel[i].has_recent_device_unplug = false;
+    m_channel[i].poll_pending = false;
 
     auto& movie = m_system.GetMovie();
     if (movie.IsMovieActive())
@@ -369,6 +380,11 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
     mmio->Register(base | (SI_CHANNEL_0_IN_HI + 0xC * i),
                    MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
                      auto& si = system.GetSerialInterface();
+                     if (si.IsPollingOnSIRead() && si.m_channel[i].poll_pending)
+                     {
+                       si.PollDevice(i);
+                       si.m_channel[i].poll_pending = false;
+                     }
                      si.m_status_reg.hex &= clear_rdst;
                      si.UpdateInterrupts();
                      return si.m_channel[i].in_hi.hex;
@@ -492,6 +508,7 @@ void SerialInterfaceManager::AddDevice(std::unique_ptr<ISIDevice> device)
 
   // Set the new one
   m_channel.at(device_number).device = std::move(device);
+  m_channel.at(device_number).poll_pending = false;
 }
 
 void SerialInterfaceManager::AddDevice(const SIDevices device, int device_number)
@@ -522,6 +539,7 @@ void SerialInterfaceManager::ChangeDeviceDeterministic(SIDevices device, int cha
   m_channel[channel].out.hex = 0;
   m_channel[channel].in_hi.hex = 0;
   m_channel[channel].in_lo.hex = 0;
+  m_channel[channel].poll_pending = false;
 
   AddDevice(device, channel);
 
@@ -553,29 +571,62 @@ void SerialInterfaceManager::UpdateDevices()
   g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
   g_controller_interface.UpdateInput();
 
+  if (IsPollingOnSIRead())
+  {
+    for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
+    {
+      if (m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
+      {
+        m_channel[i].poll_pending = true;
+        m_status_reg.hex |= GetRDSTBit(i);
+      }
+      else
+      {
+        m_channel[i].poll_pending = false;
+        PollDevice(i);
+      }
+    }
+    UpdateInterrupts();
+    return;
+  }
+
   // Update channels and set the status bit if there's new data
   for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
   {
-    // ERRLATCH bit is maintained.
-    u32 errlatch = m_channel[i].in_hi.ERRLATCH.Value();
-    switch (m_channel[i].device->GetData(m_channel[i].in_hi.hex, m_channel[i].in_lo.hex))
-    {
-    case DataResponse::Success:
-      m_status_reg.hex |= GetRDSTBit(i);
-      break;
-    case DataResponse::ErrorNoResponse:
-      SetNoResponse(i);
-      [[fallthrough]];
-    case DataResponse::NoData:
-      errlatch = 1;
-      m_channel[i].in_hi.ERRSTAT = 1;
-      break;
-    }
-
-    m_channel[i].in_hi.ERRLATCH = errlatch;
+    m_channel[i].poll_pending = false;
+    PollDevice(i);
   }
 
   UpdateInterrupts();
+}
+
+bool SerialInterfaceManager::IsPollingOnSIRead() const
+{
+  return Config::Get(Config::SLIPPI_BLOCKING_PIPES) &&
+         Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
+         !m_system.GetMovie().IsMovieActive() && !NetPlay::IsNetPlayRunning();
+}
+
+void SerialInterfaceManager::PollDevice(u32 channel)
+{
+  // ERRLATCH is sticky across successful transfers.
+  u32 errlatch = m_channel[channel].in_hi.ERRLATCH.Value();
+  switch (m_channel[channel].device->GetData(m_channel[channel].in_hi.hex,
+                                             m_channel[channel].in_lo.hex))
+  {
+  case DataResponse::Success:
+    m_status_reg.hex |= GetRDSTBit(channel);
+    break;
+  case DataResponse::ErrorNoResponse:
+    SetNoResponse(channel);
+    [[fallthrough]];
+  case DataResponse::NoData:
+    errlatch = 1;
+    m_channel[channel].in_hi.ERRSTAT = 1;
+    break;
+  }
+
+  m_channel[channel].in_hi.ERRLATCH = errlatch;
 }
 
 SIDevices SerialInterfaceManager::GetDeviceType(int channel) const
