@@ -55,6 +55,11 @@
 extern std::unique_ptr<SlippiPlaybackStatus> g_playback_status;
 extern std::unique_ptr<SlippiReplayComm> g_replay_comm;
 std::atomic<u8> ciface::Pipes::g_input_state;
+std::atomic<u64> ciface::Pipes::g_input_request_sequence;
+std::atomic<u64> ciface::Pipes::g_last_input_request_us;
+std::atomic<u64> ciface::Pipes::g_last_consumed_request_sequence;
+std::atomic<u64> ciface::Pipes::g_last_consumed_request_us;
+std::atomic<u64> ciface::Pipes::g_last_si_update_us;
 
 #ifdef LOCAL_TESTING
 bool is_local_connected = false;

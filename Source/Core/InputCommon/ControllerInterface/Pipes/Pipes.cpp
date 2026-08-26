@@ -108,6 +108,12 @@ PipeDevice::~PipeDevice()
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
   const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
+  if (blocking_pipes &&
+      ControllerInterface::GetCurrentInputChannel() != ciface::InputChannel::SerialInterface)
+  {
+    return Core::DeviceRemoval::Keep;
+  }
+
   const bool wait_for_input = blocking_pipes && g_current_input_update.input_requested;
   if (blocking_pipes && g_current_input_update.synchronize_gameplay && !wait_for_input)
     return Core::DeviceRemoval::Keep;

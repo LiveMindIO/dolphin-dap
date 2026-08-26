@@ -168,6 +168,7 @@ LogManager::LogManager()
   m_log[LogType::SERIALINTERFACE_CARD] = {"SI_CARD", "CARD Interface"};
   m_log[LogType::SERIALINTERFACE_JVSIO] = {"SI_JVS", "JVS-I/O"};
   m_log[LogType::SLIPPI] = {"SLIPPI", "Slippi"};
+  m_log[LogType::SLIPPI_INPUT] = {"SLIPPI_INPUT", "Slippi Input Timing"};
   m_log[LogType::SLIPPI_ONLINE] = {"SLIPPI_ONLINE", "Slippi Online"};
   m_log[LogType::SLIPPI_RUST_DEPENDENCIES] = {"SLIPPI_RUST_DEPENDENCIES",
                                               "[Rust] Slippi Dependencies", false, true};

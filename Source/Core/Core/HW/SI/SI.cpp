@@ -18,6 +18,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
+#include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
@@ -34,6 +35,8 @@
 
 namespace SerialInterface
 {
+constexpr u64 INPUT_TIMING_LOG_SAMPLE_INTERVAL = 60;
+
 // SI Internal Hardware Addresses
 enum
 {
@@ -377,19 +380,44 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
     mmio->Register(base | (SI_CHANNEL_0_OUT + 0xC * i),
                    MMIO::DirectRead<u32>(&m_channel[i].out.hex),
                    MMIO::DirectWrite<u32>(&m_channel[i].out.hex));
-    mmio->Register(base | (SI_CHANNEL_0_IN_HI + 0xC * i),
-                   MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
-                     auto& si = system.GetSerialInterface();
-                     if (si.IsPollingOnSIRead() && si.m_channel[i].poll_pending)
-                     {
-                       si.PollDevice(i);
-                       si.m_channel[i].poll_pending = false;
-                     }
-                     si.m_status_reg.hex &= clear_rdst;
-                     si.UpdateInterrupts();
-                     return si.m_channel[i].in_hi.hex;
-                   }),
-                   MMIO::DirectWrite<u32>(&m_channel[i].in_hi.hex));
+    mmio->Register(
+        base | (SI_CHANNEL_0_IN_HI + 0xC * i),
+        MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
+          auto& si = system.GetSerialInterface();
+          if (si.IsPollingOnSIRead() && si.m_channel[i].poll_pending)
+          {
+            // The Slippi bookend can request the next pipe batch after the scheduled
+            // SI update. Refresh it before latching the controller response.
+            const bool late_refresh = ciface::Pipes::IsInputRequested();
+            const u64 read_us = Common::Timer::NowUs();
+            u64 refresh_duration_us = 0;
+            if (late_refresh)
+            {
+              g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
+              g_controller_interface.UpdatePipeInput();
+              refresh_duration_us = Common::Timer::NowUs() - read_us;
+            }
+            const u64 poll_us = Common::Timer::NowUs();
+            si.PollDevice(i);
+            si.m_channel[i].poll_pending = false;
+            const auto timing = ciface::Pipes::GetInputTimingSnapshot();
+            if (late_refresh && timing.request_sequence != 0 &&
+                timing.request_sequence % INPUT_TIMING_LOG_SAMPLE_INTERVAL == 0)
+            {
+              INFO_LOG_FMT(SLIPPI_INPUT,
+                           "event=input_consumed stage=deferred_si_read sequence={} "
+                           "channel={} request_us={} si_update_us={} read_us={} "
+                           "consumed_us={} refresh_duration_us={} poll_duration_us={}",
+                           timing.request_sequence, i, timing.last_request_us,
+                           timing.last_si_update_us, read_us, timing.last_consumed_request_us,
+                           refresh_duration_us, Common::Timer::NowUs() - poll_us);
+            }
+          }
+          si.m_status_reg.hex &= clear_rdst;
+          si.UpdateInterrupts();
+          return si.m_channel[i].in_hi.hex;
+        }),
+        MMIO::DirectWrite<u32>(&m_channel[i].in_hi.hex));
     mmio->Register(base | (SI_CHANNEL_0_IN_LO + 0xC * i),
                    MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
                      auto& si = system.GetSerialInterface();
@@ -566,12 +594,30 @@ void SerialInterfaceManager::UpdateDevices()
     }
   }
 
+  const bool polling_on_si_read = IsPollingOnSIRead();
+  const u64 update_us = Common::Timer::NowUs();
+  if (polling_on_si_read)
+    ciface::Pipes::RecordSIUpdate(update_us);
+
   // Update inputs at the rate of SI
   // Typically 120hz but is variable
   g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
   g_controller_interface.UpdateInput();
 
-  if (IsPollingOnSIRead())
+  const auto timing = ciface::Pipes::GetInputTimingSnapshot();
+  if (polling_on_si_read && timing.last_consumed_request_us >= update_us &&
+      timing.consumed_request_sequence != 0 &&
+      timing.consumed_request_sequence % INPUT_TIMING_LOG_SAMPLE_INTERVAL == 0)
+  {
+    INFO_LOG_FMT(SLIPPI_INPUT,
+                 "event=input_consumed stage=scheduled_si_update sequence={} request_us={} "
+                 "si_update_us={} consumed_us={} update_duration_us={} request_pending_after={}",
+                 timing.consumed_request_sequence, timing.last_request_us, update_us,
+                 timing.last_consumed_request_us, Common::Timer::NowUs() - update_us,
+                 ciface::Pipes::IsInputRequested());
+  }
+
+  if (polling_on_si_read)
   {
     for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
     {

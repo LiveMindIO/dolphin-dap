@@ -323,6 +323,16 @@ void ControllerInterface::RemoveDevice(std::function<bool(const ciface::Core::De
 // Update input for all devices.
 void ControllerInterface::UpdateInput()
 {
+  UpdateInput(false);
+}
+
+void ControllerInterface::UpdatePipeInput()
+{
+  UpdateInput(true);
+}
+
+void ControllerInterface::UpdateInput(bool pipes_only)
+{
   // This should never happen
   ASSERT(m_is_init);
   if (!m_is_init)
@@ -348,11 +358,16 @@ void ControllerInterface::UpdateInput()
       ciface::Pipes::g_current_input_update = {};
     tls_is_updating_devices = true;
 
-    for (auto& backend : m_input_backends)
-      backend->UpdateInput(devices_to_remove);
+    if (!pipes_only)
+    {
+      for (auto& backend : m_input_backends)
+        backend->UpdateInput(devices_to_remove);
+    }
 
     for (const auto& d : m_devices)
     {
+      if (pipes_only && d->GetSource() != "Pipe")
+        continue;
       // Theoretically we could avoid updating input on devices that don't have any references to
       // them, but in practice a few devices types could break in different ways, so we don't
       if (d->UpdateInput() == ciface::Core::DeviceRemoval::Remove)

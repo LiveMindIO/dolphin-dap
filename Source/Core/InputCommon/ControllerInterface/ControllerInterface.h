@@ -100,6 +100,7 @@ public:
   void PlatformPopulateDevices(const std::function<void()>& callback);
   bool IsInit() const { return m_is_init; }
   void UpdateInput();
+  void UpdatePipeInput();
 
   // Set adjustment from the full render window aspect-ratio to the drawn aspect-ratio.
   // Used to fit mouse cursor inputs to the relevant region of the render window.
@@ -124,6 +125,7 @@ public:
 
 private:
   void ClearDevices();
+  void UpdateInput(bool pipes_only);
 
   void InvokeDevicesChangedCallbacks();
 

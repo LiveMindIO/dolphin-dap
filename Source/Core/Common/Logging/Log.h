@@ -74,6 +74,7 @@ enum class LogType : int
   VIDEOINTERFACE,
   WII_IPC,
   WIIMOTE,
+  SLIPPI_INPUT,
 
   NUMBER_OF_LOGS  // Must be last
 };
