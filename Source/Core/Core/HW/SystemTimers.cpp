@@ -48,6 +48,7 @@ IPC_HLE_PERIOD: For the Wii Remote this is the call schedule:
 #include "Common/CommonTypes.h"
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/DSPEmulator.h"
@@ -282,7 +283,10 @@ void SystemTimersManager::Init()
       m_cpu_core_clock, m_system.GetAudioInterface().GetAIDSampleRateDivisor());
   core_timing.ScheduleEvent(audio_dma_callback_period, m_event_type_audio_dma);
 
-  core_timing.ScheduleEvent(vi.GetTicksPerField(), m_event_type_patch_engine);
+  // Slippi's Melee bootloader installs the GCT, so the host patch engine must not reapply it.
+  const auto melee_version = SConfig::GetSlippiConfig().melee_version;
+  if (melee_version != Melee::Version::NTSC && melee_version != Melee::Version::MEX)
+    core_timing.ScheduleEvent(vi.GetTicksPerField(), m_event_type_patch_engine);
 
   if (m_system.IsWii())
     core_timing.ScheduleEvent(m_ipc_hle_period, m_event_type_ipc_hle);

@@ -361,14 +361,13 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     s_state.compare_exchange_strong(expected, State::Running);
   }
 
-
-  bool debugger_enabled = false;
+  bool force_paused_for_debugger = false;
   {
 #ifndef _WIN32
     std::string gdb_socket = Config::Get(Config::MAIN_GDB_SOCKET);
     if (!gdb_socket.empty() && !AchievementManager::GetInstance().IsHardcoreModeActive())
     {
-      debugger_enabled = true;
+      force_paused_for_debugger = true;
       GDBStub::InitLocal(gdb_socket.data());
     }
     else
@@ -377,7 +376,7 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
       int gdb_port = Config::Get(Config::MAIN_GDB_PORT);
       if (gdb_port > 0 && !AchievementManager::GetInstance().IsHardcoreModeActive())
       {
-        debugger_enabled = true;
+        force_paused_for_debugger = true;
         GDBStub::Init(gdb_port);
       }
       else
@@ -389,12 +388,12 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
           // DESNOTE(jbarber, 2026-07-21): Only mark the debugger as enabled
           // after the listener is actually bound. InitLocal can fail (e.g.
           // sun_path overflow, permission, port in use); setting
-          // debugger_enabled=true unconditionally would force
+          // force_paused_for_debugger=true unconditionally would force
           // CPUSetInitialExecutionState below to pause the core with no DAP
           // server to ever resume it, hanging emulation on a bad config.
           DAP::InitLocal(dap_socket.data());
           if (DAP::IsActive())
-            debugger_enabled = true;
+            force_paused_for_debugger = Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY);
         }
         else
 #endif
@@ -404,12 +403,12 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
           {
             DAP::Init(dap_port);
             if (DAP::IsActive())
-              debugger_enabled = true;
+              force_paused_for_debugger = Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY);
           }
         }
       }
     }
-    CPUSetInitialExecutionState(system, debugger_enabled);
+    CPUSetInitialExecutionState(system, force_paused_for_debugger);
   }
 
   // Enter CPU run loop. When we leave it - we are done.

@@ -107,12 +107,14 @@ void SlippiSpectateServer::popEvents()
         m_event_buffer.push_back(json_message.dump());
         m_cursor_offset += m_event_buffer.size();
         m_menu_event.clear();
+        m_event_concat.clear();
         m_in_game = false;
         continue;
       }
       else if (json_message["type"] == "start_game")
       {
         m_event_buffer.clear();
+        m_event_concat.clear();
         u32 cursor = (u32)(m_event_buffer.size() + m_cursor_offset);
         m_in_game = true;
         json_message["cursor"] = cursor;
@@ -142,6 +144,7 @@ void SlippiSpectateServer::popEvents()
         {0x3C, true},  // FRAME_END
         {0x39, true},  // GAME_END
         {0x10, true},  // SPLIT_MESSAGE
+        {0x3E, true},  // MENU_FRAME
     };
 
     if (sendEvents.count(command))

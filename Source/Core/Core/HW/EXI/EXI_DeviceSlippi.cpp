@@ -13,6 +13,7 @@
 #include "Common/MemoryUtil.h"
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
+#include "Common/Swap.h"
 #include "Common/Thread.h"
 #include "Common/Version.h"
 
@@ -3358,7 +3359,11 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
   if (byte == CMD_MENU_FRAME)
   {
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], _uSize);
-    g_need_input_for_frame.store(true);
+    const u16 scene = _uSize >= 3 ? Common::swap16(&mem_ptr[1]) : 0;
+    // Gameplay 0x3E payloads are telemetry; frame bookends already synchronize their input.
+    const bool is_in_game_telemetry = scene == 0x0202 || scene == 0x0208 || scene == 0x0302;
+    if (!is_in_game_telemetry)
+      g_need_input_for_frame.store(true);
     return;
   }
 
