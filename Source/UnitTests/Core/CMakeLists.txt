@@ -3,6 +3,10 @@ add_dolphin_test(PageFaultTest PageFaultTest.cpp)
 add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 
+if(NOT WIN32)
+  add_dolphin_test(PipesTest PipesTest.cpp)
+endif()
+
 add_dolphin_test(DapFramingTest Debugger/DAP/DapFramingTest.cpp)
 add_dolphin_test(DapJsonTest Debugger/DAP/DapJsonTest.cpp)
 add_dolphin_test(DapProtocolTest Debugger/DAP/DapProtocolTest.cpp)

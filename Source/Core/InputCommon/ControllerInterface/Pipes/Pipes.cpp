@@ -108,8 +108,11 @@ PipeDevice::~PipeDevice()
 
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
-  const bool wait_for_input =
-      Config::Get(Config::SLIPPI_BLOCKING_PIPES) && g_need_input_for_frame.load();
+  const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
+  const bool wait_for_input = blocking_pipes && g_need_input_for_frame.load();
+  if (blocking_pipes && !wait_for_input)
+    return Core::DeviceRemoval::Keep;
+
   while (true)
   {
     std::size_t newline = m_buf.find('\n');
