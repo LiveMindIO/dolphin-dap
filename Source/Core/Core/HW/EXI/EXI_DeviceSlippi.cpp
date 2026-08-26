@@ -53,6 +53,7 @@
 extern std::unique_ptr<SlippiPlaybackStatus> g_playback_status;
 extern std::unique_ptr<SlippiReplayComm> g_replay_comm;
 std::atomic_bool g_need_input_for_frame;
+std::atomic_bool g_synchronize_input_for_gameplay;
 
 #ifdef LOCAL_TESTING
 bool is_local_connected = false;
@@ -3348,6 +3349,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     configureCommands(&mem_ptr[1], receive_commands_len);
     writeToFileAsync(&mem_ptr[0], receive_commands_len + 1, "create");
     buf_loc += receive_commands_len + 1;
+    g_synchronize_input_for_gameplay.store(true);
     g_need_input_for_frame.store(true);
     SlippiSpectateServer::getInstance().startGame();
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], receive_commands_len + 1);
@@ -3362,6 +3364,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     const u16 scene = _uSize >= 3 ? Common::swap16(&mem_ptr[1]) : 0;
     // Gameplay 0x3E payloads are telemetry; frame bookends already synchronize their input.
     const bool is_in_game_telemetry = scene == 0x0202 || scene == 0x0208 || scene == 0x0302;
+    g_synchronize_input_for_gameplay.store(is_in_game_telemetry);
     if (!is_in_game_telemetry)
       g_need_input_for_frame.store(true);
     return;
@@ -3403,6 +3406,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       prepareFrameData(&mem_ptr[buf_loc + 1]);
       break;
     case CMD_FRAME_BOOKEND:
+      g_synchronize_input_for_gameplay.store(true);
       g_need_input_for_frame.store(true);
       writeToFileAsync(&mem_ptr[buf_loc], payload_len + 1, "");
       SlippiSpectateServer::getInstance().write(&mem_ptr[buf_loc], payload_len + 1);

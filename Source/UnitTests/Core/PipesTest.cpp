@@ -15,6 +15,7 @@
 #include "InputCommon/ControllerInterface/Pipes/Pipes.h"
 
 extern std::atomic_bool g_need_input_for_frame;
+extern std::atomic_bool g_synchronize_input_for_gameplay;
 
 namespace
 {
@@ -29,6 +30,7 @@ protected:
     m_device = std::make_unique<ciface::Pipes::PipeDevice>(m_fds[0], "TestPipe");
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, true);
     g_need_input_for_frame.store(false);
+    g_synchronize_input_for_gameplay.store(false);
   }
 
   void TearDown() override
@@ -38,6 +40,7 @@ protected:
       close(m_fds[1]);
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
     g_need_input_for_frame.store(false);
+    g_synchronize_input_for_gameplay.store(false);
     Config::Shutdown();
   }
 
@@ -64,6 +67,7 @@ TEST_F(PipesTest, DoesNotConsumeWhileUnarmed)
 {
   Write("PRESS A\nFLUSH\n");
   const int pending = PendingBytes();
+  g_synchronize_input_for_gameplay.store(true);
 
   m_device->UpdateInput();
 
@@ -74,6 +78,7 @@ TEST_F(PipesTest, DoesNotConsumeWhileUnarmed)
 TEST_F(PipesTest, ConsumesOneBatchPerArm)
 {
   Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  g_synchronize_input_for_gameplay.store(true);
 
   g_need_input_for_frame.store(true);
   m_device->UpdateInput();
@@ -86,6 +91,16 @@ TEST_F(PipesTest, ConsumesOneBatchPerArm)
   g_need_input_for_frame.store(true);
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 0.0);
+}
+
+TEST_F(PipesTest, ConsumesWhileUnarmedOutsideGameplay)
+{
+  Write("PRESS A\nFLUSH\n");
+
+  m_device->UpdateInput();
+
+  EXPECT_EQ(ButtonA(), 1.0);
+  EXPECT_EQ(PendingBytes(), 0);
 }
 
 TEST_F(PipesTest, NonblockingModeRetainsDrainBehavior)
