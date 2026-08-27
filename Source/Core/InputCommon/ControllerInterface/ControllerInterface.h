@@ -99,8 +99,8 @@ public:
   // Without this, our devices list might end up in a mixed state.
   void PlatformPopulateDevices(const std::function<void()>& callback);
   bool IsInit() const { return m_is_init; }
-  void UpdateInput();
-  void UpdatePipeInput();
+  bool UpdateInput();
+  bool UpdatePipeInput();
 
   // Set adjustment from the full render window aspect-ratio to the drawn aspect-ratio.
   // Used to fit mouse cursor inputs to the relevant region of the render window.
@@ -125,7 +125,7 @@ public:
 
 private:
   void ClearDevices();
-  void UpdateInput(bool pipes_only);
+  bool UpdateInput(bool pipes_only);
 
   void InvokeDevicesChangedCallbacks();
 

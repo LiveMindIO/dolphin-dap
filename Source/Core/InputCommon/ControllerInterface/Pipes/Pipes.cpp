@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "Common/FileUtil.h"
+#include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
@@ -126,8 +127,19 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
     {
       std::string command = m_buf.substr(0, newline);
       m_buf.erase(0, newline + 1);
-      if (ParseCommand(command) && wait_for_input && --remaining_batches == 0)
-        return Core::DeviceRemoval::Keep;
+      if (ParseCommand(command))
+      {
+        ++m_batch_sequence;
+        DEBUG_LOG_FMT(SLIPPI_INPUT,
+                      "event=pipe_batch_consumed device={} batch_sequence={} requested={} "
+                      "request_sequence={} request_frame={} request_source={} remaining={}",
+                      m_name, m_batch_sequence, wait_for_input,
+                      g_current_input_update.request_sequence, g_current_input_update.request_frame,
+                      InputRequestSourceName(g_current_input_update.request_source),
+                      remaining_batches);
+        if (wait_for_input && --remaining_batches == 0)
+          return Core::DeviceRemoval::Keep;
+      }
       newline = m_buf.find('\n');
     }
 

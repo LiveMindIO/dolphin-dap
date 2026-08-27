@@ -126,6 +126,13 @@ private:
     BitField<24, 8, u32> INPUT4;
   };
 
+  enum class PendingPollPhase : u8
+  {
+    None,
+    AwaitingInput,
+    InputReady,
+  };
+
   // SI Channel
   struct SSIChannel
   {
@@ -135,7 +142,10 @@ private:
     std::unique_ptr<ISIDevice> device;
 
     bool has_recent_device_unplug = false;
-    bool poll_pending = false;
+    PendingPollPhase poll_phase = PendingPollPhase::None;
+    u64 pipe_request_sequence = 0;
+    s32 pipe_request_frame = 0;
+    u8 pipe_request_source = 0;
   };
 
   // SI Poll: Controls how often a device is polled

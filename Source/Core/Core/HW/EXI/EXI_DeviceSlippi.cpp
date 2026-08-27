@@ -58,6 +58,8 @@ std::atomic<u8> ciface::Pipes::g_input_state;
 std::atomic<u64> ciface::Pipes::g_pending_input_requests;
 std::atomic<u64> ciface::Pipes::g_input_request_sequence;
 std::atomic<u64> ciface::Pipes::g_last_input_request_us;
+std::atomic<s32> ciface::Pipes::g_last_input_request_frame;
+std::atomic<u8> ciface::Pipes::g_last_input_request_source;
 std::atomic<u64> ciface::Pipes::g_last_consumed_request_sequence;
 std::atomic<u64> ciface::Pipes::g_last_consumed_request_us;
 std::atomic<u64> ciface::Pipes::g_last_si_update_us;
@@ -3356,7 +3358,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     configureCommands(&mem_ptr[1], receive_commands_len);
     writeToFileAsync(&mem_ptr[0], receive_commands_len + 1, "create");
     buf_loc += receive_commands_len + 1;
-    ciface::Pipes::PublishInputState(true, true);
+    ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::GameStart);
     SlippiSpectateServer::getInstance().startGame();
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], receive_commands_len + 1);
     if (slippi_netplay)
@@ -3370,7 +3372,8 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     // Ordinary gameplay telemetry is synchronized by frame bookends. Pause transitions are not:
     // game frames stop while controller input still needs to reach the pause menu.
     const auto input_state = GetMenuFrameInputState({mem_ptr, _uSize});
-    ciface::Pipes::PublishInputState(input_state.synchronize_gameplay, input_state.input_requested);
+    ciface::Pipes::PublishInputState(input_state.synchronize_gameplay, input_state.input_requested,
+                                     ciface::Pipes::InputRequestSource::MenuFrame);
     return;
   }
 
@@ -3410,7 +3413,8 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       prepareFrameData(&mem_ptr[buf_loc + 1]);
       break;
     case CMD_FRAME_BOOKEND:
-      ciface::Pipes::PublishInputState(true, true);
+      ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
+                                       Common::swap32(&mem_ptr[buf_loc + 1]));
       writeToFileAsync(&mem_ptr[buf_loc], payload_len + 1, "");
       SlippiSpectateServer::getInstance().write(&mem_ptr[buf_loc], payload_len + 1);
       if (slippi_netplay)

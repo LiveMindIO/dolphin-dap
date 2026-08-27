@@ -321,22 +321,24 @@ void ControllerInterface::RemoveDevice(std::function<bool(const ciface::Core::De
 }
 
 // Update input for all devices.
-void ControllerInterface::UpdateInput()
+bool ControllerInterface::UpdateInput()
 {
-  UpdateInput(false);
+  return UpdateInput(false);
 }
 
-void ControllerInterface::UpdatePipeInput()
+bool ControllerInterface::UpdatePipeInput()
 {
-  UpdateInput(true);
+  return UpdateInput(true);
 }
 
-void ControllerInterface::UpdateInput(bool pipes_only)
+bool ControllerInterface::UpdateInput(bool pipes_only)
 {
   // This should never happen
   ASSERT(m_is_init);
   if (!m_is_init)
-    return;
+    return false;
+
+  bool consumed_pipe_request = false;
 
   // We add the devices to remove while we still have the "m_devices_mutex" locked.
   // This guarantees that:
@@ -353,7 +355,10 @@ void ControllerInterface::UpdateInput(bool pipes_only)
     // Only SI updates may consume Slippi's frame request. Host and hotkey updates run on other
     // threads and must not steal the request before the emulated CPU reaches its SI poll.
     if (GetCurrentInputChannel() == ciface::InputChannel::SerialInterface)
+    {
       ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+      consumed_pipe_request = ciface::Pipes::g_current_input_update.input_requests != 0;
+    }
     else
       ciface::Pipes::g_current_input_update = {};
     tls_is_updating_devices = true;
@@ -385,6 +390,8 @@ void ControllerInterface::UpdateInput(bool pipes_only)
                                  [device](const auto& d) { return d.lock().get() == device; });
     });
   }
+
+  return consumed_pipe_request;
 }
 
 void ControllerInterface::SetCurrentInputChannel(ciface::InputChannel input_channel)

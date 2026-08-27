@@ -77,6 +77,9 @@ protected:
     ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
+    ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
@@ -94,6 +97,9 @@ protected:
     ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
+    ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
@@ -136,17 +142,21 @@ TEST_F(PipesTest, DoesNotConsumeWhileUnarmed)
 TEST_F(PipesTest, RecordsRequestSequenceAndSIUpdateTime)
 {
   ciface::Pipes::RecordSIUpdate(123);
-  ciface::Pipes::PublishInputState(true, true);
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
+                                   1234);
 
   const auto first = ciface::Pipes::GetInputTimingSnapshot();
   EXPECT_EQ(first.request_sequence, 1u);
   EXPECT_GT(first.last_request_us, 123u);
   EXPECT_EQ(first.last_si_update_us, 123u);
+  EXPECT_EQ(first.request_frame, 1234);
+  EXPECT_EQ(first.request_source, ciface::Pipes::InputRequestSource::FrameBookend);
 
   ciface::Pipes::CaptureInputState();
   const auto consumed = ciface::Pipes::GetInputTimingSnapshot();
   EXPECT_EQ(consumed.consumed_request_sequence, 1u);
   EXPECT_GE(consumed.last_consumed_request_us, consumed.last_request_us);
+  EXPECT_EQ(consumed.request_frame, 1234);
 
   ciface::Pipes::PublishInputState(true, false);
   EXPECT_EQ(ciface::Pipes::GetInputTimingSnapshot().request_sequence, 1u);

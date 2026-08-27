@@ -98,7 +98,7 @@ struct CompressAndDumpStateArgs
 static Common::WorkQueueThreadSP<CompressAndDumpStateArgs> s_compress_and_dump_thread;
 
 // Don't forget to increase this after doing changes on the savestate system
-constexpr u32 STATE_VERSION = 194;  // Count pending blocking pipe requests
+constexpr u32 STATE_VERSION = 195;  // Preserve blocking pipe SI poll phase
 
 // Increase this if the StateExtendedHeader definition changes
 constexpr u32 EXTENDED_HEADER_VERSION = 1;  // Last changed in PR 12217

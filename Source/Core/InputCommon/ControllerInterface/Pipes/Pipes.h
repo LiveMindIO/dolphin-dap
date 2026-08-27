@@ -54,6 +54,7 @@ private:
   const int m_fd;
   const std::string m_name;
   std::string m_buf;
+  u64 m_batch_sequence = 0;
   std::map<std::string, PipeInput*> m_buttons;
   std::map<std::string, PipeInput*> m_axes;
 };
