@@ -34,6 +34,7 @@ constexpr u32 SI_CHANNEL_0_IN_LO = SI_MMIO_BASE + 0x08;
 constexpr u32 SI_CHANNEL_1_IN_HI = SI_MMIO_BASE + 0x10;
 constexpr u32 SI_STATUS_REG = SI_MMIO_BASE + 0x38;
 constexpr u32 SI_RDST0 = 0x20000000;
+constexpr u32 SI_RDST1 = 0x00200000;
 constexpr u32 SI_NOREP0 = 0x08000000;
 
 class MemoryConfigLayerLoader final : public Config::ConfigLayerLoader
@@ -271,6 +272,54 @@ TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchesInCurrentResponse)
   EXPECT_EQ(timing.request_sequence, 2u);
   EXPECT_EQ(timing.consumed_request_sequence, timing.request_sequence);
   EXPECT_GE(timing.last_consumed_request_us, timing.last_request_us);
+}
+
+TEST_F(SerialInterfaceTest, OnSIReadReflectsBookendAfterPreviousResponseWasLatched)
+{
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+  auto& si = m_system->GetSerialInterface();
+
+  int fds[2]{-1, -1};
+  ASSERT_EQ(pipe(fds), 0);
+  Common::ScopeGuard close_fds([&] {
+    if (fds[0] >= 0)
+      close(fds[0]);
+    if (fds[1] >= 0)
+      close(fds[1]);
+  });
+  ASSERT_NE(fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK), -1);
+
+  auto pipe_device = std::make_shared<ciface::Pipes::PipeDevice>(fds[0], "PostPollInputTestPipe");
+  fds[0] = -1;
+  ASSERT_TRUE(g_controller_interface.AddDevice(pipe_device));
+  Common::ScopeGuard remove_pipe([pipe_device] {
+    g_controller_interface.RemoveDevice(
+        [pipe_device](const ciface::Core::Device* device) { return device == pipe_device.get(); });
+  });
+
+  auto si_device = std::make_unique<PipeBackedSIDevice>(*m_system, 0, pipe_device);
+  auto* const si_device_ptr = si_device.get();
+  si.AddDevice(std::move(si_device));
+
+  constexpr std::string_view commands = "PRESS A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], commands.data(), commands.size()), static_cast<ssize_t>(commands.size()));
+  ciface::Pipes::PublishInputState(true, false);
+
+  si.UpdateDevices();
+  for (u32 channel = 0; channel != SerialInterface::MAX_SI_CHANNELS; ++channel)
+    m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 0xC * channel);
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 1u);
+
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
+                                   100);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 2u);
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_RDST1, 0u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0x12340001u);
+  EXPECT_EQ(m_devices[1]->GetDataCount(), 2u);
 }
 
 TEST_F(SerialInterfaceTest, OnSIReadDefersNewRequestBetweenChannelReads)

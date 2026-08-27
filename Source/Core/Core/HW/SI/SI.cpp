@@ -410,13 +410,20 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
         base | (SI_CHANNEL_0_IN_HI + 0xC * i),
         MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
           auto& si = system.GetSerialInterface();
-          if (si.IsPollingOnSIRead() && si.m_channel[i].poll_phase != PendingPollPhase::None)
+          const bool request_pending =
+              si.m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
+              ciface::Pipes::IsInputRequested();
+          bool response_owned = false;
+          for (const auto& channel : si.m_channel)
+            response_owned |= channel.poll_phase == PendingPollPhase::InputReady;
+
+          // A bookend can arrive after the previous response was read but before the next
+          // scheduled SI update. Treat that as a new read-time poll unless another channel still
+          // owns an unread input generation.
+          const bool late_refresh = request_pending && !response_owned;
+          if (si.IsPollingOnSIRead() &&
+              (si.m_channel[i].poll_phase != PendingPollPhase::None || late_refresh))
           {
-            // The Slippi bookend can request the next pipe batch after the scheduled
-            // SI update. Refresh it before latching the controller response.
-            const bool request_pending = ciface::Pipes::IsInputRequested();
-            const bool late_refresh =
-                si.m_channel[i].poll_phase == PendingPollPhase::AwaitingInput && request_pending;
             const u64 read_us = Common::Timer::NowUs();
             u64 refresh_duration_us = 0;
             if (late_refresh)
@@ -426,14 +433,17 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
               if (input_ready)
               {
                 const auto refreshed_timing = ciface::Pipes::GetInputTimingSnapshot();
-                for (auto& channel : si.m_channel)
+                for (u32 channel_index = 0; channel_index != MAX_SI_CHANNELS; ++channel_index)
                 {
-                  if (channel.poll_phase == PendingPollPhase::AwaitingInput)
+                  auto& channel = si.m_channel[channel_index];
+                  if (channel.device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
+                      channel.poll_phase != PendingPollPhase::InputReady)
                   {
                     channel.poll_phase = PendingPollPhase::InputReady;
                     channel.pipe_request_sequence = refreshed_timing.consumed_request_sequence;
                     channel.pipe_request_frame = refreshed_timing.request_frame;
                     channel.pipe_request_source = static_cast<u8>(refreshed_timing.request_source);
+                    si.m_status_reg.hex |= GetRDSTBit(channel_index);
                   }
                 }
               }
