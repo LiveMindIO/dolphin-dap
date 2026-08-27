@@ -118,13 +118,17 @@ protected:
     m_system = &Core::System::GetInstance();
     auto& si = m_system->GetSerialInterface();
     ciface::Pipes::g_input_state.store(0);
-    ciface::Pipes::g_pending_input_requests.store(0);
+    ciface::Pipes::ClearInputRequests();
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
     ciface::Pipes::g_last_input_request_source.store(
         static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
+    ciface::Pipes::g_last_consumed_input_request_us.store(0);
+    ciface::Pipes::g_last_consumed_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_consumed_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
     for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
@@ -154,13 +158,17 @@ protected:
   void TearDown() override
   {
     ciface::Pipes::g_input_state.store(0);
-    ciface::Pipes::g_pending_input_requests.store(0);
+    ciface::Pipes::ClearInputRequests();
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
     ciface::Pipes::g_last_input_request_source.store(
         static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
+    ciface::Pipes::g_last_consumed_input_request_us.store(0);
+    ciface::Pipes::g_last_consumed_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_consumed_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
@@ -344,7 +352,26 @@ TEST_F(SerialInterfaceTest, OnSIReadDefersNewRequestBetweenChannelReads)
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());
 }
 
-TEST_F(SerialInterfaceTest, OnSIReadDoesNotFoldScheduledAndLateBatchesIntoOneResponse)
+TEST_F(SerialInterfaceTest, OnSIReadLeavesCoalescedMenuRequestForNextGeneration)
+{
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+  auto& si = m_system->GetSerialInterface();
+
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  si.UpdateDevices();
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+
+  m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI);
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+
+  for (u32 channel = 1; channel != SerialInterface::MAX_SI_CHANNELS; ++channel)
+    m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 0xC * channel);
+  si.UpdateDevices();
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+}
+
+TEST_F(SerialInterfaceTest, OnSIReadRefreshesScheduledResponseBeforeItIsLatched)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
   auto& si = m_system->GetSerialInterface();
@@ -382,8 +409,10 @@ TEST_F(SerialInterfaceTest, OnSIReadDoesNotFoldScheduledAndLateBatchesIntoOneRes
                                    100);
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
   EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+  for (u32 channel = 1; channel != SerialInterface::MAX_SI_CHANNELS; ++channel)
+    m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 0xC * channel);
 
-  // N+1 is consumed by the scheduled update. N+2 must not overwrite it before it is latched.
+  // N+1 is consumed by the scheduled update, but N+2 supersedes it before any channel latches it.
   ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
                                    101);
   si.UpdateDevices();
@@ -391,16 +420,10 @@ TEST_F(SerialInterfaceTest, OnSIReadDoesNotFoldScheduledAndLateBatchesIntoOneRes
   ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
                                    102);
 
-  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
-  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
-  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
-
-  // The preserved request is consumed and latched by the following SI poll.
-  si.UpdateDevices();
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
   EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());
-  EXPECT_EQ(si_device_ptr->GetDataCount(), 3u);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 2u);
 }
 
 TEST_F(SerialInterfaceTest, ConsolePollingBehaviorIsUnchanged)
@@ -470,6 +493,7 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresDeferredPollAndPipeRequest)
                                    100);
   ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
                                    101);
+  const u64 saved_request_us = ciface::Pipes::GetInputTimingSnapshot().last_request_us;
 
   std::array<u8, 4096> state{};
   u8* state_ptr = state.data();
@@ -486,6 +510,7 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresDeferredPollAndPipeRequest)
   state_ptr = state.data();
   PointerWrap reader(&state_ptr, state.size(), PointerWrap::Mode::Read);
   si.DoState(reader);
+  EXPECT_EQ(ciface::Pipes::GetInputTimingSnapshot().last_request_us, saved_request_us);
 
   const auto pipe_state = ciface::Pipes::CaptureInputState();
   EXPECT_EQ(pipe_state.input_requests, 2u);
@@ -501,7 +526,7 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresDeferredPollAndPipeRequest)
   EXPECT_EQ(m_devices[0]->GetDataCount(), polls_before_load + 1);
 }
 
-TEST_F(SerialInterfaceTest, SaveStateRestoresInputReadyWithoutConsumingNewRequest)
+TEST_F(SerialInterfaceTest, SaveStateRestoresInputReadyForReadTimeRefresh)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
   auto& si = m_system->GetSerialInterface();
@@ -527,7 +552,9 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresInputReadyWithoutConsumingNewReques
 
   m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI);
   EXPECT_EQ(m_devices[0]->GetDataCount(), polls_before_load + 1);
-  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+  for (u32 channel = 1; channel != SerialInterface::MAX_SI_CHANNELS; ++channel)
+    m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 0xC * channel);
 
   si.UpdateDevices();
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());

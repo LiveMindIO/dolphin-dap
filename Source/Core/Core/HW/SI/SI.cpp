@@ -207,30 +207,96 @@ void SerialInterfaceManager::RunSIBuffer(u64 user_data, s64 cycles_late)
 void SerialInterfaceManager::DoState(PointerWrap& p)
 {
   u8 pipe_input_state = ciface::Pipes::g_input_state.load(std::memory_order_acquire);
-  u64 pending_pipe_input_requests =
-      ciface::Pipes::g_pending_input_requests.load(std::memory_order_acquire);
   u64 pipe_input_request_sequence =
       ciface::Pipes::g_input_request_sequence.load(std::memory_order_acquire);
+  u64 pipe_input_request_us =
+      ciface::Pipes::g_last_input_request_us.load(std::memory_order_relaxed);
   s32 pipe_input_request_frame =
       ciface::Pipes::g_last_input_request_frame.load(std::memory_order_relaxed);
   u8 pipe_input_request_source =
       ciface::Pipes::g_last_input_request_source.load(std::memory_order_relaxed);
+  u64 consumed_request_sequence =
+      ciface::Pipes::g_last_consumed_request_sequence.load(std::memory_order_relaxed);
+  u64 consumed_input_request_us =
+      ciface::Pipes::g_last_consumed_input_request_us.load(std::memory_order_relaxed);
+  s32 consumed_input_request_frame =
+      ciface::Pipes::g_last_consumed_input_request_frame.load(std::memory_order_relaxed);
+  u8 consumed_input_request_source =
+      ciface::Pipes::g_last_consumed_input_request_source.load(std::memory_order_relaxed);
+  u64 consumed_request_us =
+      ciface::Pipes::g_last_consumed_request_us.load(std::memory_order_relaxed);
   p.Do(pipe_input_state);
-  p.Do(pending_pipe_input_requests);
+  {
+    std::lock_guard lock(ciface::Pipes::g_input_request_mutex);
+    u64 pending_pipe_input_requests = ciface::Pipes::g_pending_input_request_queue.size();
+    p.Do(pending_pipe_input_requests);
+    if (p.IsReadMode())
+    {
+      ciface::Pipes::g_pending_input_request_queue.clear();
+      for (u64 i = 0; i != pending_pipe_input_requests; ++i)
+      {
+        u8 synchronize_gameplay = 0;
+        u64 sequence = 0;
+        u64 request_us = 0;
+        s32 frame = ciface::Pipes::INPUT_FRAME_UNKNOWN;
+        u8 source = 0;
+        p.Do(synchronize_gameplay);
+        p.Do(sequence);
+        p.Do(request_us);
+        p.Do(frame);
+        p.Do(source);
+        ciface::Pipes::g_pending_input_request_queue.push_back(
+            {synchronize_gameplay != 0, sequence, request_us, frame,
+             static_cast<ciface::Pipes::InputRequestSource>(source)});
+      }
+      ciface::Pipes::g_pending_input_requests.store(pending_pipe_input_requests,
+                                                    std::memory_order_release);
+    }
+    else
+    {
+      for (const auto& request : ciface::Pipes::g_pending_input_request_queue)
+      {
+        u8 synchronize_gameplay = request.synchronize_gameplay;
+        u64 sequence = request.sequence;
+        u64 request_us = request.request_us;
+        s32 frame = request.frame;
+        u8 source = static_cast<u8>(request.source);
+        p.Do(synchronize_gameplay);
+        p.Do(sequence);
+        p.Do(request_us);
+        p.Do(frame);
+        p.Do(source);
+      }
+    }
+  }
   p.Do(pipe_input_request_sequence);
+  p.Do(pipe_input_request_us);
   p.Do(pipe_input_request_frame);
   p.Do(pipe_input_request_source);
+  p.Do(consumed_request_sequence);
+  p.Do(consumed_input_request_us);
+  p.Do(consumed_input_request_frame);
+  p.Do(consumed_input_request_source);
+  p.Do(consumed_request_us);
   if (p.IsReadMode())
   {
     ciface::Pipes::g_input_state.store(pipe_input_state, std::memory_order_release);
-    ciface::Pipes::g_pending_input_requests.store(pending_pipe_input_requests,
-                                                  std::memory_order_release);
     ciface::Pipes::g_input_request_sequence.store(pipe_input_request_sequence,
                                                   std::memory_order_release);
+    ciface::Pipes::g_last_input_request_us.store(pipe_input_request_us, std::memory_order_relaxed);
     ciface::Pipes::g_last_input_request_frame.store(pipe_input_request_frame,
                                                     std::memory_order_relaxed);
     ciface::Pipes::g_last_input_request_source.store(pipe_input_request_source,
                                                      std::memory_order_relaxed);
+    ciface::Pipes::g_last_consumed_request_sequence.store(consumed_request_sequence,
+                                                          std::memory_order_relaxed);
+    ciface::Pipes::g_last_consumed_input_request_us.store(consumed_input_request_us,
+                                                          std::memory_order_relaxed);
+    ciface::Pipes::g_last_consumed_input_request_frame.store(consumed_input_request_frame,
+                                                             std::memory_order_relaxed);
+    ciface::Pipes::g_last_consumed_input_request_source.store(consumed_input_request_source,
+                                                              std::memory_order_relaxed);
+    ciface::Pipes::g_last_consumed_request_us.store(consumed_request_us, std::memory_order_relaxed);
     ciface::Pipes::g_current_input_update = {};
   }
 
@@ -413,14 +479,12 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
           const bool request_pending =
               si.m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
               ciface::Pipes::IsInputRequested();
-          bool response_owned = false;
-          for (const auto& channel : si.m_channel)
-            response_owned |= channel.poll_phase == PendingPollPhase::InputReady;
 
-          // A bookend can arrive after the previous response was read but before the next
-          // scheduled SI update. Treat that as a new read-time poll unless another channel still
-          // owns an unread input generation.
-          const bool late_refresh = request_pending && !response_owned;
+          // An unread scheduled response may be refreshed by a newer bookend. Once any channel
+          // latches that generation, preserve it for the remaining channels.
+          const bool late_refresh = request_pending &&
+                                    ciface::Pipes::IsSynchronizedInputRequested() &&
+                                    !si.IsPipeResponsePartiallyLatched();
           if (si.IsPollingOnSIRead() &&
               (si.m_channel[i].poll_phase != PendingPollPhase::None || late_refresh))
           {
@@ -436,13 +500,13 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
                 for (u32 channel_index = 0; channel_index != MAX_SI_CHANNELS; ++channel_index)
                 {
                   auto& channel = si.m_channel[channel_index];
-                  if (channel.device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
-                      channel.poll_phase != PendingPollPhase::InputReady)
+                  if (channel.device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
                   {
                     channel.poll_phase = PendingPollPhase::InputReady;
                     channel.pipe_request_sequence = refreshed_timing.consumed_request_sequence;
-                    channel.pipe_request_frame = refreshed_timing.request_frame;
-                    channel.pipe_request_source = static_cast<u8>(refreshed_timing.request_source);
+                    channel.pipe_request_frame = refreshed_timing.consumed_request_frame;
+                    channel.pipe_request_source =
+                        static_cast<u8>(refreshed_timing.consumed_request_source);
                     si.m_status_reg.hex |= GetRDSTBit(channel_index);
                   }
                 }
@@ -472,16 +536,16 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
                 Common::Timer::NowUs() - poll_us);
             si.m_channel[i].poll_phase = PendingPollPhase::None;
             const auto timing = ciface::Pipes::GetInputTimingSnapshot();
-            if (late_refresh && timing.request_sequence != 0 &&
-                timing.request_sequence % INPUT_TIMING_LOG_SAMPLE_INTERVAL == 0)
+            if (late_refresh && timing.consumed_request_sequence != 0 &&
+                timing.consumed_request_sequence % INPUT_TIMING_LOG_SAMPLE_INTERVAL == 0)
             {
               INFO_LOG_FMT(SLIPPI_INPUT,
                            "event=input_consumed stage=deferred_si_read sequence={} "
                            "frame={} source={} channel={} request_us={} si_update_us={} read_us={} "
                            "consumed_us={} refresh_duration_us={} poll_duration_us={}",
-                           timing.request_sequence, timing.request_frame,
-                           ciface::Pipes::InputRequestSourceName(timing.request_source), i,
-                           timing.last_request_us, timing.last_si_update_us, read_us,
+                           timing.consumed_request_sequence, timing.consumed_request_frame,
+                           ciface::Pipes::InputRequestSourceName(timing.consumed_request_source), i,
+                           timing.consumed_request_us, timing.last_si_update_us, read_us,
                            timing.last_consumed_request_us, refresh_duration_us,
                            Common::Timer::NowUs() - poll_us);
             }
@@ -688,9 +752,9 @@ void SerialInterfaceManager::UpdateDevices()
                  "event=input_consumed stage=scheduled_si_update sequence={} frame={} source={} "
                  "request_us={} "
                  "si_update_us={} consumed_us={} update_duration_us={} request_pending_after={}",
-                 timing.consumed_request_sequence, timing.request_frame,
-                 ciface::Pipes::InputRequestSourceName(timing.request_source),
-                 timing.last_request_us, update_us, timing.last_consumed_request_us,
+                 timing.consumed_request_sequence, timing.consumed_request_frame,
+                 ciface::Pipes::InputRequestSourceName(timing.consumed_request_source),
+                 timing.consumed_request_us, update_us, timing.last_consumed_request_us,
                  Common::Timer::NowUs() - update_us, ciface::Pipes::IsInputRequested());
   }
 
@@ -699,9 +763,11 @@ void SerialInterfaceManager::UpdateDevices()
     DEBUG_LOG_FMT(SLIPPI_INPUT,
                   "event=si_poll_armed phase={} sequence={} frame={} source={} "
                   "request_pending_after={}",
-                  pipe_input_ready ? "input_ready" : "awaiting_input", timing.request_sequence,
-                  timing.request_frame,
-                  ciface::Pipes::InputRequestSourceName(timing.request_source),
+                  pipe_input_ready ? "input_ready" : "awaiting_input",
+                  pipe_input_ready ? timing.consumed_request_sequence : timing.request_sequence,
+                  pipe_input_ready ? timing.consumed_request_frame : timing.request_frame,
+                  ciface::Pipes::InputRequestSourceName(
+                      pipe_input_ready ? timing.consumed_request_source : timing.request_source),
                   ciface::Pipes::IsInputRequested());
 
     for (u32 i = 0; i != MAX_SI_CHANNELS; ++i)
@@ -713,9 +779,10 @@ void SerialInterfaceManager::UpdateDevices()
         m_channel[i].pipe_request_sequence =
             pipe_input_ready ? timing.consumed_request_sequence : 0;
         m_channel[i].pipe_request_frame =
-            pipe_input_ready ? timing.request_frame : ciface::Pipes::INPUT_FRAME_UNKNOWN;
-        m_channel[i].pipe_request_source = static_cast<u8>(
-            pipe_input_ready ? timing.request_source : ciface::Pipes::InputRequestSource::Unknown);
+            pipe_input_ready ? timing.consumed_request_frame : ciface::Pipes::INPUT_FRAME_UNKNOWN;
+        m_channel[i].pipe_request_source =
+            static_cast<u8>(pipe_input_ready ? timing.consumed_request_source :
+                                               ciface::Pipes::InputRequestSource::Unknown);
         m_status_reg.hex |= GetRDSTBit(i);
       }
       else
@@ -745,6 +812,29 @@ bool SerialInterfaceManager::IsPollingOnSIRead() const
   return Config::Get(Config::SLIPPI_BLOCKING_PIPES) &&
          Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
          !m_system.GetMovie().IsMovieActive() && !NetPlay::IsNetPlayRunning();
+}
+
+bool SerialInterfaceManager::IsPipeResponsePartiallyLatched() const
+{
+  for (const auto& ready_channel : m_channel)
+  {
+    if (ready_channel.device->GetDeviceType() != SIDEVICE_GC_CONTROLLER ||
+        ready_channel.poll_phase != PendingPollPhase::InputReady)
+    {
+      continue;
+    }
+
+    for (const auto& channel : m_channel)
+    {
+      if (channel.device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
+          channel.poll_phase == PendingPollPhase::None &&
+          channel.pipe_request_sequence == ready_channel.pipe_request_sequence)
+      {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void SerialInterfaceManager::PollDevice(u32 channel)

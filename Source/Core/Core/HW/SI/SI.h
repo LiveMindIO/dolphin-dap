@@ -80,6 +80,7 @@ private:
 
   void SetNoResponse(u32 channel);
   bool IsPollingOnSIRead() const;
+  bool IsPipeResponsePartiallyLatched() const;
   void PollDevice(u32 channel);
   void UpdateInterrupts();
   void GenerateSIInterrupt(SIInterruptType type);

@@ -74,13 +74,17 @@ protected:
     m_device = std::make_unique<ciface::Pipes::PipeDevice>(m_fds[0], "TestPipe");
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, true);
     ciface::Pipes::g_input_state.store(0);
-    ciface::Pipes::g_pending_input_requests.store(0);
+    ciface::Pipes::ClearInputRequests();
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
     ciface::Pipes::g_last_input_request_source.store(
         static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
+    ciface::Pipes::g_last_consumed_input_request_us.store(0);
+    ciface::Pipes::g_last_consumed_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_consumed_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
     ciface::Pipes::g_current_input_update = {};
@@ -94,13 +98,17 @@ protected:
       close(m_fds[1]);
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
     ciface::Pipes::g_input_state.store(0);
-    ciface::Pipes::g_pending_input_requests.store(0);
+    ciface::Pipes::ClearInputRequests();
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
     ciface::Pipes::g_last_input_request_source.store(
         static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
+    ciface::Pipes::g_last_consumed_input_request_us.store(0);
+    ciface::Pipes::g_last_consumed_input_request_frame.store(ciface::Pipes::INPUT_FRAME_UNKNOWN);
+    ciface::Pipes::g_last_consumed_input_request_source.store(
+        static_cast<u8>(ciface::Pipes::InputRequestSource::Unknown));
     ciface::Pipes::g_last_consumed_request_us.store(0);
     ciface::Pipes::g_last_si_update_us.store(0);
     ciface::Pipes::g_current_input_update = {};
@@ -211,7 +219,7 @@ TEST_F(PipesTest, ConsumesOneBatchPerRequest)
   EXPECT_EQ(ButtonA(), 0.0);
 }
 
-TEST_F(PipesTest, ConsumesRequestsCapturedTogether)
+TEST_F(PipesTest, ConsumesSynchronizedRequestsCapturedTogether)
 {
   Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
   ciface::Pipes::PublishInputState(true, true);
@@ -226,6 +234,65 @@ TEST_F(PipesTest, ConsumesRequestsCapturedTogether)
   const auto timing = ciface::Pipes::GetInputTimingSnapshot();
   EXPECT_EQ(timing.request_sequence, 2u);
   EXPECT_EQ(timing.consumed_request_sequence, 2u);
+}
+
+TEST_F(PipesTest, ConsumesUnsynchronizedCoalescedRequestsInSeparateUpdates)
+{
+  ciface::Pipes::PublishInputState(false, true);
+  ciface::Pipes::PublishInputState(false, true);
+
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  ASSERT_EQ(ciface::Pipes::g_current_input_update.input_requests, 1u);
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+
+  Write("PRESS A\nFLUSH\n");
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
+
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  ASSERT_EQ(ciface::Pipes::g_current_input_update.input_requests, 1u);
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+
+  Write("RELEASE A\nFLUSH\n");
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 0.0);
+}
+
+TEST_F(PipesTest, PendingUnsynchronizedRequestKeepsItsModeAcrossTelemetry)
+{
+  ciface::Pipes::PublishInputState(false, true);
+  ciface::Pipes::PublishInputState(true, false);
+
+  const auto state = ciface::Pipes::CaptureInputState();
+  EXPECT_EQ(state.input_requests, 1u);
+  EXPECT_FALSE(state.synchronize_gameplay);
+}
+
+TEST_F(PipesTest, MixedRequestModesAreCapturedInOrder)
+{
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend, 42);
+
+  const auto menu_state = ciface::Pipes::CaptureInputState();
+  EXPECT_EQ(menu_state.input_requests, 1u);
+  EXPECT_FALSE(menu_state.synchronize_gameplay);
+  EXPECT_EQ(menu_state.request_sequence, 1u);
+  EXPECT_EQ(menu_state.request_source, ciface::Pipes::InputRequestSource::MenuFrame);
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+  const auto timing = ciface::Pipes::GetInputTimingSnapshot();
+  EXPECT_EQ(timing.request_sequence, 2u);
+  EXPECT_EQ(timing.request_frame, 42);
+  EXPECT_EQ(timing.consumed_request_sequence, 1u);
+  EXPECT_EQ(timing.consumed_request_frame, ciface::Pipes::INPUT_FRAME_UNKNOWN);
+  EXPECT_EQ(timing.consumed_request_source, ciface::Pipes::InputRequestSource::MenuFrame);
+
+  const auto gameplay_state = ciface::Pipes::CaptureInputState();
+  EXPECT_EQ(gameplay_state.input_requests, 1u);
+  EXPECT_TRUE(gameplay_state.synchronize_gameplay);
+  EXPECT_EQ(gameplay_state.request_sequence, 2u);
+  EXPECT_EQ(gameplay_state.request_frame, 42);
+  EXPECT_EQ(gameplay_state.request_source, ciface::Pipes::InputRequestSource::FrameBookend);
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
 }
 
 TEST_F(PipesTest, DefersRequestRaisedDuringCurrentUpdate)
