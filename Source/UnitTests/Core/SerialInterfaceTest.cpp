@@ -116,6 +116,7 @@ protected:
     m_system = &Core::System::GetInstance();
     auto& si = m_system->GetSerialInterface();
     ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
@@ -148,6 +149,7 @@ protected:
   void TearDown() override
   {
     ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
@@ -180,7 +182,7 @@ TEST_F(SerialInterfaceTest, HostUpdateDoesNotConsumeSlippiRequest)
   g_controller_interface.UpdateInput();
 
   const auto state = ciface::Pipes::CaptureInputState();
-  EXPECT_TRUE(state.input_requested);
+  EXPECT_EQ(state.input_requests, 1u);
   EXPECT_TRUE(state.synchronize_gameplay);
 }
 
@@ -206,7 +208,7 @@ TEST_F(SerialInterfaceTest, OnSIReadDefersAndLatchesOnePoll)
   EXPECT_EQ(m_devices[0]->GetDataCount(), 2u);
 }
 
-TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchInCurrentResponse)
+TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchesInCurrentResponse)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
   auto& si = m_system->GetSerialInterface();
@@ -234,7 +236,7 @@ TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchInCurrentResponse)
   auto* const si_device_ptr = si_device.get();
   si.AddDevice(std::move(si_device));
 
-  constexpr std::string_view commands = "PRESS A\nFLUSH\n";
+  constexpr std::string_view commands = "RELEASE A\nFLUSH\nPRESS A\nFLUSH\n";
   ASSERT_EQ(write(fds[1], commands.data(), commands.size()), static_cast<ssize_t>(commands.size()));
   ciface::Pipes::PublishInputState(true, false);
 
@@ -245,6 +247,7 @@ TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchInCurrentResponse)
   EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
   EXPECT_EQ(si_device_ptr->GetDataCount(), 0u);
 
+  ciface::Pipes::PublishInputState(true, true);
   ciface::Pipes::PublishInputState(true, true);
 
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
@@ -258,7 +261,7 @@ TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchInCurrentResponse)
   EXPECT_EQ(pending, 0);
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());
   const auto timing = ciface::Pipes::GetInputTimingSnapshot();
-  EXPECT_EQ(timing.request_sequence, 1u);
+  EXPECT_EQ(timing.request_sequence, 2u);
   EXPECT_EQ(timing.consumed_request_sequence, timing.request_sequence);
   EXPECT_GE(timing.last_consumed_request_us, timing.last_request_us);
 }
@@ -327,6 +330,7 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresDeferredPollAndPipeRequest)
   auto& si = m_system->GetSerialInterface();
   si.UpdateDevices();
   ciface::Pipes::PublishInputState(true, true);
+  ciface::Pipes::PublishInputState(true, true);
 
   std::array<u8, 4096> state{};
   u8* state_ptr = state.data();
@@ -343,8 +347,10 @@ TEST_F(SerialInterfaceTest, SaveStateRestoresDeferredPollAndPipeRequest)
   si.DoState(reader);
 
   const auto pipe_state = ciface::Pipes::CaptureInputState();
-  EXPECT_TRUE(pipe_state.input_requested);
+  EXPECT_EQ(pipe_state.input_requests, 2u);
   EXPECT_TRUE(pipe_state.synchronize_gameplay);
+  const auto timing = ciface::Pipes::GetInputTimingSnapshot();
+  EXPECT_EQ(timing.consumed_request_sequence, timing.request_sequence);
 
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
   m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI);

@@ -207,10 +207,15 @@ void SerialInterfaceManager::RunSIBuffer(u64 user_data, s64 cycles_late)
 void SerialInterfaceManager::DoState(PointerWrap& p)
 {
   u8 pipe_input_state = ciface::Pipes::g_input_state.load(std::memory_order_acquire);
+  u64 pending_pipe_input_requests =
+      ciface::Pipes::g_pending_input_requests.load(std::memory_order_acquire);
   p.Do(pipe_input_state);
+  p.Do(pending_pipe_input_requests);
   if (p.IsReadMode())
   {
     ciface::Pipes::g_input_state.store(pipe_input_state, std::memory_order_release);
+    ciface::Pipes::g_pending_input_requests.store(pending_pipe_input_requests,
+                                                  std::memory_order_release);
     ciface::Pipes::g_current_input_update = {};
   }
 

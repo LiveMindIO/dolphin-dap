@@ -12,14 +12,14 @@ namespace ciface::Pipes
 {
 struct InputUpdateState
 {
-  bool input_requested = false;
+  u64 input_requests = 0;
   bool synchronize_gameplay = false;
 };
 
-constexpr u8 INPUT_REQUESTED = 1 << 0;
-constexpr u8 SYNCHRONIZE_GAMEPLAY = 1 << 1;
+constexpr u8 SYNCHRONIZE_GAMEPLAY = 1 << 0;
 
 extern std::atomic<u8> g_input_state;
+extern std::atomic<u64> g_pending_input_requests;
 extern std::atomic<u64> g_input_request_sequence;
 extern std::atomic<u64> g_last_input_request_us;
 extern std::atomic<u64> g_last_consumed_request_sequence;
@@ -38,43 +38,35 @@ struct InputTimingSnapshot
 
 inline void PublishInputState(bool synchronize_gameplay, bool request_input)
 {
+  g_input_state.store(synchronize_gameplay ? SYNCHRONIZE_GAMEPLAY : 0, std::memory_order_release);
+
   if (request_input)
   {
     g_last_input_request_us.store(Common::Timer::NowUs(), std::memory_order_relaxed);
     g_input_request_sequence.fetch_add(1, std::memory_order_release);
+    g_pending_input_requests.fetch_add(1, std::memory_order_release);
   }
-
-  u8 current = g_input_state.load();
-  u8 desired;
-  do
-  {
-    desired = current & INPUT_REQUESTED;
-    if (synchronize_gameplay)
-      desired |= SYNCHRONIZE_GAMEPLAY;
-    if (request_input)
-      desired |= INPUT_REQUESTED;
-  } while (!g_input_state.compare_exchange_weak(current, desired));
 }
 
 inline InputUpdateState CaptureInputState()
 {
-  const u8 state = g_input_state.fetch_and(SYNCHRONIZE_GAMEPLAY);
-  const bool input_requested = (state & INPUT_REQUESTED) != 0;
-  if (input_requested)
+  const u8 state = g_input_state.load(std::memory_order_acquire);
+  const u64 input_requests = g_pending_input_requests.exchange(0, std::memory_order_acq_rel);
+  if (input_requests != 0)
   {
     g_last_consumed_request_sequence.store(g_input_request_sequence.load(std::memory_order_acquire),
                                            std::memory_order_relaxed);
     g_last_consumed_request_us.store(Common::Timer::NowUs(), std::memory_order_release);
   }
   return {
-      .input_requested = input_requested,
+      .input_requests = input_requests,
       .synchronize_gameplay = (state & SYNCHRONIZE_GAMEPLAY) != 0,
   };
 }
 
 inline bool IsInputRequested()
 {
-  return (g_input_state.load(std::memory_order_acquire) & INPUT_REQUESTED) != 0;
+  return g_pending_input_requests.load(std::memory_order_acquire) != 0;
 }
 
 inline void RecordSIUpdate(u64 now_us)

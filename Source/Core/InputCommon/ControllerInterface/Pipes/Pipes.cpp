@@ -114,7 +114,8 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
     return Core::DeviceRemoval::Keep;
   }
 
-  const bool wait_for_input = blocking_pipes && g_current_input_update.input_requested;
+  u64 remaining_batches = blocking_pipes ? g_current_input_update.input_requests : 0;
+  const bool wait_for_input = remaining_batches != 0;
   if (blocking_pipes && g_current_input_update.synchronize_gameplay && !wait_for_input)
     return Core::DeviceRemoval::Keep;
 
@@ -125,7 +126,7 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
     {
       std::string command = m_buf.substr(0, newline);
       m_buf.erase(0, newline + 1);
-      if (ParseCommand(command) && wait_for_input)
+      if (ParseCommand(command) && wait_for_input && --remaining_batches == 0)
         return Core::DeviceRemoval::Keep;
       newline = m_buf.find('\n');
     }

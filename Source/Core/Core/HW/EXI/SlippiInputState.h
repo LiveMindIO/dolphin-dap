@@ -6,15 +6,19 @@
 #include <span>
 
 #include "Common/CommonTypes.h"
-#include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
-
 namespace ExpansionInterface
 {
 constexpr std::size_t MENU_FRAME_PAYLOAD_KIND_OFFSET = 0x53;
 constexpr u8 MENU_FRAME_PAYLOAD_KIND_PAUSE_OPEN = 1;
 constexpr u8 MENU_FRAME_PAYLOAD_KIND_PAUSE_CLOSE = 2;
 
-inline ciface::Pipes::InputUpdateState GetMenuFrameInputState(std::span<const u8> payload)
+struct MenuFrameInputState
+{
+  bool input_requested = false;
+  bool synchronize_gameplay = false;
+};
+
+inline MenuFrameInputState GetMenuFrameInputState(std::span<const u8> payload)
 {
   const u16 scene = payload.size() >= 3 ? u16(payload[1]) << 8 | payload[2] : 0;
   const u8 payload_kind =

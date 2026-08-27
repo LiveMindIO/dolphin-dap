@@ -74,6 +74,7 @@ protected:
     m_device = std::make_unique<ciface::Pipes::PipeDevice>(m_fds[0], "TestPipe");
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, true);
     ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
@@ -90,6 +91,7 @@ protected:
       close(m_fds[1]);
     Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
     ciface::Pipes::g_input_state.store(0);
+    ciface::Pipes::g_pending_input_requests.store(0);
     ciface::Pipes::g_input_request_sequence.store(0);
     ciface::Pipes::g_last_input_request_us.store(0);
     ciface::Pipes::g_last_consumed_request_sequence.store(0);
@@ -164,7 +166,7 @@ TEST_F(PipesTest, NonSIUpdatePreservesSynchronizedBatch)
 
   EXPECT_EQ(ButtonA(), 0.0);
   EXPECT_EQ(PendingBytes(), pending);
-  EXPECT_TRUE(ciface::Pipes::CaptureInputState().input_requested);
+  EXPECT_EQ(ciface::Pipes::CaptureInputState().input_requests, 1u);
 }
 
 TEST_F(PipesTest, NonSIUpdatePreservesUnsynchronizedRequestedBatch)
@@ -178,25 +180,42 @@ TEST_F(PipesTest, NonSIUpdatePreservesUnsynchronizedRequestedBatch)
 
   EXPECT_EQ(ButtonA(), 0.0);
   EXPECT_EQ(PendingBytes(), pending);
-  EXPECT_TRUE(ciface::Pipes::CaptureInputState().input_requested);
+  EXPECT_EQ(ciface::Pipes::CaptureInputState().input_requests, 1u);
 }
 
-TEST_F(PipesTest, ConsumesOneBatchPerArm)
+TEST_F(PipesTest, ConsumesOneBatchPerRequest)
 {
   Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
   ciface::Pipes::g_current_input_update.synchronize_gameplay = true;
 
-  ciface::Pipes::g_current_input_update.input_requested = true;
+  ciface::Pipes::g_current_input_update.input_requests = 1;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 1.0);
 
-  ciface::Pipes::g_current_input_update.input_requested = false;
+  ciface::Pipes::g_current_input_update.input_requests = 0;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 1.0);
 
-  ciface::Pipes::g_current_input_update.input_requested = true;
+  ciface::Pipes::g_current_input_update.input_requests = 1;
   m_device->UpdateInput();
   EXPECT_EQ(ButtonA(), 0.0);
+}
+
+TEST_F(PipesTest, ConsumesRequestsCapturedTogether)
+{
+  Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  ciface::Pipes::PublishInputState(true, true);
+  ciface::Pipes::PublishInputState(true, true);
+
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  EXPECT_EQ(ciface::Pipes::g_current_input_update.input_requests, 2u);
+  m_device->UpdateInput();
+
+  EXPECT_EQ(ButtonA(), 0.0);
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+  const auto timing = ciface::Pipes::GetInputTimingSnapshot();
+  EXPECT_EQ(timing.request_sequence, 2u);
+  EXPECT_EQ(timing.consumed_request_sequence, 2u);
 }
 
 TEST_F(PipesTest, DefersRequestRaisedDuringCurrentUpdate)
