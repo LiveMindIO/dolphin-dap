@@ -99,6 +99,10 @@ add_library(core
   Debugger/OSThread.h
   Debugger/PPCDebugInterface.cpp
   Debugger/PPCDebugInterface.h
+  Debugger/PPCStack.cpp
+  Debugger/PPCStack.h
+  Debugger/PPCStepping.cpp
+  Debugger/PPCStepping.h
   Debugger/RSO.cpp
   Debugger/RSO.h
   DolphinAnalytics.cpp

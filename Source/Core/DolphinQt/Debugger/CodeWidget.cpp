@@ -22,11 +22,10 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include "Common/Event.h"
 #include "Core/Core.h"
-#include "Core/Debugger/Debugger_SymbolMap.h"
+#include "Core/Debugger/PPCStack.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "Core/HW/CPU.h"
-#include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -394,24 +393,22 @@ void CodeWidget::UpdateCallstack()
   if (Core::GetState(m_system) != Core::State::Paused)
     return;
 
-  std::vector<Dolphin_Debugger::CallstackEntry> stack;
-  if (!Dolphin_Debugger::GetCallstack(Core::CPUThreadGuard{m_system}, stack))
-  {
-    m_callstack_list->addItem(tr("Invalid callstack"));
-    return;
-  }
+  const Core::Debug::StackTrace stack = Core::Debug::GetPPCStackTrace(m_system);
 
   const QString filter = m_search_callstack->text();
 
-  for (const auto& frame : stack)
+  for (const Core::Debug::StackFrame& frame : stack.frames)
   {
-    const QString name = QString::fromStdString(frame.Name.substr(0, frame.Name.length() - 1));
+    std::string label = fmt::format("{} [{:08x}]", frame.name, frame.address);
+    if (frame.source)
+      label += fmt::format(" - {}:{}", frame.source->file, frame.source->line);
+    const QString name = QString::fromStdString(label);
 
     if (!name.contains(filter, Qt::CaseInsensitive))
       continue;
 
     auto* item = new QListWidgetItem(name);
-    item->setData(Qt::UserRole, frame.vAddress);
+    item->setData(Qt::UserRole, frame.address);
     m_callstack_list->addItem(item);
   }
 }
@@ -553,14 +550,10 @@ void CodeWidget::Step()
   if (!cpu.IsStepping())
     return;
 
-  Common::Event sync_event;
-
-  auto& power_pc = m_system.GetPowerPC();
-  PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  cpu.StepOpcode(&sync_event);
-  sync_event.WaitFor(std::chrono::milliseconds(20));
-  power_pc.SetMode(old_mode);
+  Core::Debug::PPCStepOptions options;
+  options.instruction_timeout = std::chrono::milliseconds(20);
+  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Into,
+                       Core::Debug::PPCStepGranularity::Instruction, options);
   Core::DisplayMessage(tr("Step successful!").toStdString(), 2000);
   // Will get a UpdateDisasmDialog(), don't update the GUI here.
 
@@ -576,35 +569,21 @@ void CodeWidget::StepOver()
   if (!cpu.IsStepping())
     return;
 
-  const UGeckoInstruction inst = [&] {
-    Core::CPUThreadGuard guard(m_system);
-    return PowerPC::MMU::HostRead_Instruction(guard, m_system.GetPPCState().pc);
-  }();
-
-  if (inst.LK)
+  Core::Debug::PPCStepOptions options;
+  options.instruction_timeout = std::chrono::milliseconds(20);
+  const Core::Debug::PPCStepResult result =
+      Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Over,
+                           Core::Debug::PPCStepGranularity::Instruction, options);
+  if (result == Core::Debug::PPCStepResult::Continuing)
   {
-    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
-    breakpoints.SetTemporary(m_system.GetPPCState().pc + 4);
-    cpu.SetStepping(false);
     Core::DisplayMessage(tr("Step over in progress...").toStdString(), 2000);
   }
   else
   {
-    Step();
+    Core::DisplayMessage(tr("Step successful!").toStdString(), 2000);
+    if (m_branch_watch_dialog != nullptr)
+      m_branch_watch_dialog->Update();
   }
-}
-
-// Returns true on a rfi, blr or on a bclr that evaluates to true.
-static bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
-{
-  // Is a rfi instruction
-  if (inst.hex == 0x4C000064u)
-    return true;
-  const auto& ppc_state = system.GetPPCState();
-  bool counter = (inst.BO_2 >> 2 & 1) != 0 || (CTR(ppc_state) != 0) != ((inst.BO_2 >> 1 & 1) != 0);
-  bool condition = inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
-  bool isBclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
-  return isBclr && counter && condition && !inst.LK_3;
 }
 
 void CodeWidget::StepOut()
@@ -614,49 +593,14 @@ void CodeWidget::StepOut()
   if (!cpu.IsStepping())
     return;
 
-  // Keep stepping until the next return instruction or timeout after five seconds
   using clock = std::chrono::steady_clock;
-  clock::time_point timeout = clock::now() + std::chrono::seconds(5);
-
+  const clock::time_point timeout = clock::now() + std::chrono::seconds(5);
   auto& power_pc = m_system.GetPowerPC();
-  {
-    auto& ppc_state = power_pc.GetPPCState();
-    Core::CPUThreadGuard guard(m_system);
-
-    PowerPC::CoreMode old_mode = power_pc.GetMode();
-    power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-
-    // Loop until either the current instruction is a return instruction with no Link flag
-    // or a breakpoint is detected so it can step at the breakpoint. If the PC is currently
-    // on a breakpoint, skip it.
-    UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-    do
-    {
-      if (WillInstructionReturn(m_system, inst))
-      {
-        power_pc.SingleStep();
-        break;
-      }
-
-      if (inst.LK)
-      {
-        // Step over branches
-        u32 next_pc = ppc_state.pc + 4;
-        do
-        {
-          power_pc.SingleStep();
-        } while (ppc_state.pc != next_pc && clock::now() < timeout && !power_pc.CheckBreakPoints());
-      }
-      else
-      {
-        power_pc.SingleStep();
-      }
-
-      inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-    } while (clock::now() < timeout && !power_pc.CheckBreakPoints());
-
-    power_pc.SetMode(old_mode);
-  }
+  Core::Debug::PPCStepOptions options;
+  options.timeout = std::chrono::seconds(5);
+  options.ignore_current_code_breakpoint = true;
+  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
+                       Core::Debug::PPCStepGranularity::Instruction, options);
 
   emit Host::GetInstance()->UpdateDisasmDialog();
 

@@ -15,15 +15,15 @@
 
 #include <fmt/format.h>
 
-#include "Common/Event.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
-#include "Common/ScopeGuard.h"
 #include "Common/StringUtil.h"
 #include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/PPCDebugInterface.h"
+#include "Core/Debugger/PPCStack.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
@@ -84,20 +84,6 @@ constexpr u32 ReadBigEndianU32(std::span<const u8> bytes)
          (static_cast<u32>(bytes[2]) << 8) | static_cast<u32>(bytes[3]);
 }
 
-bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
-{
-  if (inst.hex == 0x4C000064u)
-    return true;
-
-  const auto& ppc_state = system.GetPPCState();
-  const bool counter =
-      (inst.BO_2 >> 2 & 1) != 0 || (CTR(ppc_state) != 0) != ((inst.BO_2 >> 1 & 1) != 0);
-  const bool condition =
-      inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
-  const bool is_bclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
-  return is_bclr && counter && condition && !inst.LK_3;
-}
-
 std::string DescribeExceptions(u32 exceptions)
 {
   static constexpr std::array<std::pair<u32, std::string_view>, 10> NAMES{{
@@ -152,202 +138,47 @@ void DapDebugController::Pause()
 
 bool DapDebugController::StepInto()
 {
-  auto& cpu = m_system.GetCPU();
-  // DESNOTE(jbarber, 2026-07-21): When the core isn't stepping (paused
-  // already, or never started), SingleStep is a no-op. Return true so the
-  // session emits a stopped event — the core IS stopped, after all. The
-  // false return is reserved for the async path where StepOpcode timed
-  // out without the CPU thread acknowledging: in that case the PC hasn't
-  // advanced and a stopped/step event would be a lie.
-  if (!cpu.IsStepping())
-    return true;
-
-  auto& power_pc = m_system.GetPowerPC();
-  if (Core::IsCPUThread())
-  {
-    Core::CPUThreadGuard guard(m_system);
-    const PowerPC::CoreMode old_mode = power_pc.GetMode();
-    power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-    power_pc.SingleStep();
-    power_pc.SetMode(old_mode);
-    return true;
-  }
-
-  Common::Event sync_event;
-  const PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  cpu.StepOpcode(&sync_event);
-  // DESNOTE(jbarber, 2026-07-21): Wait for the CPU thread to ack the step
-  // rather than bail after 20ms. The previous 20ms timeout was chosen so
-  // the session thread wouldn't block when the CPU was mid-block or under
-  // load, returning false and instructing the caller NOT to emit a
-  // stopped event. But PollBreakpointStop can't observe the late
-  // completion -- it only emits stops on a not-stepping->stepping
-  // transition, and after Pause/SyncSteppingBaseline the core is already
-  // stepping=true with no further state change. The step's late
-  // completion sets sync_event silently and the client hangs waiting for
-  // a stop that never arrives (Bugbot: "Step timeout drops stopped
-  // event"). Bumping to 2s keeps the session responsive while covering
-  // the realistic range of CPU-thread step ack latency; if the ack truly
-  // never arrives (deadlock), no stop is emitted and the client will at
-  // worst time out itself rather than hang on a phantom in-flight step.
-  const bool completed = sync_event.WaitFor(std::chrono::seconds(2));
-  power_pc.SetMode(old_mode);
-  return completed;
+  return Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Into,
+                              Core::Debug::PPCStepGranularity::Instruction) !=
+         Core::Debug::PPCStepResult::NotStepped;
 }
 
 StepOverResult DapDebugController::StepOver()
 {
-  auto& cpu = m_system.GetCPU();
-  if (!cpu.IsStepping())
-    return StepOverResult::Stepped;
-
-  const UGeckoInstruction inst = [&] {
-    Core::CPUThreadGuard guard(m_system);
-    return PowerPC::MMU::HostRead_Instruction(guard, m_system.GetPPCState().pc);
-  }();
-
-  if (inst.LK)
+  switch (Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Over,
+                               Core::Debug::PPCStepGranularity::Instruction))
   {
-    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
-    breakpoints.SetTemporary(m_system.GetPPCState().pc + 4);
-    cpu.SetStepping(false);
+  case Core::Debug::PPCStepResult::Stepped:
+    return StepOverResult::Stepped;
+  case Core::Debug::PPCStepResult::Continuing:
     return StepOverResult::Continuing;
+  case Core::Debug::PPCStepResult::NotStepped:
+    return StepOverResult::NotStepped;
   }
-
-  // DESNOTE(jbarber, 2026-07-21): Propagate StepInto's failure rather than
-  // unconditionally report Stepped. StepInto returns false when the async
-  // StepOpcode path timed out without the CPU thread acknowledging -- in
-  // that case the PC has not advanced. The session handler mirrors the
-  // stepIn guard (suppress the stopped event on false), so a `next` whose
-  // underlying single-step didn't complete no longer emits a spurious
-  // stopped/"step" event for a PC that didn't move.
-  const bool stepped = StepInto();
-  return stepped ? StepOverResult::Stepped : StepOverResult::NotStepped;
+  return StepOverResult::NotStepped;
 }
 
 void DapDebugController::StepSource(const bool step_over, const std::atomic<bool>& cancelled,
                                     const std::chrono::milliseconds timeout,
                                     const size_t instruction_cap)
 {
-  auto& cpu = m_system.GetCPU();
-  if (!cpu.IsStepping() || instruction_cap == 0)
-    return;
-
-  using clock = std::chrono::steady_clock;
-  const clock::time_point deadline = clock::now() + timeout;
-  auto& power_pc = m_system.GetPowerPC();
-  auto& state = m_system.GetPPCState();
-  const std::optional<PPCSymbolDB::SourceLine> start_line =
-      m_system.GetPPCSymbolDB().GetSourceLine(state.pc);
-  Core::CPUThreadGuard guard(m_system);
-  const PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  const bool resume_watchpoint = (state.Exceptions & EXCEPTION_FAKE_MEMCHECK_HIT) != 0;
-  power_pc.ClearSteppingMemcheckHit();
-  power_pc.SetSteppingMemchecksEnabled(!resume_watchpoint);
-  Common::ScopeGuard restore_mode{[&] {
-    power_pc.SetSteppingMemchecksEnabled(false);
-    power_pc.SetMode(old_mode);
-  }};
-
-  size_t instruction_count = 0;
-  bool hit_breakpoint = false;
-  const auto can_continue = [&] {
-    return !cancelled.load() && instruction_count < instruction_cap && clock::now() < deadline &&
-           !hit_breakpoint;
-  };
-  const auto step_one = [&] {
-    power_pc.SingleStep();
-    power_pc.SetSteppingMemchecksEnabled(true);
-    ++instruction_count;
-    hit_breakpoint = power_pc.DidSteppingMemcheckHit() || power_pc.CheckBreakPoints();
-  };
-  const auto step_logical = [&] {
-    const UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, state.pc);
-    if (!step_over || !inst.LK)
-    {
-      step_one();
-      return;
-    }
-
-    const u32 return_pc = state.pc + 4;
-    do
-    {
-      step_one();
-    } while (can_continue() && state.pc != return_pc);
-  };
-
-  if (can_continue())
-    step_logical();
-  while (start_line && can_continue())
-  {
-    const std::optional<PPCSymbolDB::SourceLine> current_line =
-        m_system.GetPPCSymbolDB().GetSourceLine(state.pc);
-    if (current_line && (current_line->file_index != start_line->file_index ||
-                         current_line->line != start_line->line))
-      break;
-    step_logical();
-  }
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+  options.timeout = timeout;
+  options.instruction_cap = instruction_cap;
+  Core::Debug::StepPPC(m_system,
+                       step_over ? Core::Debug::PPCStepMode::Over : Core::Debug::PPCStepMode::Into,
+                       Core::Debug::PPCStepGranularity::SourceRow, options);
 }
 
 void DapDebugController::StepOut(const std::atomic<bool>& cancelled,
                                  std::chrono::milliseconds timeout_ms)
 {
-  auto& cpu = m_system.GetCPU();
-  if (!cpu.IsStepping())
-    return;
-
-  using clock = std::chrono::steady_clock;
-  const clock::time_point timeout = clock::now() + timeout_ms;
-
-  auto& power_pc = m_system.GetPowerPC();
-  auto& ppc_state = power_pc.GetPPCState();
-  Core::CPUThreadGuard guard(m_system);
-
-  const PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  const bool resume_watchpoint = (ppc_state.Exceptions & EXCEPTION_FAKE_MEMCHECK_HIT) != 0;
-  power_pc.ClearSteppingMemcheckHit();
-  power_pc.SetSteppingMemchecksEnabled(!resume_watchpoint);
-  Common::ScopeGuard restore_mode{[&] {
-    power_pc.SetSteppingMemchecksEnabled(false);
-    power_pc.SetMode(old_mode);
-  }};
-
-  const auto can_continue = [&] {
-    return !cancelled.load() && clock::now() < timeout && !power_pc.DidSteppingMemcheckHit() &&
-           !power_pc.CheckBreakPoints();
-  };
-  const auto step_one = [&] {
-    power_pc.SingleStep();
-    power_pc.SetSteppingMemchecksEnabled(true);
-  };
-
-  UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-  while (can_continue())
-  {
-    if (WillInstructionReturn(m_system, inst))
-    {
-      step_one();
-      break;
-    }
-
-    if (inst.LK)
-    {
-      const u32 next_pc = ppc_state.pc + 4;
-      do
-      {
-        step_one();
-      } while (ppc_state.pc != next_pc && can_continue());
-    }
-    else
-    {
-      step_one();
-    }
-
-    inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-  }
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+  options.timeout = timeout_ms;
+  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
+                       Core::Debug::PPCStepGranularity::Instruction, options);
 }
 
 void DapDebugController::ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
@@ -1090,36 +921,29 @@ std::vector<ThreadInfo> DapDebugController::GetThreads()
 
 StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const int levels)
 {
-  Core::CPUThreadGuard guard(m_system);
-  auto& power_pc = m_system.GetPowerPC();
-  const auto& ppc_state = power_pc.GetPPCState();
-  auto& debug_interface = power_pc.GetDebugInterface();
+  const Core::Debug::StackTrace stack =
+      Core::Debug::GetPPCStackTrace(m_system, start_frame, levels);
 
-  std::vector<StackFrame> frames;
-
-  const auto push_frame = [&](const u32 address) {
+  StackTraceResult result;
+  result.total_frames = static_cast<int>(stack.total_frames);
+  result.frames.reserve(stack.frames.size());
+  for (const Core::Debug::StackFrame& stack_frame : stack.frames)
+  {
     StackFrame frame;
-    frame.id = static_cast<int>(frames.size());
-    frame.address = address;
-    std::string description = debug_interface.GetDescription(address);
-    if (description.empty() || description == "Invalid")
-      description = fmt::format("0x{:08x}", address);
-    frame.name = std::move(description);
-
-    const Common::Symbol* symbol = power_pc.GetSymbolDB().GetSymbolFromAddr(address);
-    const std::optional<PPCSymbolDB::SourceLine> source_line =
-        power_pc.GetSymbolDB().GetSourceLine(address);
-    if (source_line)
+    frame.id = static_cast<int>(stack_frame.index);
+    frame.address = stack_frame.address;
+    frame.name = stack_frame.name;
+    if (stack_frame.source)
     {
-      frame.source_file = source_line->file;
-      frame.source_id = source_line->file_index + 1;
-      frame.source_line = static_cast<int>(
-          std::clamp<u32>(source_line->line, 1, static_cast<u32>(std::numeric_limits<int>::max())));
+      frame.source_file = stack_frame.source->file;
+      frame.source_id = stack_frame.source->file_index + 1;
+      frame.source_line = static_cast<int>(std::clamp<u32>(
+          stack_frame.source->line, 1, static_cast<u32>(std::numeric_limits<int>::max())));
     }
-    else if (symbol != nullptr && symbol->type == Common::Symbol::Type::Function)
+    else if (stack_frame.disassembly_base)
     {
-      frame.source_base = symbol->address;
-      frame.source_line = static_cast<int>((address - symbol->address) / 4) + 1;
+      frame.source_base = stack_frame.disassembly_base;
+      frame.source_line = static_cast<int>(stack_frame.disassembly_line);
     }
     else
     {
@@ -1127,56 +951,8 @@ StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const 
       // instruction pointer for diagnostics without making clients fetch a fake file.
       frame.source_line = 1;
     }
-
-    frames.push_back(std::move(frame));
-  };
-
-  const auto is_stack_bottom = [&](const u32 addr) {
-    return !addr || !PowerPC::MMU::HostIsRAMAddress(guard, addr);
-  };
-
-  // DESNOTE(jbarber, 2026-07-21): The innermost frame is the current PC --
-  // it's where execution actually stopped. The previous form only pushed the
-  // PC when the frame list was otherwise empty, so a typical `stackTrace`
-  // response started at LR-4 / stack-walked callers and omitted the
-  // instruction the user actually cares about. Walking up first, then
-  // prepending the PC, would shuffle addresses past DAP frame ids; instead
-  // push the PC first so the rest of the walk appends in declaration order.
-  push_frame(ppc_state.pc);
-
-  if (LR(ppc_state) != 0)
-    push_frame(LR(ppc_state) - 4);
-
-  if (!is_stack_bottom(ppc_state.gpr[1]))
-  {
-    u32 addr = PowerPC::MMU::HostRead<u32>(guard, ppc_state.gpr[1]);
-    for (int count = 0; !is_stack_bottom(addr) && !is_stack_bottom(addr + 4) && count < 20; ++count)
-    {
-      const u32 func_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 4);
-      push_frame(func_addr - 4);
-      addr = PowerPC::MMU::HostRead<u32>(guard, addr);
-    }
+    result.frames.push_back(std::move(frame));
   }
-
-  StackTraceResult result;
-  result.total_frames = static_cast<int>(frames.size());
-
-  const std::size_t begin = static_cast<std::size_t>(std::max(0, start_frame));
-  if (begin >= frames.size())
-    return result;
-
-  // DESNOTE(jbarber, 2026-07-03): Per the DAP spec `levels` of 0 (or omitted)
-  // means "all frames"; a negative value is invalid and treated the same way.
-  // See https://microsoft.github.io/debug-adapter-protocol/specification#Requests_StackTrace
-  const std::size_t end = levels <= 0 ?
-                              frames.size() :
-                              std::min(frames.size(), begin + static_cast<std::size_t>(levels));
-  frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(end), frames.end());
-  frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(begin));
-  for (std::size_t i = 0; i < frames.size(); ++i)
-    frames[i].id = static_cast<int>(begin + i);
-
-  result.frames = std::move(frames);
   return result;
 }
 

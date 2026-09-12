@@ -20,6 +20,8 @@ add_dolphin_test(RealtimeWatchTest Debugger/DAP/RealtimeWatchTest.cpp)
 
 add_dolphin_test(DwarfReaderTest Debugger/DWARF/DwarfReaderTest.cpp)
 add_dolphin_test(PPCSymbolDBLineTest Debugger/DWARF/PPCSymbolDBLineTest.cpp)
+add_dolphin_test(PPCStackTest Debugger/PPCStackTest.cpp)
+add_dolphin_test(PPCSteppingTest Debugger/PPCSteppingTest.cpp)
 
 add_dolphin_test(EntrypointsImportTest Debugger/Entrypoints/EntrypointsImportTest.cpp)
 target_sources(EntrypointsImportTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
