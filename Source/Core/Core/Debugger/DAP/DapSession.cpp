@@ -157,10 +157,9 @@ picojson::object MakeVariable(std::string_view name, u32 value)
   return variable;
 }
 
-// Dolphin has one global PPC BreakPoints / MemChecks store. Clear it when the
-// first DAP session enters so persisted GUI breakpoints from another executable
-// layout cannot contaminate this DAP lifetime, and when the last session exits.
-// Serialize both transitions with their clears so reconnect cannot race teardown.
+// Memory watchpoint ownership remains global for now. Serialize first/last DAP
+// transitions for that legacy teardown and the shared entry-stop gate. Code
+// breakpoints are independently owned by the Core BreakPoints registry.
 std::mutex s_session_lifetime_mutex;
 int s_active_session_count = 0;
 
@@ -245,6 +244,8 @@ public:
       std::lock_guard lock(s_session_lifetime_mutex);
       if (s_active_session_count == 0)
       {
+        // ClearBreakpoints now clears this connection's empty code collection
+        // and the still-global memory-watchpoint store; GUI code claims survive.
         m_controller.ClearBreakpoints();
         m_controller.ClearFreezes();
       }
@@ -260,6 +261,11 @@ public:
     // shutdown can't race the dispatch and touch a destroyed Session. When the
     // weak_ptr can't be locked (session torn down), the dispatch is a no-op.
     auto self = shared_from_this();
+    m_controller.SetBreakpointEventCallback(
+        [weak = std::weak_ptr<Session>(self)](std::shared_ptr<const BreakPoints::Event> event) {
+          if (auto sp = weak.lock())
+            sp->HandleBreakpointEvent(std::move(event));
+        });
     m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
         m_system,
         [weak = std::weak_ptr<Session>(self)](const std::vector<RealtimeWatchChange>& changes) {
@@ -336,6 +342,7 @@ public:
     m_step_cancelled.store(true);
     if (m_step_out_thread.joinable())
       m_step_out_thread.join();
+    m_controller.ClearCodeBreakpoints();
     {
       std::lock_guard lock(s_session_lifetime_mutex);
       if (--s_active_session_count == 0)
@@ -361,6 +368,36 @@ private:
     if (!m_accept_events)
       return;
     m_pending_events.emplace_back(std::string(event), std::move(body));
+  }
+
+  void HandleBreakpointEvent(std::shared_ptr<const BreakPoints::Event> event)
+  {
+    if (event->origin == m_controller.GetBreakpointClientId())
+      return;
+
+    for (const BreakPoints::Change& change : event->changes)
+    {
+      picojson::object breakpoint;
+      breakpoint.emplace("id", static_cast<double>(AssignBreakpointId(change.breakpoint.address)));
+      breakpoint.emplace("verified", change.reason != BreakPoints::ChangeReason::Removed);
+      breakpoint.emplace("instructionReference", Json::FormatAddress(change.breakpoint.address));
+
+      picojson::object body;
+      switch (change.reason)
+      {
+      case BreakPoints::ChangeReason::New:
+        body.emplace("reason", std::string("new"));
+        break;
+      case BreakPoints::ChangeReason::Changed:
+        body.emplace("reason", std::string("changed"));
+        break;
+      case BreakPoints::ChangeReason::Removed:
+        body.emplace("reason", std::string("removed"));
+        break;
+      }
+      body.emplace("breakpoint", std::move(breakpoint));
+      QueueEvent("breakpoint", std::move(body));
+    }
   }
 
   void FlushEvents()
@@ -1664,8 +1701,13 @@ private:
       }
     }
 
-    const std::vector<std::optional<u32>> addresses =
-        m_controller.UpdateSourceBreakpoints(source_key, context, specs);
+    std::string error;
+    const auto addresses = m_controller.UpdateSourceBreakpoints(source_key, context, specs, &error);
+    if (!error.empty())
+    {
+      RespondError(request.seq, "setBreakpoints", error);
+      return;
+    }
 
     picojson::array breakpoints;
     for (size_t i = 0; i < specs.size(); ++i)
@@ -1692,27 +1734,39 @@ private:
         Protocol::ParseSetInstructionBreakpoints(request.arguments);
 
     std::vector<CodeBreakpointRequest> breakpoint_requests;
-    picojson::array breakpoints;
+    std::vector<std::optional<u32>> requested_addresses;
+    requested_addresses.reserve(arguments.breakpoints.size());
     for (const Protocol::RequestedInstructionBreakpoint& breakpoint : arguments.breakpoints)
     {
-      picojson::object entry;
-      entry.emplace("verified", breakpoint.address.has_value());
+      requested_addresses.push_back(breakpoint.address);
       if (breakpoint.address)
       {
-        entry.emplace("id", static_cast<double>(AssignBreakpointId(*breakpoint.address)));
-        entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
         CodeBreakpointRequest bp;
         bp.address = *breakpoint.address;
         bp.condition = breakpoint.condition;
         breakpoint_requests.push_back(std::move(bp));
       }
-      breakpoints.emplace_back(std::move(entry));
     }
 
-    // DESNOTE(jbarber, 2026-07-03): Dolphin keeps a single code-breakpoint list,
-    // so instruction breakpoints share storage with source breakpoints; each
-    // authoritative set replaces the whole list (as the GDB stub also does).
-    m_controller.UpdateInstructionBreakpoints(std::move(breakpoint_requests));
+    std::string error;
+    if (!m_controller.UpdateInstructionBreakpoints(std::move(breakpoint_requests), &error))
+    {
+      RespondError(request.seq, "setInstructionBreakpoints", error);
+      return;
+    }
+
+    picojson::array breakpoints;
+    for (const std::optional<u32> address : requested_addresses)
+    {
+      picojson::object entry;
+      entry.emplace("verified", address.has_value());
+      if (address)
+      {
+        entry.emplace("id", static_cast<double>(AssignBreakpointId(*address)));
+        entry.emplace("instructionReference", Json::FormatAddress(*address));
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
 
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));

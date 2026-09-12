@@ -661,10 +661,10 @@ TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 0"}});
 
-  const TBreakPoint* bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   ASSERT_TRUE(bp->condition.has_value());
-  EXPECT_EQ(bp->condition->GetText(), "r3 == 0");
+  EXPECT_EQ(bp->condition->GetText(), "r3==0");
 }
 
 TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
@@ -768,7 +768,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsInvalidConditionAddsUnconditionalBre
   // unconditional stop rather than silently disappearing.
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "not a condition"}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -780,7 +780,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsEmptyConditionIsUnconditional)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = ""}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -1546,7 +1546,7 @@ TEST_F(DapControllerTest, ClearBreakpointsIsIdempotent)
   DAP::DapDebugController controller(System());
   controller.ClearBreakpoints();
   controller.ClearBreakpoints();
-  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints().empty());
+  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints()->empty());
   EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks().empty());
 }
 

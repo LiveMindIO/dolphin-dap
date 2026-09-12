@@ -1435,16 +1435,71 @@ TEST_F(DapSessionTest, SetInstructionBreakpointsReplacesPreviousBreakpoints)
   (void)client.Receive();
 }
 
-TEST_F(DapSessionTest, FirstSessionClearsPersistedBreakpoints)
+TEST_F(DapSessionTest, FailedBreakpointRequestDoesNotConsumeIds)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(0x80003100, false, true, Expression::TryParse("r3 == 1")));
+  const auto gui_event = client.Receive();
+  ASSERT_TRUE(gui_event.has_value());
+  EXPECT_EQ(gui_event->at("event").to_str(), "breakpoint");
+
+  client.Send(R"({
+    "seq":3,"type":"request","command":"setBreakpoints",
+    "arguments":{
+      "source":{"name":"0x80003100"},
+      "breakpoints":[{"line":1,"condition":"r3 == 1"}]
+    }
+  })");
+  const auto source_response = client.Receive();
+  ASSERT_TRUE(source_response.has_value());
+  const auto& source_breakpoints =
+      source_response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(source_breakpoints.size(), 1u);
+  EXPECT_EQ(source_breakpoints[0].get<picojson::object>().at("id").get<double>(), 1.0);
+
+  client.Send(R"({
+    "seq":4,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[
+      {"instructionReference":"0x80003300"},
+      {"instructionReference":"0x80003100","condition":"r3 == 2"}
+    ]}
+  })");
+  const auto failed = client.Receive();
+  ASSERT_TRUE(failed.has_value());
+  EXPECT_FALSE(failed->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq":5,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x80003400"}]}
+  })");
+  const auto instruction_response = client.Receive();
+  ASSERT_TRUE(instruction_response.has_value());
+  const auto& instruction_breakpoints = instruction_response->at("body")
+                                            .get<picojson::object>()
+                                            .at("breakpoints")
+                                            .get<picojson::array>();
+  ASSERT_EQ(instruction_breakpoints.size(), 1u);
+  EXPECT_EQ(instruction_breakpoints[0].get<picojson::object>().at("id").get<double>(), 2.0);
+
+  client.Send(R"({"seq":6,"type":"request","command":"disconnect"})");
+  const auto disconnect = client.Receive();
+  ASSERT_TRUE(disconnect.has_value());
+  EXPECT_EQ(disconnect->at("command").to_str(), "disconnect");
+}
+
+TEST_F(DapSessionTest, FirstSessionPreservesPersistedBreakpoints)
 {
   auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
-  breakpoints.Add(0x80003100);
+  (void)breakpoints.Add(0x80003100);
   ASSERT_TRUE(breakpoints.IsAddressBreakPoint(0x80003100));
 
   TestClient client(m_client_fd());
   Handshake(client);
 
-  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(0x80003100));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(0x80003100));
 
   client.Send(R"({
     "seq": 9,
@@ -2387,6 +2442,293 @@ TEST_F(DapSessionTest, FindFreeMemoryReturnsCanonicalAlignedAddress)
     "command": "disconnect"
   })");
   (void)client.Receive();
+}
+
+class DapMultiSessionTest : public DapSessionTest
+{
+protected:
+  void SetUp() override
+  {
+    DapSessionTest::SetUp();
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, m_second_fds), 0);
+    m_second_server = std::thread([this] {
+      Core::DeclareAsCPUThread();
+      DAP::DapTransport transport(m_second_fds[1]);
+      DAP::RunSession(transport, Core::System::GetInstance());
+      Core::UndeclareAsCPUThread();
+    });
+  }
+
+  void TearDown() override
+  {
+    shutdown(m_second_fds[0], SHUT_RDWR);
+    if (m_second_server.joinable())
+      m_second_server.join();
+    close(m_second_fds[0]);
+    DapSessionTest::TearDown();
+  }
+
+  void HandshakeAdditional(TestClient& client)
+  {
+    client.Send(R"({"seq":1,"type":"request","command":"initialize","arguments":{}})");
+    ASSERT_TRUE(client.Receive().has_value());
+    const auto initialized = client.Receive();
+    ASSERT_TRUE(initialized.has_value());
+    EXPECT_EQ(initialized->at("event").to_str(), "initialized");
+
+    client.Send(R"({"seq":2,"type":"request","command":"launch","arguments":{}})");
+    ASSERT_TRUE(client.Receive().has_value());
+    client.Send(R"({"seq":3,"type":"request","command":"configurationDone"})");
+    ASSERT_TRUE(client.Receive().has_value());
+    const auto stopped = client.Receive();
+    ASSERT_TRUE(stopped.has_value());
+    EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  }
+
+  int m_second_fds[2] = {-1, -1};
+  std::thread m_second_server;
+};
+
+TEST_F(DapMultiSessionTest, BreakpointsSynchronizeWithoutCrossClientRemoval)
+{
+  constexpr u32 gui_address = CODE_ADDRESS + 0x20;
+  constexpr u32 first_address = CODE_ADDRESS;
+  constexpr u32 second_address = CODE_ADDRESS + 4;
+  auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
+
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  (void)breakpoints.Add(gui_address);
+  const auto first_gui_event = first.Receive();
+  ASSERT_TRUE(first_gui_event.has_value());
+  EXPECT_EQ(first_gui_event->at("event").to_str(), "breakpoint");
+  const auto second_gui_event = second.Receive();
+  ASSERT_TRUE(second_gui_event.has_value());
+  EXPECT_EQ(second_gui_event->at("event").to_str(), "breakpoint");
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(gui_address));
+
+  first.Send(R"({
+    "seq":10,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003100"}]}
+  })");
+  const auto first_response = first.Receive();
+  ASSERT_TRUE(first_response.has_value());
+  ASSERT_TRUE(first_response->at("success").get<bool>()) << first_response->at("message").to_str();
+  const auto first_external = second.Receive();
+  ASSERT_TRUE(first_external.has_value());
+  EXPECT_EQ(first_external->at("event").to_str(), "breakpoint");
+  EXPECT_EQ(first_external->at("body").get<picojson::object>().at("reason").to_str(), "new");
+
+  second.Send(R"({
+    "seq":11,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003104"}]}
+  })");
+  const auto second_response = second.Receive();
+  ASSERT_TRUE(second_response.has_value());
+  EXPECT_TRUE(second_response->at("success").get<bool>());
+  const auto second_external = first.Receive();
+  ASSERT_TRUE(second_external.has_value());
+  EXPECT_EQ(second_external->at("event").to_str(), "breakpoint");
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(first_address));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(second_address));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(gui_address));
+
+  first.Send(R"({
+    "seq":13,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[]}
+  })");
+  ASSERT_TRUE(first.Receive().has_value());
+  const auto removed = second.Receive();
+  ASSERT_TRUE(removed.has_value());
+  EXPECT_EQ(removed->at("body").get<picojson::object>().at("reason").to_str(), "removed");
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(first_address));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(second_address));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(gui_address));
+
+  breakpoints.Remove(gui_address);
+  const auto gui_removed = second.Receive();
+  ASSERT_TRUE(gui_removed.has_value());
+  EXPECT_EQ(gui_removed->at("event").to_str(), "breakpoint");
+  EXPECT_EQ(gui_removed->at("body").get<picojson::object>().at("reason").to_str(), "removed");
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(second_address));
+
+  first.Send(R"({
+    "seq":14,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003100"}]}
+  })");
+  ASSERT_TRUE(first.Receive().has_value());
+  ASSERT_TRUE(second.Receive().has_value());
+
+  first.Send(R"({"seq":15,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(first.Receive().has_value());
+  const auto disconnected_removed = second.Receive();
+  ASSERT_TRUE(disconnected_removed.has_value());
+  EXPECT_EQ(disconnected_removed->at("body").get<picojson::object>().at("reason").to_str(),
+            "removed");
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(first_address));
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(second_address));
+  second.Send(R"({"seq":16,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(second.Receive().has_value());
+}
+
+TEST_F(DapMultiSessionTest, GuiSiteMutationsFanOutAndAllowAuthoritativeDapReAdd)
+{
+  constexpr u32 first_address = CODE_ADDRESS;
+  constexpr u32 second_address = CODE_ADDRESS + 4;
+  auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  first.Send(R"({
+    "seq":20,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{
+      "instructionReference":"0x00003100","condition":"r3 == 1"
+    }]}
+  })");
+  ASSERT_TRUE(first.Receive().has_value());
+  ASSERT_TRUE(second.Receive().has_value());
+
+  second.Send(R"({
+    "seq":19,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{
+      "instructionReference":"0x00003100","condition":"r4 == 2"
+    }]}
+  })");
+  const auto compatible_response = second.Receive();
+  ASSERT_TRUE(compatible_response.has_value());
+  EXPECT_TRUE(compatible_response->at("success").get<bool>());
+  const auto compatible_event = first.Receive();
+  ASSERT_TRUE(compatible_event.has_value());
+  EXPECT_EQ(compatible_event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  const auto compatible = breakpoints.GetRegularBreakpoint(first_address);
+  ASSERT_NE(compatible, nullptr);
+  ASSERT_TRUE(compatible->condition.has_value());
+  EXPECT_EQ(compatible->condition->GetText(), "(r3==1) || (r4==2)");
+
+  EXPECT_TRUE(breakpoints.ToggleEnable(first_address));
+  EXPECT_FALSE(breakpoints.IsBreakPointEnable(first_address));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+  EXPECT_TRUE(breakpoints.ToggleEnable(first_address));
+  EXPECT_TRUE(breakpoints.IsBreakPointEnable(first_address));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+
+  ASSERT_TRUE(breakpoints.Add(first_address));
+  ASSERT_EQ(breakpoints.GetStrings().size(), 1u);
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+  EXPECT_TRUE(breakpoints.ToggleEnable(first_address));
+  EXPECT_FALSE(breakpoints.IsBreakPointEnable(first_address));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+  EXPECT_TRUE(breakpoints.ToggleEnable(first_address));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+
+  ASSERT_TRUE(breakpoints.Add(first_address, true, false, Expression::TryParse("r3 == 2")));
+  const auto edited = breakpoints.GetRegularBreakpoint(first_address);
+  ASSERT_NE(edited, nullptr);
+  ASSERT_TRUE(edited->condition.has_value());
+  EXPECT_EQ(edited->condition->GetText(), "(r3==1) || (r3==2) || (r4==2)");
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "changed");
+  }
+
+  const u64 edit_revision = breakpoints.GetRevision();
+  first.Send(R"({
+    "seq":21,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{
+      "instructionReference":"0x00003100","condition":"r3 == 1"
+    }]}
+  })");
+  const auto stale_resend = first.Receive();
+  ASSERT_TRUE(stale_resend.has_value());
+  EXPECT_TRUE(stale_resend->at("success").get<bool>());
+  EXPECT_EQ(breakpoints.GetRevision(), edit_revision);
+
+  EXPECT_TRUE(breakpoints.Remove(first_address));
+  EXPECT_FALSE(breakpoints.IsAddressBreakPoint(first_address));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "removed");
+  }
+
+  first.Send(R"({
+    "seq":22,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003100"}]}
+  })");
+  const auto first_readd = first.Receive();
+  ASSERT_TRUE(first_readd.has_value());
+  EXPECT_TRUE(first_readd->at("success").get<bool>());
+  const auto first_readd_event = second.Receive();
+  ASSERT_TRUE(first_readd_event.has_value());
+  EXPECT_EQ(first_readd_event->at("body").get<picojson::object>().at("reason").to_str(), "new");
+
+  second.Send(R"({
+    "seq":23,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003104"}]}
+  })");
+  ASSERT_TRUE(second.Receive().has_value());
+  ASSERT_TRUE(first.Receive().has_value());
+  breakpoints.Clear();
+  EXPECT_TRUE(breakpoints.GetSnapshot()->breakpoints.empty());
+  for (TestClient* client : {&first, &second})
+  {
+    for (int i = 0; i < 2; ++i)
+    {
+      const auto event = client->Receive();
+      ASSERT_TRUE(event.has_value());
+      EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "removed");
+    }
+  }
+
+  second.Send(R"({
+    "seq":24,"type":"request","command":"setInstructionBreakpoints",
+    "arguments":{"breakpoints":[{"instructionReference":"0x00003104"}]}
+  })");
+  const auto second_readd = second.Receive();
+  ASSERT_TRUE(second_readd.has_value());
+  EXPECT_TRUE(second_readd->at("success").get<bool>());
+  const auto second_readd_event = first.Receive();
+  ASSERT_TRUE(second_readd_event.has_value());
+  EXPECT_EQ(second_readd_event->at("body").get<picojson::object>().at("reason").to_str(), "new");
+  EXPECT_TRUE(breakpoints.IsAddressBreakPoint(second_address));
+
+  first.Send(R"({"seq":25,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(first.Receive().has_value());
+  second.Send(R"({"seq":26,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(second.Receive().has_value());
 }
 }  // namespace
 #endif  // _WIN32

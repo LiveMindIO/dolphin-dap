@@ -397,7 +397,7 @@ void CodeViewWidget::Update(const Core::CPUThreadGuard* guard)
     if (ins == "blr")
       ins_item->setForeground(dark_theme ? QColor(0xa0FFa0) : Qt::darkGreen);
 
-    const TBreakPoint* bp = power_pc.GetBreakPoints().GetRegularBreakpoint(addr);
+    const auto bp = power_pc.GetBreakPoints().GetRegularBreakpoint(addr);
     if (bp != nullptr)
     {
       auto icon = Resources::GetThemeIcon("debugger_breakpoint").pixmap(QSize(rowh - 2, rowh - 2));
@@ -1232,7 +1232,7 @@ void CodeViewWidget::ToggleBreakpoint()
 
 void CodeViewWidget::AddBreakpoint()
 {
-  m_system.GetPowerPC().GetBreakPoints().Add(GetContextAddress());
+  (void)m_system.GetPowerPC().GetBreakPoints().Add(GetContextAddress());
 
   emit Host::GetInstance()->PPCBreakpointsChanged();
 }

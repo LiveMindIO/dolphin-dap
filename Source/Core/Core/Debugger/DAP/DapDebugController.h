@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -17,6 +19,7 @@
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/DAP/DapSource.h"
 #include "Core/Debugger/DWARF/DwarfReader.h"
+#include "Core/PowerPC/BreakPoints.h"
 
 namespace Core
 {
@@ -182,6 +185,7 @@ class DapDebugController
 {
 public:
   explicit DapDebugController(Core::System& system);
+  ~DapDebugController();
 
   void Continue();
   void Pause();
@@ -208,8 +212,13 @@ public:
   void SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
   std::vector<std::optional<u32>>
   UpdateSourceBreakpoints(std::string_view source_key, const SourceBreakpointContext& context,
-                          std::vector<SourceBreakpointSpec> breakpoints);
-  void UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
+                          std::vector<SourceBreakpointSpec> breakpoints,
+                          std::string* error = nullptr);
+  bool UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints,
+                                    std::string* error = nullptr);
+  void SetBreakpointEventCallback(BreakPoints::EventCallback callback);
+  BreakPoints::ClientId GetBreakpointClientId() const { return m_breakpoint_client_id; }
+  void ClearCodeBreakpoints();
   void SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
   // Evaluates a PPC debugger expression (same syntax as breakpoint conditions).
   std::optional<std::string> EvaluateExpression(std::string_view expression);
@@ -230,10 +239,8 @@ public:
                                                          int start_line, int end_line);
   void Restart();
   void Terminate();
-  // Clears all code/data breakpoints this controller installed in the global
-  // PPC BreakPoints / MemChecks stores. Called on session teardown so a
-  // disconnecting client doesn't leave the emulated core halting on stale
-  // debugger state. Safe to call multiple times; no-op if never installed.
+  // Clears this controller's owned code breakpoints and the still-global data
+  // breakpoint store. Memory watchpoint ownership is a later slice.
   void ClearBreakpoints();
   // Installs a hardware-level write freeze on [address, address+count) via
   // a `is_freeze` TMemCheck. The emulated CPU's stores to this range are
@@ -312,12 +319,11 @@ public:
   std::optional<u32> ResolveSourceLineBreakpoint(const SourceBreakpointContext& context, u32 line);
 
 private:
-  void ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints);
-  void ReapplyCodeBreakpoints();
+  static std::vector<BreakPoints::CodeBreakpoint>
+  ConvertCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints);
 
   Core::System& m_system;
-  std::map<std::string, std::vector<CodeBreakpointRequest>> m_source_breakpoints;
-  std::vector<CodeBreakpointRequest> m_instruction_breakpoints;
+  BreakPoints::ClientId m_breakpoint_client_id;
 
   // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
   // `is_freeze` TMemCheck in the global MemChecks store (for MMU-level write

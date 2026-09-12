@@ -3,9 +3,18 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <deque>
+#include <expected>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "Common/BitSet.h"
@@ -63,6 +72,42 @@ struct TMemCheck
 class BreakPoints
 {
 public:
+  using ClientId = u64;
+
+  struct CodeBreakpoint
+  {
+    u32 address = 0;
+    bool is_enabled = true;
+    bool log_on_hit = false;
+    bool break_on_hit = true;
+    std::optional<std::string> condition;
+
+    bool operator==(const CodeBreakpoint&) const = default;
+  };
+
+  enum class ChangeReason
+  {
+    New,
+    Changed,
+    Removed,
+  };
+
+  struct Change
+  {
+    ChangeReason reason = ChangeReason::New;
+    CodeBreakpoint breakpoint;
+  };
+
+  struct Event
+  {
+    u64 revision = 0;
+    std::optional<ClientId> origin;
+    std::vector<Change> changes;
+    std::vector<CodeBreakpoint> breakpoints;
+  };
+
+  using EventCallback = std::function<void(std::shared_ptr<const Event>)>;
+
   explicit BreakPoints(Core::System& system);
   BreakPoints(const BreakPoints& other) = delete;
   BreakPoints(BreakPoints&& other) = delete;
@@ -73,21 +118,47 @@ public:
   using TBreakPoints = std::vector<TBreakPoint>;
   using TBreakPointsStr = std::vector<std::string>;
 
-  const TBreakPoints& GetBreakPoints() const { return m_breakpoints; }
+  struct Snapshot
+  {
+    u64 revision = 0;
+    bool breaking_enabled = true;
+    TBreakPoints breakpoints;
+    std::optional<TBreakPoint> temporary_breakpoint;
+
+    const TBreakPoint* GetBreakpoint(u32 address) const;
+    const TBreakPoint* GetRegularBreakpoint(u32 address) const;
+  };
+
+  std::shared_ptr<const Snapshot> GetSnapshot() const;
+  std::shared_ptr<const TBreakPoints> GetBreakPoints() const;
   TBreakPointsStr GetStrings() const;
   void AddFromStrings(const TBreakPointsStr& bp_strings);
+
+  ClientId RegisterClient(EventCallback callback = {});
+  void SetClientEventCallback(ClientId client_id, EventCallback callback);
+  std::expected<void, std::string>
+  ReplaceClientSourceBreakpoints(ClientId client_id, std::string source_key,
+                                 std::vector<CodeBreakpoint> breakpoints);
+  std::expected<void, std::string>
+  ReplaceClientInstructionBreakpoints(ClientId client_id, std::vector<CodeBreakpoint> breakpoints);
+  void ClearClientBreakpoints(ClientId client_id);
+  void UnregisterClient(ClientId client_id);
+  u64 GetRevision() const;
 
   bool IsAddressBreakPoint(u32 address) const;
   bool IsBreakPointEnable(u32 address) const;
   // Get the breakpoint in this address (for most purposes)
-  const TBreakPoint* GetBreakpoint(u32 address) const;
+  std::shared_ptr<const TBreakPoint> GetBreakpoint(u32 address) const;
   // Get the breakpoint in this address (ignore temporary breakpoint, e.g. for editing purposes)
-  const TBreakPoint* GetRegularBreakpoint(u32 address) const;
+  std::shared_ptr<const TBreakPoint> GetRegularBreakpoint(u32 address) const;
 
-  // Add BreakPoint. If one already exists on the same address, replace it.
-  void Add(u32 address, bool break_on_hit, bool log_on_hit, std::optional<Expression> condition);
-  void Add(u32 address);
-  void Add(TBreakPoint bp);
+  // GUI site removal is authoritative across owners. GUI replacement preserves
+  // DAP claims and adds or replaces the legacy claim; compatible conditions are
+  // aggregated by BuildProjection.
+  std::expected<void, std::string> Add(u32 address, bool break_on_hit, bool log_on_hit,
+                                       std::optional<Expression> condition);
+  std::expected<void, std::string> Add(u32 address);
+  std::expected<void, std::string> Add(TBreakPoint bp);
   // Add temporary breakpoint (e.g., Step Over, Run to Here)
   // It can be on the same address of a regular breakpoint (it will have priority in this case)
   // It's cleared whenever the emulation is paused for any reason
@@ -99,7 +170,7 @@ public:
   bool ToggleEnable(u32 address);
 
   void EnableBreaking(bool enable);
-  bool IsBreakingEnabled() const { return m_breaking_enabled; }
+  bool IsBreakingEnabled() const { return GetSnapshot()->breaking_enabled; }
 
   // Remove Breakpoint. Returns whether it was removed.
   bool Remove(u32 address);
@@ -107,10 +178,54 @@ public:
   void ClearTemporary();
 
 private:
-  TBreakPoints m_breakpoints;
-  std::optional<TBreakPoint> m_temp_breakpoint;
+  struct ClientBreakpoints
+  {
+    std::map<std::string, std::vector<CodeBreakpoint>> sources;
+    std::vector<CodeBreakpoint> instructions;
+    EventCallback callback;
+  };
+
+  using Projection = std::map<u32, CodeBreakpoint>;
+
+  struct PendingDispatch
+  {
+    std::shared_ptr<const Event> event;
+  };
+
+  // Enabled claims are combined per action. Each action's unique canonical
+  // conditions form a logical OR, with unconditional dominating; break and log
+  // predicates must match when both actions are active because TBreakPoint has
+  // only one physical condition.
+  std::expected<Projection, std::string>
+  BuildProjection(const std::map<u32, CodeBreakpoint>& legacy,
+                  const std::unordered_map<ClientId, ClientBreakpoints>& clients) const;
+  bool ApplyProjectionLocked(Projection projection, std::optional<ClientId> origin);
+  std::expected<bool, std::string> ReplaceSiteLocked(CodeBreakpoint breakpoint);
+  bool RemoveSiteLocked(u32 address);
+  static bool EraseSiteClaims(u32 address, std::map<u32, CodeBreakpoint>& legacy,
+                              std::unordered_map<ClientId, ClientBreakpoints>& clients);
+  static void SetSiteClaimsEnabled(u32 address, bool enabled, std::map<u32, CodeBreakpoint>& legacy,
+                                   std::unordered_map<ClientId, ClientBreakpoints>& clients);
+  void PublishSnapshotLocked();
+  void DrainDispatchQueue();
+  void SynchronizeDispatch();
+  static CodeBreakpoint ToCodeBreakpoint(const TBreakPoint& breakpoint);
+
+  Projection m_projection;
+  std::map<u32, CodeBreakpoint> m_legacy_breakpoints;
+  std::unordered_map<ClientId, ClientBreakpoints> m_clients;
+  std::optional<u32> m_temporary_address;
   Core::System& m_system;
   bool m_breaking_enabled = true;
+  mutable std::mutex m_mutex;
+  // Delivery is serialized separately from state mutation. Reentrant mutations
+  // append to m_pending_dispatches and are delivered after the current event.
+  std::recursive_mutex m_dispatch_mutex;
+  bool m_is_draining = false;
+  std::deque<PendingDispatch> m_pending_dispatches;
+  std::atomic<std::shared_ptr<const Snapshot>> m_snapshot;
+  ClientId m_next_client_id = 1;
+  u64 m_revision = 0;
 };
 
 class DelayedMemCheckUpdate;

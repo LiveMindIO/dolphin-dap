@@ -635,9 +635,10 @@ void PowerPCManager::CheckExternalExceptions()
 
 bool PowerPCManager::CheckBreakPoints()
 {
-  const TBreakPoint* bp = m_breakpoints.GetBreakpoint(m_ppc_state.pc);
+  const auto breakpoint_snapshot = m_breakpoints.GetSnapshot();
+  const TBreakPoint* bp = breakpoint_snapshot->GetBreakpoint(m_ppc_state.pc);
 
-  if (!m_breakpoints.IsBreakingEnabled() || !bp || !bp->is_enabled ||
+  if (!breakpoint_snapshot->breaking_enabled || !bp || !bp->is_enabled ||
       !EvaluateCondition(m_system, bp->condition))
     return false;
 

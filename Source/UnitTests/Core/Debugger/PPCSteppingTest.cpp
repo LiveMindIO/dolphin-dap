@@ -156,7 +156,7 @@ TEST_F(PPCSteppingTest, InstructionOutCanIgnoreCodeBreakpointAtCurrentPc)
   auto& state = System().GetPPCState();
   state.pc = TEST_ADDRESS;
   LR(state) = TEST_ADDRESS + 0x100;
-  System().GetPowerPC().GetBreakPoints().Add(TEST_ADDRESS);
+  (void)System().GetPowerPC().GetBreakPoints().Add(TEST_ADDRESS);
   Core::Debug::PPCStepOptions options;
   options.ignore_current_code_breakpoint = true;
 

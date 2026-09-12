@@ -121,8 +121,15 @@ std::string DescribeExceptions(u32 exceptions)
 }
 }  // namespace
 
-DapDebugController::DapDebugController(Core::System& system) : m_system(system)
+DapDebugController::DapDebugController(Core::System& system)
+    : m_system(system),
+      m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient())
 {
+}
+
+DapDebugController::~DapDebugController()
+{
+  m_system.GetPowerPC().GetBreakPoints().UnregisterClient(m_breakpoint_client_id);
 }
 
 void DapDebugController::Continue()
@@ -181,37 +188,34 @@ void DapDebugController::StepOut(const std::atomic<bool>& cancelled,
                        Core::Debug::PPCStepGranularity::Instruction, options);
 }
 
-void DapDebugController::ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
+std::vector<BreakPoints::CodeBreakpoint>
+DapDebugController::ConvertCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
 {
-  auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
-  breakpoint_manager.Clear();
+  std::vector<BreakPoints::CodeBreakpoint> converted;
+  converted.reserve(breakpoints.size());
   for (const CodeBreakpointRequest& request : breakpoints)
   {
-    std::optional<Expression> condition;
+    BreakPoints::CodeBreakpoint breakpoint;
+    breakpoint.address = request.address;
     if (request.condition && !request.condition->empty())
-      condition = Expression::TryParse(*request.condition);
-
-    breakpoint_manager.Add(request.address, true, false, std::move(condition));
+    {
+      if (const std::optional<Expression> condition = Expression::TryParse(*request.condition))
+        breakpoint.condition = condition->GetText();
+    }
+    converted.push_back(std::move(breakpoint));
   }
-}
-
-void DapDebugController::ReapplyCodeBreakpoints()
-{
-  std::vector<CodeBreakpointRequest> breakpoints;
-  for (const auto& [_, source_breakpoints] : m_source_breakpoints)
-  {
-    breakpoints.insert(breakpoints.end(), source_breakpoints.begin(), source_breakpoints.end());
-  }
-  breakpoints.insert(breakpoints.end(), m_instruction_breakpoints.begin(),
-                     m_instruction_breakpoints.end());
-  ApplyCodeBreakpoints(breakpoints);
+  return converted;
 }
 
 void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints)
 {
-  m_source_breakpoints.clear();
-  m_instruction_breakpoints.clear();
-  ApplyCodeBreakpoints(breakpoints);
+  UpdateInstructionBreakpoints(std::move(breakpoints));
+}
+
+void DapDebugController::SetBreakpointEventCallback(BreakPoints::EventCallback callback)
+{
+  m_system.GetPowerPC().GetBreakPoints().SetClientEventCallback(m_breakpoint_client_id,
+                                                                std::move(callback));
 }
 
 std::optional<u32>
@@ -283,11 +287,12 @@ DapDebugController::ResolveSourceLineBreakpoint(const SourceBreakpointContext& c
   return static_cast<u32>(effective);
 }
 
-std::vector<std::optional<u32>>
-DapDebugController::UpdateSourceBreakpoints(const std::string_view source_key,
-                                            const SourceBreakpointContext& context,
-                                            std::vector<SourceBreakpointSpec> breakpoints)
+std::vector<std::optional<u32>> DapDebugController::UpdateSourceBreakpoints(
+    const std::string_view source_key, const SourceBreakpointContext& context,
+    std::vector<SourceBreakpointSpec> breakpoints, std::string* error)
 {
+  if (error)
+    error->clear();
   std::vector<CodeBreakpointRequest> resolved;
   resolved.reserve(breakpoints.size());
 
@@ -307,20 +312,27 @@ DapDebugController::UpdateSourceBreakpoints(const std::string_view source_key,
     resolved.push_back(std::move(request));
   }
 
-  if (resolved.empty())
-    m_source_breakpoints.erase(std::string(source_key));
-  else
-    m_source_breakpoints[std::string(source_key)] = std::move(resolved);
-
-  ReapplyCodeBreakpoints();
+  auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
+  const auto result = breakpoint_manager.ReplaceClientSourceBreakpoints(
+      m_breakpoint_client_id, std::string(source_key), ConvertCodeBreakpoints(resolved));
+  if (!result)
+  {
+    if (error)
+      *error = result.error();
+  }
   return addresses;
 }
 
-void DapDebugController::UpdateInstructionBreakpoints(
-    std::vector<CodeBreakpointRequest> breakpoints)
+bool DapDebugController::UpdateInstructionBreakpoints(
+    std::vector<CodeBreakpointRequest> breakpoints, std::string* error)
 {
-  m_instruction_breakpoints = std::move(breakpoints);
-  ReapplyCodeBreakpoints();
+  if (error)
+    error->clear();
+  const auto result = m_system.GetPowerPC().GetBreakPoints().ReplaceClientInstructionBreakpoints(
+      m_breakpoint_client_id, ConvertCodeBreakpoints(breakpoints));
+  if (!result && error)
+    *error = result.error();
+  return result.has_value();
 }
 
 void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
@@ -1190,20 +1202,11 @@ void DapDebugController::Terminate()
 
 void DapDebugController::ClearBreakpoints()
 {
-  // DESNOTE(jbarber, 2026-07-22): Dolphin has one shared global breakpoint /
-  // memcheck store tied to the PPC core. This session installed its
-  // breakpoints/watchpoints there via ApplyCodeBreakpoints (which clears the
-  // global store first) and SetDataBreakpoints (same for memchecks). Without
-  // this teardown call, a disconnecting client would leave the core halting
-  // on stale debugger state that no DAP client is around to clear. Wipe the
-  // session's tracked sets AND the global stores so follow-on emulation runs
-  // clean. Mirrors what ApplyCodeBreakpoints/SetDataBreakpoints do at the
-  // start of each set -- here we're doing the empty-set version.
-  m_source_breakpoints.clear();
-  m_instruction_breakpoints.clear();
+  // Code claims are origin-aware, while memory watchpoints remain global until
+  // their ownership slice. Never clear the shared physical code projection.
+  ClearCodeBreakpoints();
   {
     Core::CPUThreadGuard guard(m_system);
-    m_system.GetPowerPC().GetBreakPoints().Clear();
     m_system.GetPowerPC().GetMemChecks().Clear();
   }
   // Also clear any freezes this controller installed. ClearFreezes itself
@@ -1214,6 +1217,11 @@ void DapDebugController::ClearBreakpoints()
   // our tracking vector so RemoveFreeze/ClearFreezes don't try to remove
   // already-gone entries. Bugbot-resistent: idempotent.
   m_freezes.clear();
+}
+
+void DapDebugController::ClearCodeBreakpoints()
+{
+  m_system.GetPowerPC().GetBreakPoints().ClearClientBreakpoints(m_breakpoint_client_id);
 }
 
 u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8> value)

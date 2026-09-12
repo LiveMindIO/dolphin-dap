@@ -7,6 +7,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QSignalBlocker>
@@ -342,7 +343,8 @@ void BreakpointWidget::Update()
   auto& ppc_symbol_db = power_pc.GetSymbolDB();
 
   // Breakpoints
-  for (const auto& bp : breakpoints.GetBreakPoints())
+  const auto code_breakpoints = breakpoints.GetBreakPoints();
+  for (const auto& bp : *code_breakpoints)
   {
     m_table->setRowCount(i + 1);
 
@@ -480,8 +482,8 @@ void BreakpointWidget::OnEditBreakpoint(u32 address, bool is_instruction_bp)
 {
   if (is_instruction_bp)
   {
-    auto* dialog = new BreakpointDialog(
-        this, m_system.GetPowerPC().GetBreakPoints().GetRegularBreakpoint(address));
+    const auto breakpoint = m_system.GetPowerPC().GetBreakPoints().GetRegularBreakpoint(address);
+    auto* dialog = new BreakpointDialog(this, breakpoint.get());
     dialog->setAttribute(Qt::WA_DeleteOnClose, true);
     dialog->exec();
   }
@@ -522,7 +524,7 @@ void BreakpointWidget::OnToggleBreaking()
     m_enabled->setIcon(Resources::GetThemeIcon("pause"));
   }
 
-  if (has_memory_bp || !breakpoints.GetBreakPoints().empty())
+  if (has_memory_bp || !breakpoints.GetBreakPoints()->empty())
     emit Host::GetInstance()->PPCBreakpointsChanged();
 }
 
@@ -580,8 +582,8 @@ void BreakpointWidget::OnContextMenu(const QPoint& pos)
 
   if (!is_memory_breakpoint)
   {
-    const auto& inst_breakpoints = m_system.GetPowerPC().GetBreakPoints().GetBreakPoints();
-    if (!Common::Contains(inst_breakpoints, bp_address, &TBreakPoint::address))
+    const auto inst_breakpoints = m_system.GetPowerPC().GetBreakPoints().GetBreakPoints();
+    if (!Common::Contains(*inst_breakpoints, bp_address, &TBreakPoint::address))
       return;
 
     menu->addAction(tr("Show in Code"), [this, bp_address] { emit ShowCode(bp_address); });
@@ -669,9 +671,14 @@ void BreakpointWidget::AddBP(u32 addr)
 
 void BreakpointWidget::AddBP(u32 addr, bool break_on_hit, bool log_on_hit, const QString& condition)
 {
-  m_system.GetPowerPC().GetBreakPoints().Add(
+  const auto result = m_system.GetPowerPC().GetBreakPoints().Add(
       addr, break_on_hit, log_on_hit,
       !condition.isEmpty() ? Expression::TryParse(condition.toUtf8().constData()) : std::nullopt);
+  if (!result)
+  {
+    QMessageBox::warning(this, tr("Breakpoint Conflict"), QString::fromStdString(result.error()));
+    return;
+  }
 
   emit Host::GetInstance()->PPCBreakpointsChanged();
 }
@@ -679,7 +686,7 @@ void BreakpointWidget::AddBP(u32 addr, bool break_on_hit, bool log_on_hit, const
 void BreakpointWidget::EditBreakpoint(u32 address, int edit, std::optional<QString> string)
 {
   TBreakPoint bp;
-  const TBreakPoint* old_bp = m_system.GetPowerPC().GetBreakPoints().GetRegularBreakpoint(address);
+  const auto old_bp = m_system.GetPowerPC().GetBreakPoints().GetRegularBreakpoint(address);
   bp.is_enabled = edit == ENABLED_COLUMN ? !old_bp->is_enabled : old_bp->is_enabled;
   bp.log_on_hit = edit == LOG_COLUMN ? !old_bp->log_on_hit : old_bp->log_on_hit;
   bp.break_on_hit = edit == BREAK_COLUMN ? !old_bp->break_on_hit : old_bp->break_on_hit;
@@ -703,9 +710,15 @@ void BreakpointWidget::EditBreakpoint(u32 address, int edit, std::optional<QStri
   else if (old_bp->condition.has_value() && edit != CONDITION_COLUMN)
     bp.condition = Expression::TryParse(old_bp->condition.value().GetText());
 
-  // Unlike MBPs it Add() for TBreakpoint doesn't check to see if it already exists.
-  m_system.GetPowerPC().GetBreakPoints().Remove(address);
-  m_system.GetPowerPC().GetBreakPoints().Add(std::move(bp));
+  const u32 replacement_address = bp.address;
+  const auto result = m_system.GetPowerPC().GetBreakPoints().Add(std::move(bp));
+  if (!result)
+  {
+    QMessageBox::warning(this, tr("Breakpoint Conflict"), QString::fromStdString(result.error()));
+    return;
+  }
+  if (replacement_address != address)
+    m_system.GetPowerPC().GetBreakPoints().Remove(address);
 
   emit Host::GetInstance()->PPCBreakpointsChanged();
 }

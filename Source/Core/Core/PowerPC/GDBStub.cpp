@@ -874,7 +874,7 @@ static bool AddBreakpoint(BreakpointType type, u32 addr, u32 len)
   if (type == BreakpointType::ExecuteHard || type == BreakpointType::ExecuteSoft)
   {
     auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
-    breakpoints.Add(addr);
+    (void)breakpoints.Add(addr);
     INFO_LOG_FMT(GDB_STUB, "gdb: added {} breakpoint: {:08x} bytes at {:08x}",
                  static_cast<int>(type), len, addr);
   }
