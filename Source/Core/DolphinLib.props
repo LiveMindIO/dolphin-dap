@@ -225,6 +225,7 @@
     <ClInclude Include="Core\Debugger\PPCDebugInterface.h" />
     <ClInclude Include="Core\Debugger\PPCStack.h" />
     <ClInclude Include="Core\Debugger\PPCStepping.h" />
+    <ClInclude Include="Core\Debugger\PPCVariables.h" />
     <ClInclude Include="Core\Debugger\RSO.h" />
     <ClInclude Include="Core\DolphinAnalytics.h" />
     <ClInclude Include="Core\DSP\DSPAccelerator.h" />
@@ -935,6 +936,7 @@
     <ClCompile Include="Core\Debugger\OSThread.cpp" />
     <ClCompile Include="Core\Debugger\PPCDebugInterface.cpp" />
     <ClCompile Include="Core\Debugger\PPCStack.cpp" />
+    <ClCompile Include="Core\Debugger\PPCVariables.cpp" />
     <ClCompile Include="Core\Debugger\PPCStepping.cpp" />
     <ClCompile Include="Core\Debugger\RSO.cpp" />
     <ClCompile Include="Core\DolphinAnalytics.cpp" />

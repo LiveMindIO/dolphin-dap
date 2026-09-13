@@ -162,6 +162,8 @@ public:
   bool IsThreadsVisible() const;
   void SetWatchVisible(bool enabled);
   bool IsWatchVisible() const;
+  void SetVariablesVisible(bool enabled);
+  bool IsVariablesVisible() const;
   void SetBreakpointsVisible(bool enabled);
   bool IsBreakpointsVisible() const;
   void SetCodeVisible(bool enabled);
@@ -215,6 +217,7 @@ signals:
   void WidgetLockChanged(bool locked);
   void EnableCheatsChanged(bool enabled);
   void WatchVisibilityChanged(bool visible);
+  void VariablesVisibilityChanged(bool visible);
   void BreakpointsVisibilityChanged(bool visible);
   void CodeVisibilityChanged(bool visible);
   void MemoryVisibilityChanged(bool visible);

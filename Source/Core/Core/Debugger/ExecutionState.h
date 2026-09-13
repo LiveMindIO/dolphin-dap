@@ -22,6 +22,7 @@ enum class ExecutionEventKind
 {
   Continued,
   Stopped,
+  ValuesChanged,
 };
 
 enum class ExecutionStopCause
@@ -111,6 +112,8 @@ public:
   std::expected<void, std::string> PublishContinued(ClientId origin, OperationId operation_id,
                                                     std::optional<u32> pc = {});
   void PublishStopped(ExecutionStopDetails details);
+  void PublishValuesChanged(std::optional<ClientId> origin = {}, std::optional<u32> address = {},
+                            std::optional<u32> size = {});
   void AbandonStep(OperationId operation_id);
   void MarkStepWorkerComplete(OperationId operation_id);
   bool SetActiveStepCleanup(OperationId operation_id, std::function<void()> cleanup);
@@ -119,6 +122,7 @@ public:
 
   u64 GetRevision() const;
   u64 GetStopGeneration() const;
+  bool IsStopped() const;
 
 private:
   struct Client
@@ -153,5 +157,6 @@ private:
   OperationId m_next_operation_id = 1;
   u64 m_revision = 0;
   u64 m_stop_generation = 0;
+  bool m_stopped = true;
 };
 }  // namespace Core::Debug

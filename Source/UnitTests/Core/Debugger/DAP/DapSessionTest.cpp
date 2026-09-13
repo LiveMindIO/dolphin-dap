@@ -969,7 +969,7 @@ TEST_F(DapSessionTest, VariablesReturnsRegisters)
   (void)client.Receive();
 }
 
-TEST_F(DapSessionTest, FrameZeroScopesExposeExpandableDwarfVariablesAndExpireHandles)
+TEST_F(DapSessionTest, FrameZeroScopesExposeExpandableDwarfVariablesUntilExecutionChanges)
 {
   auto& system = Core::System::GetInstance();
   system.GetPPCSymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
@@ -1032,9 +1032,15 @@ TEST_F(DapSessionTest, FrameZeroScopesExposeExpandableDwarfVariablesAndExpireHan
   client.Send(fmt::format(
       R"({{"seq":14,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
       children_reference));
-  const auto stale_response = client.Receive();
-  ASSERT_TRUE(stale_response);
-  EXPECT_FALSE(stale_response->at("success").get<bool>());
+  const auto retained_response = client.Receive();
+  ASSERT_TRUE(retained_response);
+  EXPECT_TRUE(retained_response->at("success").get<bool>());
+  EXPECT_EQ(retained_response->at("body")
+                .get<picojson::object>()
+                .at("variables")
+                .get<picojson::array>()
+                .size(),
+            2U);
 
   client.Send(R"({
     "seq": 15, "type": "request", "command": "scopes", "arguments": {"frameId": 0}
@@ -1058,9 +1064,9 @@ TEST_F(DapSessionTest, FrameZeroScopesExposeExpandableDwarfVariablesAndExpireHan
   client.Send(fmt::format(
       R"({{"seq":17,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
       children_reference));
-  const auto aliased_stale_response = client.Receive();
-  ASSERT_TRUE(aliased_stale_response);
-  EXPECT_FALSE(aliased_stale_response->at("success").get<bool>());
+  const auto still_retained_response = client.Receive();
+  ASSERT_TRUE(still_retained_response);
+  EXPECT_TRUE(still_retained_response->at("success").get<bool>());
 
   client.Send(R"({"seq": 18, "type": "request", "command": "disconnect"})");
   (void)client.Receive();
@@ -1092,6 +1098,65 @@ TEST_F(DapSessionTest, SetVariableUpdatesRegisterAndReturnsFormattedValue)
     "type": "request",
     "command": "disconnect"
   })");
+  (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, SetVariableUpdatesTypedChildAndReturnsType)
+{
+  auto& system = Core::System::GetInstance();
+  system.GetPPCSymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
+  system.GetPPCState().pc = DwarfTestFixture::kFunctionAddress;
+  constexpr std::array<u8, 8> point{{0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0}};
+  system.GetMemory().CopyToEmu(DwarfTestFixture::kTypedDataAddress, point.data(), point.size());
+
+  TestClient client(m_client_fd());
+  Handshake(client);
+  client.Send(R"({
+    "seq": 3, "type": "request", "command": "variables",
+    "arguments": {"variablesReference": 1003}
+  })");
+  const auto globals_response = client.Receive();
+  ASSERT_TRUE(globals_response.has_value());
+  const auto& globals =
+      globals_response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  const int children_reference =
+      static_cast<int>(globals[0].get<picojson::object>().at("variablesReference").get<double>());
+
+  client.Send(fmt::format(
+      R"({{"seq":4,"type":"request","command":"setVariable","arguments":{{"variablesReference":{},"name":"x","value":"0xaabbccdd"}}}})",
+      children_reference));
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto& body = response->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("value").to_str(), "0xaabbccdd");
+  EXPECT_EQ(body.at("type").to_str(), "int");
+  EXPECT_EQ(body.at("variablesReference").get<double>(), 0.0);
+  EXPECT_EQ(system.GetMemory().Read_U32(DwarfTestFixture::kTypedDataAddress), 0xaabbccddu);
+
+  client.Send(fmt::format(
+      R"({{"seq":5,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      children_reference));
+  const auto reused_after_typed_write = client.Receive();
+  ASSERT_TRUE(reused_after_typed_write.has_value());
+  EXPECT_TRUE(reused_after_typed_write->at("success").get<bool>());
+
+  client.Send(R"({
+    "seq": 6, "type": "request", "command": "setVariable",
+    "arguments": {"variablesReference": 1000, "name": "r3", "value": "0x12345678"}
+  })");
+  const auto register_response = client.Receive();
+  ASSERT_TRUE(register_response.has_value());
+  EXPECT_TRUE(register_response->at("success").get<bool>());
+
+  client.Send(fmt::format(
+      R"({{"seq":7,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      children_reference));
+  const auto reused_after_register_write = client.Receive();
+  ASSERT_TRUE(reused_after_register_write.has_value());
+  EXPECT_TRUE(reused_after_register_write->at("success").get<bool>());
+
+  client.Send(R"({"seq": 8, "type": "request", "command": "disconnect"})");
   (void)client.Receive();
 }
 

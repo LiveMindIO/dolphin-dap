@@ -759,6 +759,19 @@ bool Settings::IsWatchVisible() const
   return GetQSettings().value(QStringLiteral("debugger/showwatch")).toBool();
 }
 
+void Settings::SetVariablesVisible(bool enabled)
+{
+  if (IsVariablesVisible() == enabled)
+    return;
+  GetQSettings().setValue(QStringLiteral("debugger/showvariables"), enabled);
+  emit VariablesVisibilityChanged(enabled);
+}
+
+bool Settings::IsVariablesVisible() const
+{
+  return GetQSettings().value(QStringLiteral("debugger/showvariables"), true).toBool();
+}
+
 void Settings::SetBreakpointsVisible(bool enabled)
 {
   if (IsBreakpointsVisible() != enabled)

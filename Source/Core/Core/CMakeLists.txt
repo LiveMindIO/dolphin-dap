@@ -105,6 +105,8 @@ add_library(core
   Debugger/PPCStack.h
   Debugger/PPCStepping.cpp
   Debugger/PPCStepping.h
+  Debugger/PPCVariables.cpp
+  Debugger/PPCVariables.h
   Debugger/RSO.cpp
   Debugger/RSO.h
   DolphinAnalytics.cpp

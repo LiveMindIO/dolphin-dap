@@ -548,6 +548,14 @@ void MenuBar::AddViewMenu()
   connect(&Settings::Instance(), &Settings::WatchVisibilityChanged, m_show_watch,
           &QAction::setChecked);
 
+  m_show_variables = view_menu->addAction(tr("&Variables"));
+  m_show_variables->setCheckable(true);
+  m_show_variables->setChecked(Settings::Instance().IsVariablesVisible());
+  connect(m_show_variables, &QAction::toggled, &Settings::Instance(),
+          &Settings::SetVariablesVisible);
+  connect(&Settings::Instance(), &Settings::VariablesVisibilityChanged, m_show_variables,
+          &QAction::setChecked);
+
   m_show_breakpoints = view_menu->addAction(tr("&Breakpoints"));
   m_show_breakpoints->setCheckable(true);
   m_show_breakpoints->setChecked(Settings::Instance().IsBreakpointsVisible());

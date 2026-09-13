@@ -68,6 +68,25 @@ TEST(ExecutionStateTest, DataStopCarriesTheAvailableAccessBoundary)
   EXPECT_EQ(received->data_access, DataAccessType::Write);
 }
 
+TEST(ExecutionStateTest, PublishesValueChangesWithoutAdvancingStopGeneration)
+{
+  ExecutionState state;
+  std::shared_ptr<const ExecutionEvent> received;
+  const auto client = state.RegisterClient(
+      [&](std::shared_ptr<const ExecutionEvent> event) { received = std::move(event); });
+
+  state.PublishValuesChanged(client, 0x80004000, 4);
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received->kind, ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(received->revision, 1u);
+  EXPECT_EQ(received->stop_generation, 0u);
+  EXPECT_EQ(received->origin, client);
+  EXPECT_EQ(received->data_address, 0x80004000u);
+  EXPECT_EQ(received->data_size, 4u);
+  EXPECT_TRUE(state.IsStopped());
+}
+
 TEST(ExecutionStateTest, RejectsOverlappingStepsDeterministically)
 {
   ExecutionState state;

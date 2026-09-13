@@ -29,6 +29,7 @@ struct BootParameters;
 class CheatsManager;
 class CodeWidget;
 class DiscordHandler;
+class DebugVariablesWidget;
 class DragEnterEvent;
 class FreeLookWindow;
 class GameCount;
@@ -291,6 +292,7 @@ private:
   RegisterWidget* m_register_widget;
   ThreadWidget* m_thread_widget;
   WatchWidget* m_watch_widget;
+  DebugVariablesWidget* m_variables_widget;
   CheatsManager* m_cheats_manager{};
   QByteArray m_render_widget_geometry;
 };

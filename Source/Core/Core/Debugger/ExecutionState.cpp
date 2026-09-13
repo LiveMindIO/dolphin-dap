@@ -154,6 +154,7 @@ std::expected<void, std::string> ExecutionState::PublishContinued(const ClientId
     event->pc = pc;
     m_running_origin = origin;
     m_running_operation = operation_id;
+    m_stopped = false;
     if (pending_operation_matches)
       m_pending_operation.reset();
     QueueEventLocked(std::move(event));
@@ -211,7 +212,26 @@ void ExecutionState::PublishStopped(ExecutionStopDetails details)
       m_pending_operation.reset();
     m_running_origin.reset();
     m_running_operation.reset();
+    m_stopped = true;
     m_operation_changed.notify_all();
+    QueueEventLocked(std::move(event));
+  }
+  DrainDispatchQueue();
+}
+
+void ExecutionState::PublishValuesChanged(const std::optional<ClientId> origin,
+                                          const std::optional<u32> address,
+                                          const std::optional<u32> size)
+{
+  {
+    std::lock_guard lock(m_mutex);
+    auto event = std::make_shared<ExecutionEvent>();
+    event->revision = ++m_revision;
+    event->stop_generation = m_stop_generation;
+    event->kind = ExecutionEventKind::ValuesChanged;
+    event->origin = origin;
+    event->data_address = address;
+    event->data_size = size;
     QueueEventLocked(std::move(event));
   }
   DrainDispatchQueue();
@@ -283,6 +303,12 @@ u64 ExecutionState::GetStopGeneration() const
 {
   std::lock_guard lock(m_mutex);
   return m_stop_generation;
+}
+
+bool ExecutionState::IsStopped() const
+{
+  std::lock_guard lock(m_mutex);
+  return m_stopped;
 }
 
 void ExecutionState::QueueEventLocked(std::shared_ptr<const ExecutionEvent> event)

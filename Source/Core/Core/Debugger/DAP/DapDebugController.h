@@ -18,9 +18,9 @@
 
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/DAP/DapSource.h"
-#include "Core/Debugger/DWARF/DwarfReader.h"
 #include "Core/Debugger/ExecutionState.h"
 #include "Core/Debugger/PPCStepping.h"
+#include "Core/Debugger/PPCVariables.h"
 #include "Core/PowerPC/BreakPoints.h"
 
 namespace Core
@@ -46,20 +46,8 @@ struct RegisterSnapshot
   u32 xer = 0;
 };
 
-struct DebugValueContext
-{
-  Core::Debug::Dwarf::TypeRef type;
-  u32 address = 0;
-  u32 depth = 0;
-};
-
-struct DebugVariable
-{
-  std::string name;
-  std::string value;
-  std::string type;
-  std::optional<DebugValueContext> children;
-};
+using DebugValueContext = Core::Debug::PPCVariableContext;
+using DebugVariable = Core::Debug::PPCVariable;
 
 enum class StepOverResult
 {
@@ -245,6 +233,11 @@ public:
   RegisterSnapshot GetRegisters();
   std::vector<DebugVariable> GetDebugVariables(bool globals);
   std::vector<DebugVariable> GetDebugVariableChildren(const DebugValueContext& context);
+  std::expected<DebugVariable, std::string> SetDebugVariable(bool globals, std::string_view name,
+                                                             std::string_view value);
+  std::expected<DebugVariable, std::string> SetDebugVariableChild(const DebugValueContext& context,
+                                                                  std::string_view name,
+                                                                  std::string_view value);
   // Writes a register exposed by the `variables` scopes. Returns the new value
   // on success, or nullopt when the scope, name, value, or writability is invalid.
   std::optional<u32> SetRegister(int variables_reference, std::string_view name,
@@ -345,6 +338,7 @@ private:
   BreakPoints::ClientId m_breakpoint_client_id;
   MemChecks::ClientId m_memcheck_client_id;
   Core::Debug::ExecutionState::ClientId m_execution_client_id;
+  Core::Debug::PPCVariables m_variables;
 
   // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
   // private range in the global MemChecks store (for MMU-level write

@@ -401,6 +401,8 @@ private:
     {
       return;
     }
+    if (event->kind == Core::Debug::ExecutionEventKind::ValuesChanged)
+      return;
     m_invalidate_debug_values.store(true);
     if (event->kind == Core::Debug::ExecutionEventKind::Continued)
     {
@@ -1916,17 +1918,42 @@ private:
       return;
     }
 
-    const std::optional<u32> value =
-        m_controller.SetRegister(arguments->variables_reference, arguments->name, arguments->value);
-    if (!value)
+    if (arguments->variables_reference == REGISTERS_SCOPE ||
+        arguments->variables_reference == PC_SCOPE)
     {
-      RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+      const std::optional<u32> value = m_controller.SetRegister(arguments->variables_reference,
+                                                                arguments->name, arguments->value);
+      if (!value)
+      {
+        RespondError(request.seq, "setVariable", "invalid setVariable arguments");
+        return;
+      }
+      picojson::object body;
+      body.emplace("value", fmt::format("0x{:08x}", *value));
+      Respond(request.seq, "setVariable", std::move(body));
       return;
     }
 
-    ClearDebugValueHandles();
-    picojson::object body;
-    body.emplace("value", fmt::format("0x{:08x}", *value));
+    std::expected<DebugVariable, std::string> result = std::unexpected("unknown variable scope");
+    if (arguments->variables_reference == LOCALS_SCOPE ||
+        arguments->variables_reference == GLOBALS_SCOPE)
+    {
+      result = m_controller.SetDebugVariable(arguments->variables_reference == GLOBALS_SCOPE,
+                                             arguments->name, arguments->value);
+    }
+    else if (const auto it = m_debug_value_handles.find(arguments->variables_reference);
+             it != m_debug_value_handles.end())
+    {
+      result = m_controller.SetDebugVariableChild(it->second, arguments->name, arguments->value);
+    }
+    if (!result)
+    {
+      RespondError(request.seq, "setVariable", result.error());
+      return;
+    }
+
+    picojson::object body = MakeDebugVariable(std::move(*result));
+    body.erase("name");
     Respond(request.seq, "setVariable", std::move(body));
   }
 
@@ -2487,7 +2514,6 @@ private:
 
   picojson::object MakeScopes(const int frame_id)
   {
-    ClearDebugValueHandles();
     picojson::array scopes;
     scopes.emplace_back(MakeScope("Registers", REGISTERS_SCOPE));
     scopes.emplace_back(MakeScope("PC", PC_SCOPE));

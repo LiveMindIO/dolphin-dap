@@ -125,7 +125,8 @@ DapDebugController::DapDebugController(Core::System& system)
     : m_system(system),
       m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient()),
       m_memcheck_client_id(system.GetPowerPC().GetMemChecks().RegisterClient()),
-      m_execution_client_id(system.GetCPU().GetExecutionState().RegisterClient())
+      m_execution_client_id(system.GetCPU().GetExecutionState().RegisterClient()),
+      m_variables(system, m_execution_client_id)
 {
 }
 
@@ -521,448 +522,41 @@ RegisterSnapshot DapDebugController::GetRegisters()
   return snapshot;
 }
 
-namespace
-{
-constexpr u32 MAX_DEBUG_VALUE_DEPTH = 32;
-constexpr size_t MAX_DEBUG_CHILDREN = 1000;
-constexpr u32 MAX_DEBUG_STRING_PREVIEW = 256;
-
-const Core::Debug::Dwarf::Type* FindType(const Core::Debug::Dwarf::ParseResult& info,
-                                         const u32 offset)
-{
-  const auto it =
-      std::ranges::lower_bound(info.types, offset, {}, &Core::Debug::Dwarf::Type::die_offset);
-  return it == info.types.end() || it->die_offset != offset ? nullptr : &*it;
-}
-
-std::optional<u32> FundamentalSize(const u16 type)
-{
-  switch (type)
-  {
-  case 1:
-  case 2:
-  case 3:
-  case 21:
-    return 1;
-  case 4:
-  case 5:
-  case 6:
-    return 2;
-  case 7:
-  case 8:
-  case 9:
-  case 10:
-  case 11:
-  case 12:
-  case 13:
-  case 14:
-    return 4;
-  case 15:
-  case 0x8008:
-  case 0x8108:
-  case 0x8208:
-    return 8;
-  default:
-    return std::nullopt;
-  }
-}
-
-std::string FundamentalName(const u16 type)
-{
-  switch (type)
-  {
-  case 1:
-    return "char";
-  case 2:
-    return "signed char";
-  case 3:
-    return "unsigned char";
-  case 4:
-  case 5:
-    return "short";
-  case 6:
-    return "unsigned short";
-  case 7:
-  case 8:
-    return "int";
-  case 9:
-    return "unsigned int";
-  case 10:
-  case 11:
-    return "long";
-  case 12:
-    return "unsigned long";
-  case 13:
-    return "void*";
-  case 14:
-    return "float";
-  case 15:
-    return "double";
-  case 20:
-    return "void";
-  case 21:
-    return "bool";
-  case 0x8008:
-  case 0x8108:
-    return "long long";
-  case 0x8208:
-    return "unsigned long long";
-  default:
-    return "unknown";
-  }
-}
-
-std::string TypeName(const Core::Debug::Dwarf::ParseResult& info,
-                     const Core::Debug::Dwarf::TypeRef& ref, u32 depth = 0)
-{
-  if (depth >= MAX_DEBUG_VALUE_DEPTH)
-    return "unknown";
-  if (!ref.modifiers.empty())
-  {
-    auto modified = ref;
-    const auto modifier = modified.modifiers.front();
-    modified.modifiers.erase(modified.modifiers.begin());
-    if (modifier == Core::Debug::Dwarf::TypeModifier::Pointer)
-      return TypeName(info, modified, depth + 1) + "*";
-    if (modifier == Core::Debug::Dwarf::TypeModifier::Reference)
-      return TypeName(info, modified, depth + 1) + "&";
-    return TypeName(info, modified, depth + 1);
-  }
-  if (const auto* fundamental = std::get_if<Core::Debug::Dwarf::FundamentalTypeRef>(&ref.type))
-    return FundamentalName(fundamental->type);
-  const auto* user = std::get_if<Core::Debug::Dwarf::UserTypeRef>(&ref.type);
-  const auto* type = user ? FindType(info, user->die_offset) : nullptr;
-  if (!type)
-    return "unknown";
-  if (!type->name.empty())
-    return type->name;
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Pointer)
-    return TypeName(info, type->referenced_type, depth + 1) + "*";
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Array)
-    return fmt::format("{}[{}]", TypeName(info, type->referenced_type, depth + 1),
-                       type->array_count.value_or(0));
-  return type->kind == Core::Debug::Dwarf::TypeKind::Union ? "union" : "struct";
-}
-
-std::optional<u64> ReadRegisterValue(const PowerPC::PowerPCState& state, const u32 reg)
-{
-  if (reg < 32)
-    return state.gpr[reg];
-  if (reg == 65)
-    return LR(state);
-  if (reg == 66)
-    return CTR(state);
-  if (reg == 76)
-    return state.GetXER().Hex;
-  return std::nullopt;
-}
-
-std::optional<u64> ReadBigEndianValue(const Core::CPUThreadGuard& guard, const u32 address,
-                                      const u32 size)
-{
-  if (size == 0 || size > 8 || address > std::numeric_limits<u32>::max() - (size - 1))
-    return std::nullopt;
-  const auto* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
-  if (!accessors || !accessors->IsValidAddress(guard, address) ||
-      !accessors->IsValidAddress(guard, address + size - 1))
-    return std::nullopt;
-  u64 value = 0;
-  for (u32 i = 0; i < size; ++i)
-    value = value << 8 | accessors->ReadU8(guard, address + i);
-  return value;
-}
-
-DebugVariable UnavailableVariable(std::string name, std::string type)
-{
-  return {std::move(name), "<unavailable>", std::move(type), std::nullopt};
-}
-
-bool IsPlainCharType(const Core::Debug::Dwarf::ParseResult& info, Core::Debug::Dwarf::TypeRef ref,
-                     const u32 depth = 0)
-{
-  if (depth >= MAX_DEBUG_VALUE_DEPTH)
-    return false;
-  while (!ref.modifiers.empty() &&
-         (ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Const ||
-          ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Volatile))
-  {
-    ref.modifiers.erase(ref.modifiers.begin());
-  }
-  if (!ref.modifiers.empty())
-    return false;
-  if (const auto* fundamental = std::get_if<Core::Debug::Dwarf::FundamentalTypeRef>(&ref.type))
-    return fundamental->type == 1;
-  const auto* user = std::get_if<Core::Debug::Dwarf::UserTypeRef>(&ref.type);
-  const auto* type = user ? FindType(info, user->die_offset) : nullptr;
-  return type && type->kind == Core::Debug::Dwarf::TypeKind::Typedef &&
-         IsPlainCharType(info, type->referenced_type, depth + 1);
-}
-
-std::optional<std::string> FormatCharArray(const Core::CPUThreadGuard& guard,
-                                           const Core::Debug::Dwarf::ParseResult& info,
-                                           const Core::Debug::Dwarf::Type& type, const u32 address)
-{
-  if (!type.array_count || !IsPlainCharType(info, type.referenced_type))
-    return std::nullopt;
-  const auto* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
-  if (!accessors)
-    return std::nullopt;
-
-  const u32 count = std::min(*type.array_count, MAX_DEBUG_STRING_PREVIEW);
-  std::string value{"\""};
-  bool terminated = false;
-  for (u32 i = 0; i < count; ++i)
-  {
-    if (address > std::numeric_limits<u32>::max() - i ||
-        !accessors->IsValidAddress(guard, address + i))
-    {
-      return std::nullopt;
-    }
-    const u8 byte = accessors->ReadU8(guard, address + i);
-    if (byte == 0)
-    {
-      terminated = true;
-      break;
-    }
-    switch (byte)
-    {
-    case '\\':
-      value += "\\\\";
-      break;
-    case '"':
-      value += "\\\"";
-      break;
-    case '\n':
-      value += "\\n";
-      break;
-    case '\r':
-      value += "\\r";
-      break;
-    case '\t':
-      value += "\\t";
-      break;
-    default:
-      if (byte >= 0x20 && byte <= 0x7e)
-        value += static_cast<char>(byte);
-      else
-        value += fmt::format("\\x{:02x}", byte);
-      break;
-    }
-  }
-  value += '"';
-  if (!terminated && *type.array_count > count)
-    value += "...";
-  return value;
-}
-
-DebugVariable MaterializeDebugValue(const Core::CPUThreadGuard& guard,
-                                    const Core::Debug::Dwarf::ParseResult& info, std::string name,
-                                    Core::Debug::Dwarf::TypeRef ref, std::optional<u32> address,
-                                    std::optional<u64> direct_value, const u32 depth)
-{
-  const std::string display_type = TypeName(info, ref);
-  if (depth >= MAX_DEBUG_VALUE_DEPTH)
-    return UnavailableVariable(std::move(name), display_type);
-
-  while (!ref.modifiers.empty() &&
-         (ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Const ||
-          ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Volatile))
-  {
-    ref.modifiers.erase(ref.modifiers.begin());
-  }
-  if (!ref.modifiers.empty() &&
-      ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Reference)
-  {
-    return UnavailableVariable(std::move(name), display_type);
-  }
-  if (!ref.modifiers.empty() && ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Pointer)
-  {
-    const std::optional<u64> value = direct_value ? direct_value :
-                                     address      ? ReadBigEndianValue(guard, *address, 4) :
-                                                    std::nullopt;
-    if (!value || *value > std::numeric_limits<u32>::max())
-      return UnavailableVariable(std::move(name), display_type);
-    ref.modifiers.erase(ref.modifiers.begin());
-    if (*value == 0)
-      return {std::move(name), "0x00000000", display_type, std::nullopt};
-    return {std::move(name), fmt::format("0x{:08x}", static_cast<u32>(*value)), display_type,
-            DebugValueContext{std::move(ref), static_cast<u32>(*value), depth + 1}};
-  }
-
-  if (const auto* fundamental = std::get_if<Core::Debug::Dwarf::FundamentalTypeRef>(&ref.type))
-  {
-    const auto size = FundamentalSize(fundamental->type);
-    std::optional<u64> value = direct_value    ? direct_value :
-                               address && size ? ReadBigEndianValue(guard, *address, *size) :
-                                                 std::nullopt;
-    if (!size || !value)
-      return UnavailableVariable(std::move(name), display_type);
-    if (*size < 8)
-      *value &= (u64{1} << (*size * 8)) - 1;
-    return {std::move(name), fmt::format("0x{:0{}x}", *value, *size * 2), display_type,
-            std::nullopt};
-  }
-
-  const auto* user = std::get_if<Core::Debug::Dwarf::UserTypeRef>(&ref.type);
-  const auto* type = user ? FindType(info, user->die_offset) : nullptr;
-  if (!type)
-    return UnavailableVariable(std::move(name), display_type);
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Typedef)
-    return MaterializeDebugValue(guard, info, std::move(name), type->referenced_type, address,
-                                 direct_value, depth + 1);
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Pointer)
-  {
-    const std::optional<u64> value = direct_value ? direct_value :
-                                     address      ? ReadBigEndianValue(guard, *address, 4) :
-                                                    std::nullopt;
-    if (!value || *value > std::numeric_limits<u32>::max())
-      return UnavailableVariable(std::move(name), display_type);
-    if (*value == 0)
-      return {std::move(name), "0x00000000", display_type, std::nullopt};
-    return {std::move(name), fmt::format("0x{:08x}", static_cast<u32>(*value)), display_type,
-            DebugValueContext{type->referenced_type, static_cast<u32>(*value), depth + 1}};
-  }
-  if (!address || (type->kind == Core::Debug::Dwarf::TypeKind::Array && !type->array_count))
-    return UnavailableVariable(std::move(name), display_type);
-  const std::optional<std::string> char_array = type->kind == Core::Debug::Dwarf::TypeKind::Array ?
-                                                    FormatCharArray(guard, info, *type, *address) :
-                                                    std::nullopt;
-  return {std::move(name), char_array.value_or(fmt::format("@ 0x{:08x}", *address)), display_type,
-          DebugValueContext{std::move(ref), *address, depth + 1}};
-}
-
-std::optional<u32> TypeSize(const Core::Debug::Dwarf::ParseResult& info,
-                            const Core::Debug::Dwarf::TypeRef& ref, u32 depth = 0)
-{
-  if (depth >= MAX_DEBUG_VALUE_DEPTH)
-    return std::nullopt;
-  if (!ref.modifiers.empty() &&
-      (ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Const ||
-       ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Volatile))
-  {
-    auto unqualified = ref;
-    unqualified.modifiers.erase(unqualified.modifiers.begin());
-    return TypeSize(info, unqualified, depth + 1);
-  }
-  if (!ref.modifiers.empty() && ref.modifiers.front() == Core::Debug::Dwarf::TypeModifier::Pointer)
-    return 4;
-  if (!ref.modifiers.empty())
-    return std::nullopt;
-  if (const auto* fundamental = std::get_if<Core::Debug::Dwarf::FundamentalTypeRef>(&ref.type))
-    return FundamentalSize(fundamental->type);
-  const auto* user = std::get_if<Core::Debug::Dwarf::UserTypeRef>(&ref.type);
-  const auto* type = user ? FindType(info, user->die_offset) : nullptr;
-  if (!type)
-    return std::nullopt;
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Pointer)
-    return 4;
-  if (type->byte_size != 0)
-    return type->byte_size;
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Typedef)
-    return TypeSize(info, type->referenced_type, depth + 1);
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Array && type->array_count)
-  {
-    const auto element = TypeSize(info, type->referenced_type, depth + 1);
-    if (element && *type->array_count <= std::numeric_limits<u32>::max() / *element)
-      return *element * *type->array_count;
-  }
-  return std::nullopt;
-}
-}  // namespace
-
 std::vector<DebugVariable> DapDebugController::GetDebugVariables(const bool globals)
 {
-  Core::CPUThreadGuard guard(m_system);
-  const auto stored = m_system.GetPPCSymbolDB().GetDwarfDebugInfo();
-  if (!stored)
-    return {};
-  const auto& state = m_system.GetPPCState();
-  std::vector<DebugVariable> result;
-  for (const auto& variable : stored->variables)
-  {
-    const bool is_global = variable.kind == Core::Debug::Dwarf::VariableKind::Global;
-    if (is_global != globals ||
-        (!globals && (variable.low_pc >= variable.high_pc || state.pc < variable.low_pc ||
-                      state.pc >= variable.high_pc)))
-      continue;
-    std::optional<u32> address;
-    std::optional<u64> direct;
-    if (variable.location.kind == Core::Debug::Dwarf::LocationKind::Address)
-      address = variable.location.value;
-    else if (variable.location.kind == Core::Debug::Dwarf::LocationKind::Register)
-      direct = ReadRegisterValue(state, variable.location.value);
-    else if (variable.location.kind == Core::Debug::Dwarf::LocationKind::BaseRegisterOffset)
-    {
-      if (const auto base = ReadRegisterValue(state, variable.location.value);
-          base && *base <= UINT32_MAX)
-      {
-        const s64 resolved = static_cast<s64>(*base) + variable.location.offset;
-        if (resolved >= 0 && resolved <= UINT32_MAX)
-          address = static_cast<u32>(resolved);
-      }
-    }
-    result.push_back(
-        MaterializeDebugValue(guard, *stored, variable.name, variable.type, address, direct, 0));
-  }
-  return result;
+  return m_variables.GetVariables(globals ? Core::Debug::PPCVariableScope::Globals :
+                                            Core::Debug::PPCVariableScope::Locals);
 }
 
 std::vector<DebugVariable>
 DapDebugController::GetDebugVariableChildren(const DebugValueContext& context)
 {
-  Core::CPUThreadGuard guard(m_system);
-  const auto stored = m_system.GetPPCSymbolDB().GetDwarfDebugInfo();
-  if (!stored || context.depth >= MAX_DEBUG_VALUE_DEPTH)
-    return {};
-  if (!context.type.modifiers.empty() ||
-      std::holds_alternative<Core::Debug::Dwarf::FundamentalTypeRef>(context.type.type))
-  {
-    return {MaterializeDebugValue(guard, *stored, "*", context.type, context.address, std::nullopt,
-                                  context.depth)};
-  }
-  const auto* user = std::get_if<Core::Debug::Dwarf::UserTypeRef>(&context.type.type);
-  const auto* type = user ? FindType(*stored, user->die_offset) : nullptr;
-  if (!type)
-    return {};
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Typedef)
-    return {MaterializeDebugValue(guard, *stored, "value", type->referenced_type, context.address,
-                                  std::nullopt, context.depth)};
+  auto result = m_variables.GetChildren(context);
+  return result ? std::move(*result) : std::vector<DebugVariable>{};
+}
 
-  std::vector<DebugVariable> result;
-  if (type->kind == Core::Debug::Dwarf::TypeKind::Structure ||
-      type->kind == Core::Debug::Dwarf::TypeKind::Union)
-  {
-    for (const auto& member : type->members)
-    {
-      if (result.size() >= MAX_DEBUG_CHILDREN)
-        break;
-      if (member.location.kind != Core::Debug::Dwarf::LocationKind::MemberOffset ||
-          member.location.value > UINT32_MAX - context.address)
-      {
-        result.push_back(UnavailableVariable(member.name, TypeName(*stored, member.type)));
-        continue;
-      }
-      result.push_back(MaterializeDebugValue(guard, *stored, member.name, member.type,
-                                             context.address + member.location.value, std::nullopt,
-                                             context.depth));
-    }
-  }
-  else if (type->kind == Core::Debug::Dwarf::TypeKind::Array && type->array_count)
-  {
-    const auto element_size = TypeSize(*stored, type->referenced_type);
-    if (!element_size || *element_size == 0)
-      return {};
-    const u32 count = std::min<u32>(*type->array_count, MAX_DEBUG_CHILDREN);
-    for (u32 i = 0; i < count; ++i)
-    {
-      const u64 address = static_cast<u64>(context.address) + static_cast<u64>(i) * *element_size;
-      if (address > UINT32_MAX)
-        break;
-      result.push_back(MaterializeDebugValue(guard, *stored, fmt::format("[{}]", i),
-                                             type->referenced_type, static_cast<u32>(address),
-                                             std::nullopt, context.depth));
-    }
-  }
+std::expected<DebugVariable, std::string>
+DapDebugController::SetDebugVariable(const bool globals, const std::string_view name,
+                                     const std::string_view value)
+{
+  return m_variables.SetValue(globals ? Core::Debug::PPCVariableScope::Globals :
+                                        Core::Debug::PPCVariableScope::Locals,
+                              name, value);
+}
+
+std::expected<DebugVariable, std::string>
+DapDebugController::SetDebugVariableChild(const DebugValueContext& context,
+                                          const std::string_view name, const std::string_view value)
+{
+  auto children = m_variables.GetChildren(context);
+  if (!children)
+    return std::unexpected(children.error());
+  const auto it = std::ranges::find(*children, name, &DebugVariable::name);
+  if (it == children->end() || !it->write_context)
+    return std::unexpected("variable is not writable");
+  auto result = m_variables.SetValue(*it->write_context, value);
+  if (result)
+    result->name = it->name;
   return result;
 }
 
@@ -974,54 +568,39 @@ std::optional<u32> DapDebugController::SetRegister(const int variables_reference
   if (!value)
     return std::nullopt;
 
-  Core::CPUThreadGuard guard(m_system);
-  auto& ppc_state = m_system.GetPPCState();
-
-  if (variables_reference == REGISTERS_SCOPE)
   {
-    if (name.size() < 2 || name[0] != 'r')
+    Core::CPUThreadGuard guard(m_system);
+    auto& ppc_state = m_system.GetPPCState();
+    if (variables_reference == REGISTERS_SCOPE)
+    {
+      if (name.size() < 2 || name[0] != 'r')
+        return std::nullopt;
+      unsigned index = 0;
+      if (!TryParse(std::string(name.substr(1)), &index, 10) || index >= 32)
+        return std::nullopt;
+      ppc_state.gpr[index] = *value;
+    }
+    else if (variables_reference != PC_SCOPE)
       return std::nullopt;
-
-    unsigned index = 0;
-    if (!TryParse(std::string(name.substr(1)), &index, 10) || index >= 32)
+    else if (name == "pc")
+      ppc_state.pc = *value;
+    else if (name == "lr")
+      LR(ppc_state) = *value;
+    else if (name == "ctr")
+      CTR(ppc_state) = *value;
+    else if (name == "cr")
+      ppc_state.cr.Set(*value);
+    else if (name == "xer")
+    {
+      UReg_XER xer;
+      xer.Hex = *value;
+      ppc_state.SetXER(xer);
+    }
+    else
       return std::nullopt;
-
-    ppc_state.gpr[index] = *value;
-    return ppc_state.gpr[index];
   }
-
-  if (variables_reference != PC_SCOPE)
-    return std::nullopt;
-
-  if (name == "pc")
-  {
-    ppc_state.pc = *value;
-    return ppc_state.pc;
-  }
-  if (name == "lr")
-  {
-    LR(ppc_state) = *value;
-    return LR(ppc_state);
-  }
-  if (name == "ctr")
-  {
-    CTR(ppc_state) = *value;
-    return CTR(ppc_state);
-  }
-  if (name == "cr")
-  {
-    ppc_state.cr.Set(*value);
-    return ppc_state.cr.Get();
-  }
-  if (name == "xer")
-  {
-    UReg_XER xer;
-    xer.Hex = *value;
-    ppc_state.SetXER(xer);
-    return ppc_state.GetXER().Hex;
-  }
-
-  return std::nullopt;
+  m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id);
+  return value;
 }
 
 std::vector<ThreadInfo> DapDebugController::GetThreads()

@@ -231,6 +231,10 @@ add_executable(dolphin-emu
   Debugger/CodeViewWidget.h
   Debugger/CodeWidget.cpp
   Debugger/CodeWidget.h
+  Debugger/DebugVariablesModel.cpp
+  Debugger/DebugVariablesModel.h
+  Debugger/DebugVariablesWidget.cpp
+  Debugger/DebugVariablesWidget.h
   Debugger/SourceViewWidget.cpp
   Debugger/SourceViewWidget.h
   Debugger/EditSymbolDialog.cpp
