@@ -1719,6 +1719,25 @@ TEST_F(DapControllerTest, SourcePathsResolveDwarfSourcesToFullPaths)
   EXPECT_EQ(controller.ResolveSourceLineBreakpoint(breakpoint, 7), TEST_ADDRESS);
 }
 
+TEST_F(DapControllerTest, GetSourcePreservesLinesLongerThanReadBuffer)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_path = temp_dir + "/long-line.c";
+  const std::string long_line(5000, 'a');
+  ASSERT_TRUE(File::WriteStringToFile(source_path, long_line + "\nsecond line\n"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile(source_path);
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  const auto source = controller.GetSource(1, 1, 2);
+  ASSERT_TRUE(source.has_value());
+  EXPECT_EQ(source->content, long_line + "\nsecond line");
+}
+
 TEST_F(DapControllerTest, SourcePathsResolveSourcesImportedLater)
 {
   const std::string temp_dir = File::CreateTempDir();

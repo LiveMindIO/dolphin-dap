@@ -737,25 +737,35 @@ std::optional<SourceContent> DapDebugController::GetSource(const SourceReference
     const int source_first_line = std::max(first_line, 1);
     int current_line = 1;
     int emitted_lines = 0;
+    bool output_line_started = false;
     while (std::fgets(buffer, sizeof(buffer), file.GetHandle()))
     {
       if (current_line > last_line || emitted_lines >= kMaxResponseLines)
         break;
+      std::string_view line(buffer);
+      const bool line_complete = !line.empty() && line.back() == '\n';
       if (current_line >= source_first_line)
       {
-        if (current_line > source_first_line)
+        if (!output_line_started && emitted_lines > 0)
           result.content += '\n';
-        std::string_view line(buffer);
-        if (!line.empty() && line.back() == '\n')
+        output_line_started = true;
+        if (line_complete)
+        {
           line.remove_suffix(1);
-        if (!line.empty() && line.back() == '\r')
-          line.remove_suffix(1);
+          if (!line.empty() && line.back() == '\r')
+            line.remove_suffix(1);
+        }
         result.content.append(line);
-        ++emitted_lines;
       }
-      if (current_line == std::numeric_limits<int>::max())
-        break;
-      ++current_line;
+      if (line_complete)
+      {
+        if (output_line_started)
+          ++emitted_lines;
+        output_line_started = false;
+        if (current_line == std::numeric_limits<int>::max())
+          break;
+        ++current_line;
+      }
     }
 
     // DESNOTE(jbarber, 2026-07-21): Previous form `... && current_line == 0`

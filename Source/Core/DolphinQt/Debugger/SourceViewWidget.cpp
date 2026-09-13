@@ -245,7 +245,7 @@ bool SourceViewWidget::ShowSource(const u32 file_index, const u32 line)
     setPlainText(QString::fromUtf8(contents));
     if (line == 0 || line > static_cast<u32>(blockCount()))
     {
-      QPlainTextEdit::clear();
+      Clear();
       return false;
     }
     if (size <= MAX_HIGHLIGHTED_SOURCE_SIZE)
