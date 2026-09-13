@@ -231,6 +231,8 @@ add_executable(dolphin-emu
   Debugger/CodeViewWidget.h
   Debugger/CodeWidget.cpp
   Debugger/CodeWidget.h
+  Debugger/SourceViewWidget.cpp
+  Debugger/SourceViewWidget.h
   Debugger/EditSymbolDialog.cpp
   Debugger/EditSymbolDialog.h
   Debugger/GekkoSyntaxHighlight.cpp

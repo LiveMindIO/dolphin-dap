@@ -160,6 +160,23 @@ TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)
   EXPECT_FALSE(SymbolDB().GetLineAddress("missing.c", 1).has_value());
 }
 
+TEST_F(PPCSymbolDBLineTest, ExactLineAddressesAreOrderedAndNeverUseNearestLine)
+{
+  const u32 first_file = SymbolDB().AddSourceFile("first.c");
+  const u32 second_file = SymbolDB().AddSourceFile("second.c");
+  SymbolDB().AddLineEntry(0x80001008, first_file, 12);
+  SymbolDB().AddLineEntry(0x80001000, first_file, 12);
+  SymbolDB().AddLineEntry(0x80001010, first_file, 20);
+  SymbolDB().AddLineEntry(0x80002000, second_file, 12);
+
+  const std::map<u32, std::vector<u32>> lines = SymbolDB().GetExactLineAddresses(first_file);
+  EXPECT_EQ(lines.size(), 2U);
+  EXPECT_EQ(lines.at(12), (std::vector<u32>{0x80001000U, 0x80001008U}));
+  EXPECT_EQ(lines.at(20), (std::vector<u32>{0x80001010U}));
+  EXPECT_FALSE(lines.contains(13));
+  EXPECT_TRUE(SymbolDB().GetExactLineAddresses(99).empty());
+}
+
 TEST_F(PPCSymbolDBLineTest, GetLineAddressForQueryMatchesFullEditorPath)
 {
   const u32 file_index = SymbolDB().AddSourceFile("gm_16AE.c");

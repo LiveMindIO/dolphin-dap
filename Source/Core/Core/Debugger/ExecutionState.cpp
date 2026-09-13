@@ -31,7 +31,11 @@ void ExecutionState::UnregisterClient(const ClientId client_id)
     if (m_active_step && m_active_step->origin == client_id && m_active_step->cancellation)
       m_active_step->cancellation->store(true);
     if (m_active_step && m_active_step->origin == client_id)
+    {
+      if (m_active_step->cleanup)
+        m_active_step->cleanup();
       m_active_step.reset();
+    }
     if (m_pending_operation && m_pending_operation->origin == client_id)
       m_pending_operation.reset();
     if (m_running_origin == client_id)
@@ -39,8 +43,43 @@ void ExecutionState::UnregisterClient(const ClientId client_id)
       m_running_origin.reset();
       m_running_operation.reset();
     }
+    m_operation_changed.notify_all();
   }
   SynchronizeDispatch();
+}
+
+std::expected<void, std::string> ExecutionState::CancelActiveStepAndWait(const ClientId requester)
+{
+  std::unique_lock lock(m_mutex);
+  if (!m_clients.contains(requester))
+    return std::unexpected("execution client is not registered");
+  if (!m_active_step)
+    return {};
+  if (m_active_step->origin != requester)
+    return std::unexpected("step is owned by another debugger client");
+
+  const OperationId operation_id = m_active_step->operation_id;
+  if (!m_active_step->cancellation)
+  {
+    if (m_active_step->cleanup)
+      m_active_step->cleanup();
+    m_active_step.reset();
+    m_operation_changed.notify_all();
+    return {};
+  }
+
+  m_active_step->cancellation->store(true);
+  m_operation_changed.wait(lock, [this, operation_id] {
+    return !m_active_step || m_active_step->operation_id != operation_id ||
+           m_active_step->cancellation == nullptr;
+  });
+  if (m_active_step && m_active_step->operation_id == operation_id)
+  {
+    if (m_active_step->cleanup)
+      m_active_step->cleanup();
+    m_active_step.reset();
+  }
+  return {};
 }
 
 bool ExecutionState::IsStep(const ExecutionOperationKind kind)
@@ -65,9 +104,9 @@ ExecutionState::BeginOperation(const ClientId origin, const ExecutionOperationKi
 
   const OperationId id = m_next_operation_id++;
   if (IsStep(kind))
-    m_active_step = ActiveStep{origin, id, cancellation};
+    m_active_step = ActiveStep{origin, id, cancellation, {}};
   else
-    m_pending_operation = ActiveStep{origin, id, nullptr};
+    m_pending_operation = ActiveStep{origin, id, nullptr, {}};
   return id;
 }
 
@@ -83,7 +122,11 @@ std::expected<void, std::string> ExecutionState::CancelActiveStep(const ClientId
   if (m_active_step->cancellation)
     m_active_step->cancellation->store(true);
   else
+  {
+    if (m_active_step->cleanup)
+      m_active_step->cleanup();
     m_active_step.reset();
+  }
   return {};
 }
 
@@ -160,12 +203,15 @@ void ExecutionState::PublishStopped(ExecutionStopDetails details)
     event->watchpoint_end = details.watchpoint_end;
     event->data_access = details.data_access;
     event->exceptions = details.exceptions;
+    if (m_active_step && m_active_step->cleanup)
+      m_active_step->cleanup();
     m_active_step.reset();
     if (details.operation_id && m_pending_operation &&
         m_pending_operation->operation_id == details.operation_id)
       m_pending_operation.reset();
     m_running_origin.reset();
     m_running_operation.reset();
+    m_operation_changed.notify_all();
     QueueEventLocked(std::move(event));
   }
   DrainDispatchQueue();
@@ -175,9 +221,41 @@ void ExecutionState::AbandonStep(const OperationId operation_id)
 {
   std::lock_guard lock(m_mutex);
   if (m_active_step && m_active_step->operation_id == operation_id)
+  {
+    if (m_active_step->cleanup)
+      m_active_step->cleanup();
     m_active_step.reset();
+  }
   if (m_pending_operation && m_pending_operation->operation_id == operation_id)
     m_pending_operation.reset();
+  m_operation_changed.notify_all();
+}
+
+void ExecutionState::MarkStepWorkerComplete(const OperationId operation_id)
+{
+  std::lock_guard lock(m_mutex);
+  if (!m_active_step || m_active_step->operation_id != operation_id)
+    return;
+
+  if (m_active_step->cancellation && m_active_step->cancellation->load())
+  {
+    if (m_active_step->cleanup)
+      m_active_step->cleanup();
+    m_active_step.reset();
+  }
+  else
+    m_active_step->cancellation = nullptr;
+  m_operation_changed.notify_all();
+}
+
+bool ExecutionState::SetActiveStepCleanup(const OperationId operation_id,
+                                          std::function<void()> cleanup)
+{
+  std::lock_guard lock(m_mutex);
+  if (!m_active_step || m_active_step->operation_id != operation_id)
+    return false;
+  m_active_step->cleanup = std::move(cleanup);
+  return true;
 }
 
 bool ExecutionState::IsOperationActive(const OperationId operation_id) const

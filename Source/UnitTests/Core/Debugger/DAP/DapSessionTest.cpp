@@ -29,6 +29,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/SymbolDB.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapFraming.h"
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/DAP/DapSession.h"
@@ -111,10 +112,12 @@ protected:
     auto& memory = system.GetMemory();
     memory.Init();
     AddressSpace::Init();
+    system.GetCoreTiming().Init();
 
     // Register/MSR mutation asserts it runs on the CPU thread. Borrow that role
     // just for setup; the session runs on its own thread that declares itself.
     Core::DeclareAsCPUThread();
+    system.GetCPU().Init(PowerPC::CPUCore::Interpreter);
     auto& power_pc = system.GetPowerPC();
     power_pc.Reset();
     auto& ppc_state = system.GetPPCState();
@@ -153,8 +156,12 @@ protected:
 
     auto& system = Core::System::GetInstance();
     system.GetPowerPC().GetBreakPoints().Clear();
+    Core::DeclareAsCPUThread();
+    system.GetCPU().Shutdown();
+    Core::UndeclareAsCPUThread();
     AddressSpace::Shutdown();
     system.GetMemory().Shutdown();
+    system.GetCoreTiming().Shutdown();
   }
 
   // Runs the initialize/launch/configurationDone handshake and consumes the
@@ -1412,6 +1419,46 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
     "command": "disconnect"
   })");
   (void)client.Receive();
+}
+
+TEST_F(DapSessionTest, DuplicateNextPreservesContinuingStepOver)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  auto& system = Core::System::GetInstance();
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  system.GetMemory().CopyToEmu(CODE_ADDRESS, code.data(), code.size());
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().npc = CODE_ADDRESS + 4;
+
+  client.Send(
+      R"({"seq":20,"type":"request","command":"next","arguments":{"threadId":1,"granularity":"instruction"}})");
+  const auto first_response = client.Receive();
+  ASSERT_TRUE(first_response.has_value());
+  ASSERT_TRUE(first_response->at("success").get<bool>());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued.has_value());
+  ASSERT_EQ(continued->at("event").to_str(), "continued");
+
+  auto& breakpoints = system.GetPowerPC().GetBreakPoints();
+  ASSERT_FALSE(system.GetCPU().IsStepping());
+  ASSERT_NE(breakpoints.GetBreakpoint(CODE_ADDRESS + 4), nullptr);
+
+  client.Send(
+      R"({"seq":21,"type":"request","command":"next","arguments":{"threadId":1,"granularity":"instruction"}})");
+  const auto rejected = client.Receive();
+  ASSERT_TRUE(rejected.has_value());
+  EXPECT_FALSE(rejected->at("success").get<bool>());
+  EXPECT_EQ(rejected->at("message").to_str(), "step already in progress");
+  EXPECT_FALSE(system.GetCPU().IsStepping());
+  EXPECT_NE(breakpoints.GetBreakpoint(CODE_ADDRESS + 4), nullptr);
+
+  client.Send(R"({"seq":22,"type":"request","command":"pause","arguments":{"threadId":1}})");
+  const auto pause_response = client.Receive();
+  ASSERT_TRUE(pause_response.has_value());
+  EXPECT_TRUE(pause_response->at("success").get<bool>());
+  ASSERT_TRUE(client.Receive().has_value());
 }
 
 class DapAsyncStepOrderingTest : public DapSessionTest

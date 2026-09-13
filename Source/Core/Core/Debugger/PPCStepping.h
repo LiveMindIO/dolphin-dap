@@ -6,6 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <functional>
+
+#include "Common/CommonTypes.h"
 
 namespace Core
 {
@@ -41,6 +44,7 @@ struct PPCStepOptions
   std::chrono::milliseconds timeout = std::chrono::seconds(5);
   std::size_t instruction_cap = 1000000;
   bool ignore_current_code_breakpoint = false;
+  std::function<void(u32)> temporary_breakpoint_installed;
 };
 
 // Source-row stepping runs synchronously until execution leaves the exact DWARF file identity and

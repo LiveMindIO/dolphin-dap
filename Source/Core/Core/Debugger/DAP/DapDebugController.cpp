@@ -245,10 +245,23 @@ bool DapDebugController::StepInto()
          Core::Debug::PPCStepResult::NotStepped;
 }
 
-StepOverResult DapDebugController::StepOver()
+StepOverResult DapDebugController::StepOver(
+    const std::optional<Core::Debug::ExecutionState::OperationId> operation_id)
 {
+  Core::Debug::PPCStepOptions options;
+  if (operation_id)
+  {
+    options.temporary_breakpoint_installed = [this, operation = *operation_id](const u32 address) {
+      Core::System* const system = &m_system;
+      auto cleanup = [system, address] {
+        system->GetPowerPC().GetBreakPoints().ClearTemporary(address);
+      };
+      if (!m_system.GetCPU().GetExecutionState().SetActiveStepCleanup(operation, cleanup))
+        cleanup();
+    };
+  }
   switch (Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Over,
-                               Core::Debug::PPCStepGranularity::Instruction))
+                               Core::Debug::PPCStepGranularity::Instruction, options))
   {
   case Core::Debug::PPCStepResult::Stepped:
     return StepOverResult::Stepped;

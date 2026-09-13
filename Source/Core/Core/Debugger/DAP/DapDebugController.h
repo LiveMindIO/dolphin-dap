@@ -214,7 +214,8 @@ public:
   // the execution event service to observe, so suppressing the stop here is the only
   // correct response).
   bool StepInto();
-  StepOverResult StepOver();
+  StepOverResult
+  StepOver(std::optional<Core::Debug::ExecutionState::OperationId> operation_id = {});
   Core::Debug::PPCStepResult StepSource(bool step_over, const std::atomic<bool>& cancelled,
                                         std::chrono::milliseconds timeout = std::chrono::seconds(5),
                                         size_t instruction_cap = 1000000);

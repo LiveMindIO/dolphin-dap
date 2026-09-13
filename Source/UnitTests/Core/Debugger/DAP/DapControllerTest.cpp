@@ -1030,7 +1030,7 @@ TEST_F(DapControllerTest, SourceStepIntoStopsAfterEnteringTakenCall)
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
 }
 
-TEST_F(DapControllerTest, SourceStepIntoTraversesSourceLessCallee)
+TEST_F(DapControllerTest, SourceStepIntoStopsAtSourceLessCallee)
 {
   const std::array<u8, 8> caller{{0x48, 0x00, 0x00, 0x41, 0x60, 0x00, 0x00, 0x00}};
   const std::array<u8, 8> callee{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
@@ -1048,7 +1048,7 @@ TEST_F(DapControllerTest, SourceStepIntoTraversesSourceLessCallee)
   std::atomic<bool> cancelled{false};
   DAP::DapDebugController controller(System());
   controller.StepSource(false, cancelled);
-  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
 }
 
 TEST_F(DapControllerTest, SourceStepStopsAtCodeBreakpointBeforeLineChanges)
@@ -1205,6 +1205,43 @@ TEST_F(DapControllerTest, StepOverBranchSetsTemporaryAndContinues)
   // The resume relies on a temporary breakpoint planted at the return address
   // (pc + 4) so the core stops again once the call returns.
   EXPECT_NE(System().GetPowerPC().GetBreakPoints().GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+}
+
+TEST_F(DapControllerTest, CancellingContinuingStepOverClearsOnlyTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(TEST_ADDRESS + 8));
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  ASSERT_TRUE(controller.CancelActiveStep());
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+  EXPECT_NE(breakpoints.GetRegularBreakpoint(TEST_ADDRESS + 8), nullptr);
+}
+
+TEST_F(DapControllerTest, ExternalStopClearsContinuingStepOverTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  System().GetCPU().GetExecutionState().PublishStopped(
+      {.cause = Core::Debug::ExecutionStopCause::Exception, .pc = TEST_ADDRESS});
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
 }
 
 TEST_F(DapControllerTest, StepOutRunsUntilReturn)

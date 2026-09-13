@@ -619,8 +619,6 @@ private:
   {
     if (!JoinCompletedStepWorker(request))
       return;
-    if (!m_system.GetCPU().IsStepping())
-      m_controller.PauseWithoutEvent();
     m_step_cancelled.store(false);
     m_step_out_done.store(false);
     const auto operation =
@@ -633,6 +631,8 @@ private:
       RespondError(request.seq, request.command, operation.error());
       return;
     }
+    if (!m_system.GetCPU().IsStepping())
+      m_controller.PauseWithoutEvent();
     Respond(request.seq, request.command, picojson::object{});
     m_controller.PublishStepContinued(*operation);
     m_step_out_thread = std::thread([self = shared_from_this(), step_over, operation = *operation] {
@@ -912,20 +912,18 @@ private:
       }
       if (!JoinCompletedStepWorker(*request))
         return;
-      // DESNOTE(jbarber, 2026-07-21): DAP stepping requires the core to be
-      // paused. If a client sends `next` while running (a client error), the
-      // controller's StepOver early-returns without advancing -- don't emit a
-      // spurious `stopped`/"step". Pause first so the step has a frame to step
-      // from, mirroring how VS Code's own client pauses before stepping.
-      if (!m_system.GetCPU().IsStepping())
-        m_controller.PauseWithoutEvent();
       const auto operation = m_controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
       if (!operation)
       {
         RespondError(request->seq, command, operation.error());
         return;
       }
-      const StepOverResult result = m_controller.StepOver();
+      // DAP stepping requires the core to be paused. Reserve the operation
+      // first so a duplicate request cannot pause and disrupt an active
+      // continuing step before it is rejected.
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.PauseWithoutEvent();
+      const StepOverResult result = m_controller.StepOver(*operation);
       Respond(request->seq, command, picojson::object{});
       if (result == StepOverResult::Stepped)
       {
@@ -966,8 +964,6 @@ private:
       }
       if (!JoinCompletedStepWorker(*request))
         return;
-      if (!m_system.GetCPU().IsStepping())
-        m_controller.PauseWithoutEvent();
       // DESNOTE(jbarber, 2026-07-21): StepInto may return false when the
       // CPU thread can't acknowledge the StepOpcode signal within its 2s
       // wait (e.g. the emulator is mid-block or under load). Emitting a
@@ -980,6 +976,8 @@ private:
         RespondError(request->seq, command, operation.error());
         return;
       }
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.PauseWithoutEvent();
       const bool completed = m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
       if (completed)
@@ -1000,8 +998,6 @@ private:
       ClearDebugValueHandles();
       if (!JoinCompletedStepWorker(*request))
         return;
-      if (!m_system.GetCPU().IsStepping())
-        m_controller.PauseWithoutEvent();
       // DESNOTE(jbarber, 2026-07-21): Run StepOut on a worker thread so the
       // session loop keeps polling the socket for disconnect / new requests
       // and keeps flushing realtime-watch events while the interpreter
@@ -1028,6 +1024,8 @@ private:
         RespondError(request->seq, command, operation.error());
         return;
       }
+      if (!m_system.GetCPU().IsStepping())
+        m_controller.PauseWithoutEvent();
       Respond(request->seq, command, picojson::object{});
       m_controller.PublishStepContinued(*operation);
       m_step_out_thread = std::thread([self = shared_from_this(), operation = *operation]() {

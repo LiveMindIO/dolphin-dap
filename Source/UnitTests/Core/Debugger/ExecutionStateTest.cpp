@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -110,14 +111,17 @@ TEST(ExecutionStateTest, UnregisterCancelsAndReleasesOwnedStep)
 {
   ExecutionState state;
   std::atomic<bool> cancelled{false};
+  bool cleaned_up = false;
   const auto client = state.RegisterClient();
   const auto operation =
       state.BeginOperation(client, ExecutionOperationKind::SourceStepInto, &cancelled);
   ASSERT_TRUE(operation.has_value());
+  ASSERT_TRUE(state.SetActiveStepCleanup(*operation, [&] { cleaned_up = true; }));
 
   state.UnregisterClient(client);
 
   EXPECT_TRUE(cancelled.load());
+  EXPECT_TRUE(cleaned_up);
   EXPECT_FALSE(state.IsOperationActive(*operation));
 }
 
@@ -165,6 +169,33 @@ TEST(ExecutionStateTest, OwnerCancelsWorkerlessContinuingStepImmediately)
   EXPECT_TRUE(state.CancelActiveStep(owner).has_value());
   EXPECT_FALSE(state.IsOperationActive(*operation));
   EXPECT_TRUE(state.BeginOperation(owner, ExecutionOperationKind::Pause).has_value());
+}
+
+TEST(ExecutionStateTest, OwnerWaitsForWorkerBeforeStartingReplacementOperation)
+{
+  ExecutionState state;
+  std::atomic<bool> cancelled{false};
+  std::atomic<bool> cancellation_finished{false};
+  std::atomic<bool> cancellation_succeeded{false};
+  const auto owner = state.RegisterClient();
+  const auto operation =
+      state.BeginOperation(owner, ExecutionOperationKind::SourceStepInto, &cancelled);
+  ASSERT_TRUE(operation.has_value());
+
+  std::jthread canceller([&] {
+    cancellation_succeeded.store(state.CancelActiveStepAndWait(owner).has_value());
+    cancellation_finished.store(true);
+  });
+  while (!cancelled.load())
+    std::this_thread::yield();
+  EXPECT_FALSE(cancellation_finished.load());
+
+  state.MarkStepWorkerComplete(*operation);
+  canceller.join();
+  EXPECT_TRUE(cancellation_finished.load());
+  EXPECT_TRUE(cancellation_succeeded.load());
+  EXPECT_FALSE(state.IsOperationActive(*operation));
+  EXPECT_TRUE(state.BeginOperation(owner, ExecutionOperationKind::Continue).has_value());
 }
 
 TEST(ExecutionStateTest, ExternalStopCancelsActiveStepWorker)

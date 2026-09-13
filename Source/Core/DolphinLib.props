@@ -220,8 +220,11 @@
     <ClInclude Include="Core\Debugger\DebugInterface.h" />
     <ClInclude Include="Core\Debugger\Debugger_SymbolMap.h" />
     <ClInclude Include="Core\Debugger\Dump.h" />
+    <ClInclude Include="Core\Debugger\ExecutionState.h" />
     <ClInclude Include="Core\Debugger\OSThread.h" />
     <ClInclude Include="Core\Debugger\PPCDebugInterface.h" />
+    <ClInclude Include="Core\Debugger\PPCStack.h" />
+    <ClInclude Include="Core\Debugger\PPCStepping.h" />
     <ClInclude Include="Core\Debugger\RSO.h" />
     <ClInclude Include="Core\DolphinAnalytics.h" />
     <ClInclude Include="Core\DSP\DSPAccelerator.h" />
@@ -928,8 +931,11 @@
     <ClCompile Include="Core\Debugger\CodeTrace.cpp" />
     <ClCompile Include="Core\Debugger\Debugger_SymbolMap.cpp" />
     <ClCompile Include="Core\Debugger\Dump.cpp" />
+    <ClCompile Include="Core\Debugger\ExecutionState.cpp" />
     <ClCompile Include="Core\Debugger\OSThread.cpp" />
     <ClCompile Include="Core\Debugger\PPCDebugInterface.cpp" />
+    <ClCompile Include="Core\Debugger\PPCStack.cpp" />
+    <ClCompile Include="Core\Debugger\PPCStepping.cpp" />
     <ClCompile Include="Core\Debugger\RSO.cpp" />
     <ClCompile Include="Core\DolphinAnalytics.cpp" />
     <ClCompile Include="Core\DSP\DSPAccelerator.cpp" />

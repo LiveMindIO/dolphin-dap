@@ -41,6 +41,9 @@ bool WillInstructionReturn(Core::System& system, const UGeckoInstruction instruc
 
 PPCStepResult StepInstructionInto(Core::System& system, const PPCStepOptions& options)
 {
+  if (IsCancelled(options))
+    return PPCStepResult::NotStepped;
+
   auto& cpu = system.GetCPU();
   if (!cpu.IsStepping())
     return PPCStepResult::Stepped;
@@ -67,6 +70,9 @@ PPCStepResult StepInstructionInto(Core::System& system, const PPCStepOptions& op
 
 PPCStepResult StepInstructionOver(Core::System& system, const PPCStepOptions& options)
 {
+  if (IsCancelled(options))
+    return PPCStepResult::NotStepped;
+
   auto& cpu = system.GetCPU();
   if (!cpu.IsStepping())
     return PPCStepResult::Stepped;
@@ -80,7 +86,10 @@ PPCStepResult StepInstructionOver(Core::System& system, const PPCStepOptions& op
     return StepInstructionInto(system, options);
 
   auto& breakpoints = system.GetPowerPC().GetBreakPoints();
-  breakpoints.SetTemporary(system.GetPPCState().pc + 4);
+  const u32 return_address = system.GetPPCState().pc + 4;
+  breakpoints.SetTemporary(return_address);
+  if (options.temporary_breakpoint_installed)
+    options.temporary_breakpoint_installed(return_address);
   cpu.SetStepping(false);
   return PPCStepResult::Continuing;
 }
@@ -149,8 +158,8 @@ PPCStepResult StepSourceRow(Core::System& system, const PPCStepMode mode,
   {
     const std::optional<PPCSymbolDB::SourceLine> current_line =
         system.GetPPCSymbolDB().GetSourceLine(state.pc);
-    if (current_line && (current_line->file_index != start_line->file_index ||
-                         current_line->line != start_line->line))
+    if (!current_line || current_line->file_index != start_line->file_index ||
+        current_line->line != start_line->line)
     {
       break;
     }

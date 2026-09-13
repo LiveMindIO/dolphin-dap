@@ -429,15 +429,22 @@ bool RenderWidget::event(QEvent* event)
       auto& system = Core::System::GetInstance();
       auto& cpu = system.GetCPU();
       auto& execution = cpu.GetExecutionState();
-      if (execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+      if (execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
       {
         const auto operation = execution.BeginOperation(
             cpu.GetHostExecutionClientId(), Core::Debug::ExecutionOperationKind::Continue);
         if (operation)
         {
           Core::SetState(system, Core::State::Running);
-          static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
-                                                       system.GetPPCState().pc));
+          if (Core::GetState(system) == Core::State::Running)
+          {
+            static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                                         system.GetPPCState().pc));
+          }
+          else
+          {
+            execution.AbandonStep(*operation);
+          }
         }
       }
     }
@@ -474,7 +481,7 @@ bool RenderWidget::event(QEvent* event)
         auto& system = Core::System::GetInstance();
         auto& cpu = system.GetCPU();
         auto& execution = cpu.GetExecutionState();
-        if (execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+        if (execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
         {
           const auto operation = execution.BeginOperation(
               cpu.GetHostExecutionClientId(), Core::Debug::ExecutionOperationKind::Pause);
@@ -482,10 +489,18 @@ bool RenderWidget::event(QEvent* event)
           {
             m_should_unpause_on_focus = true;
             Core::SetState(system, Core::State::Paused);
-            cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
-                       .origin = cpu.GetHostExecutionClientId(),
-                       .operation_id = *operation,
-                       .pc = system.GetPPCState().pc});
+            if (Core::GetState(system) == Core::State::Paused)
+            {
+              cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+                         .origin = cpu.GetHostExecutionClientId(),
+                         .operation_id = *operation,
+                         .pc = system.GetPPCState().pc});
+            }
+            else
+            {
+              m_should_unpause_on_focus = false;
+              execution.AbandonStep(*operation);
+            }
           }
         }
       }

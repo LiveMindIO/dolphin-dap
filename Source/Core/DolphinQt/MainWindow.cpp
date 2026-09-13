@@ -881,13 +881,18 @@ void MainWindow::Play(const std::optional<std::string>& savestate_path)
   {
     auto& cpu = m_system.GetCPU();
     auto& execution = cpu.GetExecutionState();
-    if (!execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+    if (!execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
       return;
     const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
                                                     Core::Debug::ExecutionOperationKind::Continue);
     if (operation)
     {
       Core::SetState(m_system, Core::State::Running);
+      if (Core::GetState(m_system) != Core::State::Running)
+      {
+        execution.AbandonStep(*operation);
+        return;
+      }
       static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
                                                    m_system.GetPPCState().pc));
     }
@@ -920,13 +925,18 @@ void MainWindow::Pause()
 {
   auto& cpu = m_system.GetCPU();
   auto& execution = cpu.GetExecutionState();
-  if (!execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+  if (!execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
     return;
   const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
                                                   Core::Debug::ExecutionOperationKind::Pause);
   if (operation)
   {
     Core::SetState(m_system, Core::State::Paused);
+    if (Core::GetState(m_system) != Core::State::Paused)
+    {
+      execution.AbandonStep(*operation);
+      return;
+    }
     cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
                .origin = cpu.GetHostExecutionClientId(),
                .operation_id = *operation,

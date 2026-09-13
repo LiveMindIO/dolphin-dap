@@ -119,6 +119,30 @@ TEST_F(PPCSteppingTest, SourceOverRunsCallToCallerBeforeLeavingRow)
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 8);
 }
 
+TEST_F(PPCSteppingTest, MappedSourceStepStopsAtFirstUnmappedDestinationWithoutTimeout)
+{
+  constexpr std::array<u8, 4> caller{{0x48, 0x00, 0x00, 0x41}};
+  constexpr std::array<u8, 8> source_less_callee{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, caller.data(), caller.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS + 0x40, source_less_callee.data(),
+                                 source_less_callee.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("caller.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  Core::CPUThreadGuard guard(System());
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS, caller.size(), "caller", "caller.c");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, source_less_callee.size(), "callee", "asm.o");
+  System().GetPPCState().pc = TEST_ADDRESS;
+  Core::Debug::PPCStepOptions options;
+  options.timeout = std::chrono::hours(1);
+  options.instruction_cap = 2;
+
+  EXPECT_EQ(Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Into,
+                                 Core::Debug::PPCStepGranularity::SourceRow, options),
+            Core::Debug::PPCStepResult::Stepped);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
+}
+
 TEST_F(PPCSteppingTest, MissingSourceRowFallsBackByRequestedMode)
 {
   constexpr std::array<u8, 8> caller{{0x48, 0x00, 0x00, 0x41, 0x60, 0x00, 0x00, 0x00}};
@@ -148,6 +172,25 @@ TEST_F(PPCSteppingTest, SourceStepHonorsCancellationBeforeAdvancing)
   Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Into,
                        Core::Debug::PPCStepGranularity::SourceRow, options);
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
+}
+
+TEST_F(PPCSteppingTest, InstructionStepsHonorCancellationBeforeAdvancing)
+{
+  constexpr std::array<u8, 4> call{{0x48, 0x00, 0x00, 0x41}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, call.data(), call.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  std::atomic<bool> cancelled{true};
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+
+  EXPECT_EQ(Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Into,
+                                 Core::Debug::PPCStepGranularity::Instruction, options),
+            Core::Debug::PPCStepResult::NotStepped);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
+  EXPECT_EQ(Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Over,
+                                 Core::Debug::PPCStepGranularity::Instruction, options),
+            Core::Debug::PPCStepResult::NotStepped);
+  EXPECT_EQ(System().GetPowerPC().GetBreakPoints().GetBreakpoint(TEST_ADDRESS + 4), nullptr);
 }
 
 TEST_F(PPCSteppingTest, InstructionOutCanIgnoreCodeBreakpointAtCurrentPc)

@@ -402,6 +402,17 @@ TEST_F(CodeBreakpointRegistryTest, TemporaryOverlapUsesPrivateSnapshotState)
   EXPECT_FALSE(before->break_on_hit);
 }
 
+TEST_F(CodeBreakpointRegistryTest, ConditionalTemporaryClearPreservesReplacement)
+{
+  Registry().SetTemporary(FIRST_ADDRESS);
+  Registry().SetTemporary(SECOND_ADDRESS);
+
+  Registry().ClearTemporary(FIRST_ADDRESS);
+
+  EXPECT_EQ(Registry().GetBreakpoint(FIRST_ADDRESS), nullptr);
+  EXPECT_NE(Registry().GetBreakpoint(SECOND_ADDRESS), nullptr);
+}
+
 TEST_F(CodeBreakpointRegistryTest, SourceAndInstructionClaimsAtSameAddressAreIndependent)
 {
   const auto client = Register();

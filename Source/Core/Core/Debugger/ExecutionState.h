@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <expected>
 #include <functional>
@@ -106,10 +107,13 @@ public:
                                                          ExecutionOperationKind kind,
                                                          std::atomic<bool>* cancellation = nullptr);
   std::expected<void, std::string> CancelActiveStep(ClientId requester);
+  std::expected<void, std::string> CancelActiveStepAndWait(ClientId requester);
   std::expected<void, std::string> PublishContinued(ClientId origin, OperationId operation_id,
                                                     std::optional<u32> pc = {});
   void PublishStopped(ExecutionStopDetails details);
   void AbandonStep(OperationId operation_id);
+  void MarkStepWorkerComplete(OperationId operation_id);
+  bool SetActiveStepCleanup(OperationId operation_id, std::function<void()> cleanup);
   bool IsOperationActive(OperationId operation_id) const;
   std::optional<ClientId> GetActiveStepOrigin() const;
 
@@ -127,6 +131,7 @@ private:
     ClientId origin = 0;
     OperationId operation_id = 0;
     std::atomic<bool>* cancellation = nullptr;
+    std::function<void()> cleanup;
   };
 
   static bool IsStep(ExecutionOperationKind kind);
@@ -135,6 +140,7 @@ private:
   void SynchronizeDispatch();
 
   mutable std::mutex m_mutex;
+  std::condition_variable m_operation_changed;
   std::recursive_mutex m_dispatch_mutex;
   std::unordered_map<ClientId, Client> m_clients;
   std::deque<std::shared_ptr<const ExecutionEvent>> m_pending_dispatches;

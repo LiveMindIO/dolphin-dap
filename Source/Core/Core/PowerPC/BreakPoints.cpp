@@ -321,6 +321,17 @@ void BreakPoints::ClearTemporary()
   }
 }
 
+void BreakPoints::ClearTemporary(const u32 expected_address)
+{
+  std::lock_guard lock(m_mutex);
+  if (m_temporary_address == expected_address)
+  {
+    m_system.GetJitInterface().InvalidateICache(*m_temporary_address, 4, true);
+    m_temporary_address.reset();
+    PublishSnapshotLocked();
+  }
+}
+
 BreakPoints::CodeBreakpoint BreakPoints::ToCodeBreakpoint(const TBreakPoint& breakpoint)
 {
   CodeBreakpoint result;

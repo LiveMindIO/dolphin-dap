@@ -3,11 +3,16 @@
 
 #pragma once
 
+#include <atomic>
+#include <optional>
+#include <thread>
+
 #include <QDockWidget>
 #include <QString>
 
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/ExecutionState.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "DolphinQt/Debugger/CodeViewWidget.h"
 
 class BranchWatchDialog;
@@ -18,7 +23,9 @@ class QSplitter;
 class QListWidget;
 class QPushButton;
 class QTableWidget;
+class QTabWidget;
 class QToolButton;
+class SourceViewWidget;
 
 namespace Common
 {
@@ -64,6 +71,11 @@ private:
   void UpdateFunctionCalls(const Common::Symbol* symbol);
   void UpdateFunctionCallers(const Common::Symbol* symbol);
   void UpdateNotes();
+  void NavigateToAddress(u32 address, CodeViewWidget::SetAddressUpdate update);
+  void StartStep(Core::Debug::PPCStepMode mode);
+  bool JoinCompletedStepWorker();
+  void CancelAndJoinStepWorker();
+  std::optional<u32> GetActiveAddress() const;
 
   void OnPPCSymbolsChanged();
   void OnSearchAddress();
@@ -96,8 +108,13 @@ private:
   QLineEdit* m_search_callers;
   QListWidget* m_function_callers_list;
   CodeViewWidget* m_code_view;
+  SourceViewWidget* m_source_view;
+  QTabWidget* m_code_tabs;
   QSplitter* m_box_splitter;
   QSplitter* m_code_splitter;
 
   QString m_symbol_filter;
+  std::thread m_step_thread;
+  std::atomic<bool> m_step_cancelled{false};
+  std::atomic<bool> m_step_done{true};
 };

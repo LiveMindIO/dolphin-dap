@@ -178,6 +178,7 @@ public:
   bool Remove(u32 address);
   void Clear();
   void ClearTemporary();
+  void ClearTemporary(u32 expected_address);
 
 private:
   struct ClientBreakpoints

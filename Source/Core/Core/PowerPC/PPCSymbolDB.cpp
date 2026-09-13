@@ -391,6 +391,35 @@ std::vector<std::string> PPCSymbolDB::GetSourceFiles() const
   return m_resolved_source_files;
 }
 
+std::optional<std::string> PPCSymbolDB::GetResolvedSourceFile(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  if (file_index >= m_resolved_source_files.size())
+    return std::nullopt;
+
+  const std::filesystem::path path = StringToPath(m_resolved_source_files[file_index]);
+  std::error_code error;
+  if (!path.is_absolute() || !std::filesystem::is_regular_file(path, error) || error)
+    return std::nullopt;
+  return PathToString(path);
+}
+
+std::map<u32, std::vector<u32>> PPCSymbolDB::GetExactLineAddresses(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  std::map<u32, std::vector<u32>> result;
+  if (file_index >= m_source_files.size())
+    return result;
+
+  // m_line_table is address ordered, so the first address remains the deterministic toggle target.
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (entry.file_index == file_index && entry.line != 0)
+      result[entry.line].push_back(address);
+  }
+  return result;
+}
+
 bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
 {
   std::lock_guard lock(m_mutex);
