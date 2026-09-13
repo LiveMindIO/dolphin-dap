@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 namespace Core
 {
 class System;
@@ -12,5 +14,11 @@ namespace DAP
 {
 class DapTransport;
 
-void RunSession(DapTransport& transport, Core::System& system);
+struct SessionTestHooks
+{
+  std::function<void()> async_step_worker_joined;
+};
+
+void RunSession(DapTransport& transport, Core::System& system,
+                const SessionTestHooks* test_hooks = nullptr);
 }  // namespace DAP

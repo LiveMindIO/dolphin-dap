@@ -119,7 +119,14 @@ PPCStepResult StepSourceRow(Core::System& system, const PPCStepMode mode,
     power_pc.SingleStep();
     power_pc.SetSteppingMemchecksEnabled(true);
     ++instruction_count;
-    hit_breakpoint = power_pc.DidSteppingMemcheckHit() || power_pc.CheckBreakPoints();
+    hit_breakpoint = power_pc.DidSteppingMemcheckHit();
+    if (!hit_breakpoint && power_pc.CheckBreakPoints())
+    {
+      hit_breakpoint = true;
+      const u32 pc = state.pc;
+      system.GetCPU().Break(
+          {.cause = ExecutionStopCause::CodeBreakpoint, .pc = pc, .code_breakpoint_address = pc});
+    }
   };
   const auto step_logical = [&] {
     const UGeckoInstruction instruction = PowerPC::MMU::HostRead_Instruction(guard, state.pc);
@@ -156,7 +163,7 @@ PPCStepResult StepOut(Core::System& system, const PPCStepOptions& options)
 {
   auto& cpu = system.GetCPU();
   if (!cpu.IsStepping())
-    return PPCStepResult::Stepped;
+    return PPCStepResult::NotStepped;
 
   using clock = std::chrono::steady_clock;
   const clock::time_point deadline = clock::now() + options.timeout;
@@ -174,9 +181,21 @@ PPCStepResult StepOut(Core::System& system, const PPCStepOptions& options)
   }};
 
   bool stepped = false;
+  bool interrupted = false;
   const auto can_continue = [&] {
-    return !IsCancelled(options) && clock::now() < deadline && !power_pc.DidSteppingMemcheckHit() &&
-           ((!stepped && options.ignore_current_code_breakpoint) || !power_pc.CheckBreakPoints());
+    if (IsCancelled(options) || clock::now() >= deadline)
+    {
+      interrupted = true;
+      return false;
+    }
+    if (power_pc.DidSteppingMemcheckHit())
+      return false;
+    if ((!stepped && options.ignore_current_code_breakpoint) || !power_pc.CheckBreakPoints())
+      return true;
+    const u32 pc = state.pc;
+    system.GetCPU().Break(
+        {.cause = ExecutionStopCause::CodeBreakpoint, .pc = pc, .code_breakpoint_address = pc});
+    return false;
   };
   const auto step_one = [&] {
     power_pc.SingleStep();
@@ -208,7 +227,7 @@ PPCStepResult StepOut(Core::System& system, const PPCStepOptions& options)
 
     instruction = PowerPC::MMU::HostRead_Instruction(guard, state.pc);
   }
-  return PPCStepResult::Stepped;
+  return interrupted ? PPCStepResult::NotStepped : PPCStepResult::Stepped;
 }
 }  // namespace
 

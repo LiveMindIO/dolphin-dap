@@ -7,6 +7,7 @@
 #include <QString>
 
 #include "Common/CommonTypes.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "DolphinQt/Debugger/CodeViewWidget.h"
 
 class BranchWatchDialog;
@@ -78,6 +79,7 @@ private:
 
   Core::System& m_system;
   PPCSymbolDB& m_ppc_symbol_db;
+  Core::Debug::ExecutionState::ClientId m_execution_observer_id;
 
   BranchWatchDialog* m_branch_watch_dialog = nullptr;
   QLineEdit* m_search_address;

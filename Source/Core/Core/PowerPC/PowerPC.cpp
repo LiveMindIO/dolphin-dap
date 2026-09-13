@@ -19,6 +19,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Host.h"
@@ -661,7 +662,9 @@ bool PowerPCManager::CheckAndHandleBreakPoints()
 {
   if (CheckBreakPoints())
   {
-    m_system.GetCPU().Break();
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
+                             .pc = m_ppc_state.pc,
+                             .code_breakpoint_address = m_ppc_state.pc});
     if (GDBStub::IsActive())
       GDBStub::TakeControl();
     return true;

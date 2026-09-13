@@ -19,6 +19,8 @@
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/DAP/DapSource.h"
 #include "Core/Debugger/DWARF/DwarfReader.h"
+#include "Core/Debugger/ExecutionState.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "Core/PowerPC/BreakPoints.h"
 
 namespace Core
@@ -187,8 +189,21 @@ public:
   explicit DapDebugController(Core::System& system);
   ~DapDebugController();
 
-  void Continue();
-  void Pause();
+  std::expected<void, std::string> Continue();
+  std::expected<void, std::string> Pause();
+  std::expected<void, std::string> CancelActiveStep();
+  void PauseWithoutEvent();
+  void PublishEntryStop();
+  void SetExecutionEventCallback(Core::Debug::ExecutionState::EventCallback callback);
+  Core::Debug::ExecutionState::ClientId GetExecutionClientId() const
+  {
+    return m_execution_client_id;
+  }
+  std::expected<Core::Debug::ExecutionState::OperationId, std::string>
+  BeginStep(Core::Debug::ExecutionOperationKind kind, std::atomic<bool>* cancellation = nullptr);
+  void PublishStepContinued(Core::Debug::ExecutionState::OperationId operation_id);
+  void CompleteStep(Core::Debug::ExecutionState::OperationId operation_id);
+  void AbandonStep(Core::Debug::ExecutionState::OperationId operation_id);
   // Steps one PPC instruction in interpreter mode. Returns true when the step
   // completed synchronously (the CPUThreadGuard path), was a no-op on an
   // already-stopped core, or the async StepOpcode signal fired within its
@@ -196,19 +211,19 @@ public:
   // thread didn't acknowledge the StepOpcode within the 2s timeout — in that
   // case the PC hasn't advanced and callers must not emit a `stopped`/`step`
   // event (the late completion has no observable state transition for
-  // PollBreakpointStop to catch, so suppressing the stop here is the only
+  // the execution event service to observe, so suppressing the stop here is the only
   // correct response).
   bool StepInto();
   StepOverResult StepOver();
-  void StepSource(bool step_over, const std::atomic<bool>& cancelled,
-                  std::chrono::milliseconds timeout = std::chrono::seconds(5),
-                  size_t instruction_cap = 1000000);
+  Core::Debug::PPCStepResult StepSource(bool step_over, const std::atomic<bool>& cancelled,
+                                        std::chrono::milliseconds timeout = std::chrono::seconds(5),
+                                        size_t instruction_cap = 1000000);
   // Steps until the current function returns, a breakpoint/watchpoint is hit,
   // cancellation is requested, or `timeout`
   // wall-clock time elapses. The timeout bounds otherwise non-returning code
   // (e.g. an infinite loop) and is injectable so it can be exercised in tests.
-  void StepOut(const std::atomic<bool>& cancelled,
-               std::chrono::milliseconds timeout = std::chrono::seconds(5));
+  Core::Debug::PPCStepResult StepOut(const std::atomic<bool>& cancelled,
+                                     std::chrono::milliseconds timeout = std::chrono::seconds(5));
   void SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
   std::vector<std::optional<u32>>
   UpdateSourceBreakpoints(std::string_view source_key, const SourceBreakpointContext& context,
@@ -240,8 +255,9 @@ public:
                                          int end_line);
   std::vector<BreakpointLocation> GetBreakpointLocations(SourceReference source_reference,
                                                          int start_line, int end_line);
-  void Restart();
-  void Terminate();
+  std::expected<void, std::string> Restart();
+  std::expected<void, std::string> Terminate();
+  std::expected<void, std::string> Goto(u32 address);
   // Clears this controller's owned code and data breakpoints.
   void ClearBreakpoints();
   // Installs a hardware-level write freeze on [address, address+count) via
@@ -327,6 +343,7 @@ private:
   Core::System& m_system;
   BreakPoints::ClientId m_breakpoint_client_id;
   MemChecks::ClientId m_memcheck_client_id;
+  Core::Debug::ExecutionState::ClientId m_execution_client_id;
 
   // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
   // private range in the global MemChecks store (for MMU-level write

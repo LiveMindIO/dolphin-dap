@@ -3,6 +3,7 @@
 
 #include "Core/Debugger/DAP/DapSession.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -176,13 +177,6 @@ int s_active_session_count = 0;
 // a DAP re-init within the same process boot starts fresh. Bugbot #67.
 std::atomic<bool> s_entry_stop_handled{false};
 
-enum class DeferredStepAction
-{
-  None,
-  Continue,
-  Pause,
-};
-
 class Session : public std::enable_shared_from_this<Session>
 {
 public:
@@ -199,41 +193,10 @@ public:
       m_step_out_thread.join();
   }
 
-  Session(DapTransport& transport, Core::System& system)
+  Session(DapTransport& transport, Core::System& system, const SessionTestHooks* test_hooks)
       : m_transport(transport), m_controller(system), m_system(system),
-        m_stop_on_entry(Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY))
+        m_stop_on_entry(Config::Get(Config::MAIN_DAP_STOP_ON_ENTRY)), m_test_hooks(test_hooks)
   {
-    // DESNOTE(jbarber, 2026-07-21): The state hook fires on the CPU thread at
-    // the moment of a running<->paused transition. For Paused we capture the
-    // stop reason synchronously here, while ppc_state.Exceptions still carries
-    // EXCEPTION_FAKE_MEMCHECK_HIT (the flag is transient -- the next
-    // interpreter step's CheckExceptions clears it). PollBreakpointStop, which
-    // runs ~50ms later on the session thread, used to miss the flag and
-    // mis-report watchpoint hits as "step"; it now consumes the stashed reason
-    // instead. For Running (continue), we queue the `continued` event.
-    m_state_hook = Core::AddOnStateChangedCallback([this](const Core::State state) {
-      if (state == Core::State::Running)
-      {
-        // DESNOTE(jbarber, 2026-07-22): Only emit `continued` if THIS session
-        // initiated the resume (via ContinueCore). Without this gate, every
-        // connected session's hook would emit `continued` on a single
-        // client's continue request, making it look like every client
-        // initiated the resume. The exchange consumes the flag so the
-        // emission is one-shot per ContinueCore. Bugbot #70.
-        if (m_owns_next_continue.exchange(false))
-        {
-          picojson::object body;
-          body.emplace("threadId", 1.0);
-          body.emplace("allThreadsContinued", true);
-          QueueEvent("continued", std::move(body));
-        }
-      }
-      else if (state == Core::State::Paused)
-      {
-        std::lock_guard lock(m_stop_info_mutex);
-        m_pending_stop_info = m_controller.GetStopInfo();
-      }
-    });
   }
 
   void Run()
@@ -264,6 +227,12 @@ public:
         [weak = std::weak_ptr<Session>(self)](std::shared_ptr<const MemChecks::Event> event) {
           if (auto sp = weak.lock())
             sp->HandleDataBreakpointEvent(std::move(event));
+        });
+    m_controller.SetExecutionEventCallback(
+        [weak = std::weak_ptr<Session>(self)](
+            std::shared_ptr<const Core::Debug::ExecutionEvent> event) {
+          if (auto sp = weak.lock())
+            sp->HandleExecutionEvent(std::move(event));
         });
     m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
         m_system,
@@ -299,14 +268,17 @@ public:
           }
         });
 
-    m_was_stepping = m_system.GetCPU().IsStepping();
-
     while (m_running)
     {
-      PollBreakpointStop();
+      PollAsyncStepAndEvents();
 
       if (!WaitForReadable(m_transport.GetSocket(), 50))
         continue;
+
+      // A step worker can finish while WaitForReadable is blocked on an already queued request.
+      // Re-poll before dispatch so its stopped event cannot be overtaken by that request's
+      // response.
+      PollAsyncStepAndEvents();
 
       const std::optional<std::string> message = m_transport.ReadMessage();
       if (!message)
@@ -341,6 +313,7 @@ public:
     m_step_cancelled.store(true);
     if (m_step_out_thread.joinable())
       m_step_out_thread.join();
+    m_system.GetCPU().GetExecutionState().UnregisterClient(m_controller.GetExecutionClientId());
     m_controller.ClearBreakpoints();
     {
       std::lock_guard lock(s_session_lifetime_mutex);
@@ -421,6 +394,72 @@ private:
     }
   }
 
+  void HandleExecutionEvent(std::shared_ptr<const Core::Debug::ExecutionEvent> event)
+  {
+    if (event->stop_cause == Core::Debug::ExecutionStopCause::Entry &&
+        (!m_launch_seen || !m_config_done))
+    {
+      return;
+    }
+    m_invalidate_debug_values.store(true);
+    if (event->kind == Core::Debug::ExecutionEventKind::Continued)
+    {
+      picojson::object body;
+      body.emplace("threadId", 1.0);
+      body.emplace("allThreadsContinued", true);
+      QueueEvent("continued", std::move(body));
+      return;
+    }
+
+    picojson::object body;
+    body.emplace("threadId", 1.0);
+    switch (event->stop_cause.value_or(Core::Debug::ExecutionStopCause::Step))
+    {
+    case Core::Debug::ExecutionStopCause::Unknown:
+    case Core::Debug::ExecutionStopCause::UserPause:
+      body.emplace("reason", std::string("pause"));
+      break;
+    case Core::Debug::ExecutionStopCause::CodeBreakpoint:
+      body.emplace("reason", std::string("breakpoint"));
+      break;
+    case Core::Debug::ExecutionStopCause::DataBreakpoint:
+      body.emplace("reason", std::string("data breakpoint"));
+      break;
+    case Core::Debug::ExecutionStopCause::Exception:
+      body.emplace("reason", std::string("exception"));
+      break;
+    case Core::Debug::ExecutionStopCause::Goto:
+      body.emplace("reason", std::string("goto"));
+      break;
+    case Core::Debug::ExecutionStopCause::Entry:
+      body.emplace("reason",
+                   m_launch_kind == "attach" ? std::string("attach") : std::string("entry"));
+      break;
+    case Core::Debug::ExecutionStopCause::Restart:
+      body.emplace("reason", std::string("restart"));
+      break;
+    case Core::Debug::ExecutionStopCause::Terminate:
+      body.emplace("reason", std::string("pause"));
+      break;
+    case Core::Debug::ExecutionStopCause::Step:
+      body.emplace("reason", std::string("step"));
+      break;
+    }
+
+    std::optional<int> hit_id;
+    if (event->code_breakpoint_address)
+      hit_id = LookupBreakpointId(*event->code_breakpoint_address);
+    else if (event->watchpoint_start)
+      hit_id = LookupDataBreakpointId(*event->watchpoint_start);
+    if (hit_id)
+    {
+      picojson::array hit_ids;
+      hit_ids.emplace_back(static_cast<double>(*hit_id));
+      body.emplace("hitBreakpointIds", std::move(hit_ids));
+    }
+    QueueEvent("stopped", std::move(body));
+  }
+
   void FlushEvents()
   {
     std::vector<std::pair<std::string, picojson::object>> events;
@@ -465,20 +504,6 @@ private:
 
   void SendStoppedEvent(std::string_view reason)
   {
-    // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason so a later
-    // spontaneous stop (e.g. data watchpoint hit after `continue`) can't
-    // accidentally reuse a stale CodeBreakpoint classification from before
-    // this explicit pause/step/goto/restart. The state hook repopulates
-    // m_pending_stop_info on the next Paused transition with fresh info
-    // captured while exceptions are still set, so SendClassifiedStoppedEvent
-    // will always see an up-to-date stash. Without this clear, a pause
-    // while the PC sits on a code breakpoint would leave the stash holding
-    // "CodeBreakpoint" and a later SendClassifiedStoppedEvent would
-    // mis-report the watchpoint stop as a breakpoint hit.
-    {
-      std::lock_guard lock(m_stop_info_mutex);
-      m_pending_stop_info.reset();
-    }
     picojson::object body;
     body.emplace("reason", std::string(reason));
     body.emplace("threadId", 1.0);
@@ -535,39 +560,23 @@ private:
       // when DAP is active, but a previous launch/attach with stopOnEntry
       // false (or the client continuing the core out-of-band) leaves State
       // at Running -- telling the client execution stopped while the game
-      // kept running would lie. PauseAndLock is re-entrant so this is safe
-      // even if the state hook fires on the resulting Paused transition.
-      m_controller.Pause();
-      SendStoppedEvent(m_launch_kind == "attach" ? "attach" : "entry");
+      // kept running would lie.
+      m_controller.PauseWithoutEvent();
+      m_controller.PublishEntryStop();
     }
     else
     {
       // Core starts paused while a debugger is attached (see
       // CPUSetInitialExecutionState in Core.cpp); resume it so the game runs
-      // immediately. The state hook queues a `continued` event for this
-      // session only (Bugbot #70).
+      // immediately. The shared execution service queues the resulting event.
       ContinueCore();
     }
   }
 
-  // Helper: calls Continue on the controller, marking this session as the
-  // initiator so the state hook only emits `continued` for this session
-  // (Bugbot #70). If Continue was a no-op (state already Running, no
-  // transition fired), clear our claim so a future transition doesn't
-  // attribute someone else's resume to us.
   void ContinueCore()
   {
     ClearDebugValueHandles();
-    const CPU::State before = m_system.GetCPU().GetState();
-    m_owns_next_continue.store(true);
-    m_controller.Continue();
-    // If state didn't transition, the hook won't consume the flag. Clear it
-    // so the next transition (which this session didn't initiate) isn't
-    // mis-attributed. The race window between Continue returning and this
-    // check is small: if the hook fires in that window, it consumes the
-    // flag and this store is a no-op; if not, transition didn't happen.
-    if (m_system.GetCPU().GetState() == before)
-      m_owns_next_continue.store(false);
+    static_cast<void>(m_controller.Continue());
   }
 
   bool JoinCompletedStepWorker(const Protocol::Request& request)
@@ -583,121 +592,67 @@ private:
     return true;
   }
 
+  bool CancelAndJoinStepWorker(const Protocol::Request& request)
+  {
+    const auto cancelled = m_controller.CancelActiveStep();
+    if (!cancelled)
+    {
+      RespondError(request.seq, request.command, cancelled.error());
+      return false;
+    }
+    m_step_cancelled.store(true);
+    if (m_step_out_thread.joinable())
+      m_step_out_thread.join();
+    m_step_out_done.store(true);
+    return true;
+  }
+
+  void DiscardQueuedStoppedEvents()
+  {
+    // A mutation request supersedes a completed step stop that is still queued locally; publishing
+    // both would present an obsolete intermediate state after the request has already taken effect.
+    std::lock_guard lock(m_event_mutex);
+    std::erase_if(m_pending_events, [](const auto& event) { return event.first == "stopped"; });
+  }
+
   void StartSourceStep(const Protocol::Request& request, const bool step_over)
   {
     if (!JoinCompletedStepWorker(request))
       return;
     if (!m_system.GetCPU().IsStepping())
-      m_controller.Pause();
-    {
-      std::lock_guard lock(m_stop_info_mutex);
-      m_pending_stop_info.reset();
-    }
+      m_controller.PauseWithoutEvent();
     m_step_cancelled.store(false);
-    m_deferred_step_action.store(DeferredStepAction::None);
     m_step_out_done.store(false);
-    m_step_out_thread = std::thread([self = shared_from_this(), step_over] {
-      self->m_controller.StepSource(step_over, self->m_step_cancelled);
-      self->m_step_out_done.store(true);
-    });
+    const auto operation =
+        m_controller.BeginStep(step_over ? Core::Debug::ExecutionOperationKind::SourceStepOver :
+                                           Core::Debug::ExecutionOperationKind::SourceStepInto,
+                               &m_step_cancelled);
+    if (!operation)
+    {
+      m_step_out_done.store(true);
+      RespondError(request.seq, request.command, operation.error());
+      return;
+    }
     Respond(request.seq, request.command, picojson::object{});
-  }
-
-  // Emits a `stopped` event whose reason is classified from the current PC
-  // (code breakpoint, data watchpoint, or step) and carries `hitBreakpointIds`
-  // when a breakpoint at the PC caused the stop.
-  //
-  // The reason is taken from `m_pending_stop_info` when present: the state hook
-  // stashes it synchronously on the CPU thread at break time, while
-  // EXCEPTION_FAKE_MEMCHECK_HIT is still set (it's cleared by the next
-  // CheckExceptions). If the stash is empty (e.g. an explicit pause that
-  // already used SendStoppedEvent("pause"), or the hook ran before exceptions
-  // were raised), `info` defaults to `Step` with no hit_breakpoint and we
-  // send that as the safest non-committal answer. The previous form fell
-  // back to a fresh `m_controller.GetStopInfo()` here, but that call runs
-  // on the session thread without a CPU freeze and can see cleared/
-  // mid-update exception state -- a race Bugbot flagged as "stale stop info
-  // after pause". The stash is the authoritative source; everything else
-  // is best-effort and we'd rather under-report than mis-report.
-  //
-  // DESNOTE(jbarber, 2026-07-21): Bugbot re-flagged this as
-  // "Watchpoint stops report as step": `CPUManager::Break` (which fires on
-  // code-breakpoint and watchpoint hits in the interpreter) doesn't call
-  // `NotifyStateChanged`, so the Paused hook never runs for those stops
-  // and `m_pending_stop_info` stays empty -- the client got "step" for a
-  // real breakpoint hit. Only `Continue()` notifies (with Running), so
-  // the Running hook fires but the matching Paused hook doesn't. Rather
-  // than touch `CPUManager::Break` (a hotpath shared with frame-step,
-  // GDB stub, etc., and wiring NotifyStateChanged there risks recursive
-  // callbacks), fall back to a fresh `GetStopInfo()` here when the stash
-  // is empty. `GetStopInfo` takes a `CPUThreadGuard` itself, so the CPU
-  // is frozen for the read and the exception flag can't be cleared out
-  // from under us -- the earlier "stale stop info" concern was about
-  // reading without that freeze; with the guard the read is safe.
-  void SendClassifiedStoppedEvent()
-  {
-    StopInfo info;
-    {
-      std::lock_guard lock(m_stop_info_mutex);
-      if (m_pending_stop_info)
-      {
-        info = *m_pending_stop_info;
-        m_pending_stop_info.reset();
-      }
-    }
-    // No stash means the state hook didn't fire for this stop (typical for
-    // interpreter breakpoint/watchpoint hits via CPU::Break, which doesn't
-    // notify state changes). Re-classify from live CPU state -- GetStopInfo
-    // takes a CPUThreadGuard so the read is atomic with respect to the
-    // stepping CPU. Keep this as a fallback so the hook-driven fast path
-    // still wins when it does fire.
-    if (info.reason == StopReason::Step && !info.hit_breakpoint_address)
-      info = m_controller.GetStopInfo();
-
-    picojson::object body;
-    body.emplace("threadId", 1.0);
-    switch (info.reason)
-    {
-    case StopReason::CodeBreakpoint:
-      body.emplace("reason", std::string("breakpoint"));
-      break;
-    case StopReason::DataBreakpoint:
-      body.emplace("reason", std::string("data breakpoint"));
-      break;
-    case StopReason::Step:
-      body.emplace("reason", std::string("step"));
-      break;
-    }
-
-    if (info.hit_breakpoint_address)
-    {
-      // DESNOTE(jbarber, 2026-07-21): DAP `hitBreakpointIds` must echo the
-      // stable id the client received in its setBreakpoints /
-      // setInstructionBreakpoints response -- NOT the raw PC address. The
-      // previous form shoved the address in here, which broke client-side
-      // correlation between configured breakpoints and stop events. Look
-      // up the id via m_bp_id_by_address; if no mapping exists (e.g. a
-      // temporary step-over breakpoint set via SetTemporary, which never
-      // got a DAP response), omit hitBreakpointIds entirely rather than
-      // fabricate one.
-      std::optional<int> hit_id = info.reason == StopReason::DataBreakpoint ?
-                                      LookupDataBreakpointId(*info.hit_breakpoint_address) :
-                                      LookupBreakpointId(*info.hit_breakpoint_address);
-      if (hit_id)
-      {
-        picojson::array hit_ids;
-        hit_ids.emplace_back(static_cast<double>(*hit_id));
-        body.emplace("hitBreakpointIds", std::move(hit_ids));
-      }
-    }
-
-    QueueEvent("stopped", std::move(body));
-    FlushEvents();
+    m_controller.PublishStepContinued(*operation);
+    m_step_out_thread = std::thread([self = shared_from_this(), step_over, operation = *operation] {
+      const Core::Debug::PPCStepResult result =
+          self->m_controller.StepSource(step_over, self->m_step_cancelled);
+      self->m_step_out_done.store(true);
+      if (self->m_step_cancelled.load())
+        self->m_controller.AbandonStep(operation);
+      else if (result == Core::Debug::PPCStepResult::Stepped)
+        self->m_controller.CompleteStep(operation);
+      else if (result == Core::Debug::PPCStepResult::Continuing)
+        self->m_controller.PublishStepContinued(operation);
+      else
+        self->m_controller.AbandonStep(operation);
+    });
   }
 
   // DESNOTE(jbarber, 2026-07-21): Assign a stable DAP id for a breakpoint
   // site installed at `address` and remember the (address -> id) mapping so
-  // SendClassifiedStoppedEvent can translate a hit PC back to the id the
+  // HandleExecutionEvent can translate a hit PC back to the id the
   // client received in its setBreakpoints / setInstructionBreakpoints
   // response. Re-installing the same address (e.g. when the client
   // re-sends an authoritative set with the same site) reuses the existing
@@ -761,7 +716,7 @@ private:
   // an address, keeping client-side id correlation stable across
   // refreshes.
 
-  void PollBreakpointStop()
+  void PollAsyncStepAndEvents()
   {
     auto core_scan_lock = DapMemoryEngine::TryLockCoreScan();
     if (!core_scan_lock.owns_lock())
@@ -772,69 +727,27 @@ private:
       FlushEvents();
       return;
     }
-    // Async step-out completion: the worker signals via m_step_out_done once
-    // DapDebugController::StepOut has returned. Join and emit the appropriate
-    // stopped event here, on the session thread, so the client still sees it
+    // Async step completion: once stepping returns, the worker marks itself ready to join before
+    // publishing its result. Joining guarantees that publication is complete; flush immediately
+    // afterward, on the session thread, so the client sees the stopped event
     // in command order. The step-out may have stopped early because the
     // interpreter loop hit a code breakpoint (StepOut bails when
-    // CheckBreakPoints fires) -- classify via SendClassifiedStoppedEvent so
-    // a real breakpoint hit isn't mis-reported as a plain 'step'. This
-    // replaces the previous synchronous inline call that blocked
-    // HandleMessage for up to the 5s step-out timeout.
+    // CheckBreakPoints fires). The shared execution event carries that exact
+    // stop cause. This replaces the previous synchronous inline call that
+    // blocked HandleMessage for up to the 5s step-out timeout.
     if (m_step_out_thread.joinable() && m_step_out_done.load())
     {
       m_step_out_thread.join();
-      // DESNOTE(jbarber, 2026-07-21): If a continue/pause was deferred
-      // during the step-out (because the worker held the stepping lock
-      // for the whole interpreter loop), apply it now that the lock is
-      // free. Continue pre-empts the stopped event; pause synthesizes a
-      // "pause" stop instead of the step-out's classified one. Without
-      // this deferral, m_controller.Continue/Pause would block the
-      // session thread on the stepping lock until the worker's 5s
-      // timeout elapsed.
-      //
-      // A single atomic action preserves the client's latest intent. Separate
-      // booleans could not distinguish continue-then-pause from
-      // pause-then-continue and therefore applied the wrong final state.
-      const DeferredStepAction action = m_deferred_step_action.exchange(DeferredStepAction::None);
-      if (action == DeferredStepAction::Pause)
-      {
-        // DESNOTE(jbarber, 2026-07-21): A user-initiated pause that
-        // happened during async step-out should be reported to the client
-        // with reason "pause", not whatever SendClassifiedStoppedEvent
-        // would synthesize from the step-out's stashed stop info (which
-        // could be NoteBreakpoint / Step). The user explicitly asked the
-        // core to halt. If a continue was also pending (continue THEN
-        // pause), pause pre-empts since it is the more recent request.
-        m_controller.Pause();
-        SendStoppedEvent("pause");
-        SyncSteppingBaseline();
-        return;
-      }
-      if (action == DeferredStepAction::Continue)
-      {
-        ContinueCore();
-        SyncSteppingBaseline();
-        return;
-      }
-      SendClassifiedStoppedEvent();
-      SyncSteppingBaseline();
+      if (m_test_hooks && m_test_hooks->async_step_worker_joined)
+        m_test_hooks->async_step_worker_joined();
+      FlushEvents();
       return;
     }
 
-    const bool stepping = m_system.GetCPU().IsStepping();
-    if (!m_was_stepping && stepping)
-      SendClassifiedStoppedEvent();
-    m_was_stepping = stepping;
+    if (m_invalidate_debug_values.exchange(false))
+      ClearDebugValueHandles();
     FlushEvents();
   }
-
-  // DESNOTE(jbarber, 2026-07-02): PollBreakpointStop reports a "breakpoint" stop
-  // whenever it observes a not-stepping -> stepping transition it didn't already
-  // account for. After we service an explicit pause/step/continue we must reseat
-  // that baseline to the current CPU state, otherwise the very next poll re-reports
-  // the stop we just emitted (e.g. a duplicate "stopped" right after "pause").
-  void SyncSteppingBaseline() { m_was_stepping = m_system.GetCPU().IsStepping(); }
 
   bool Respond(int request_seq, std::string_view command, picojson::object body)
   {
@@ -951,39 +864,17 @@ private:
 
     if (command == "continue")
     {
-      // DESNOTE(jbarber, 2026-07-21): An in-flight async step-out holds the
-      // CPU stepping_lock via its CPUThreadGuard for the whole interpreter
-      // loop (up to the configured 5s timeout). Directly calling
-      // m_controller.Continue() here would block the session thread waiting
-      // on that lock -- stallong socket reads, realtime-watch flushing, and
-      // disconnect. Respond success immediately and remember the continue
-      // request; PollBreakpointStop picks it up once the worker has joined.
-      if (m_step_out_thread.joinable() && !m_step_out_done.load())
+      // Stop the session-owned worker and release its CPUThreadGuard before resuming the core.
+      if (!CancelAndJoinStepWorker(*request))
+        return;
+      DiscardQueuedStoppedEvents();
+      ClearDebugValueHandles();
+      const auto continued = m_controller.Continue();
+      if (!continued)
       {
-        m_step_cancelled.store(true);
-        m_deferred_step_action.store(DeferredStepAction::Continue);
-        // DESNOTE(jbarber, 2026-07-21): Ack the request with an empty body
-        // and NO allThreadsContinued flag. The core is still stepping out
-        // (the worker holds the CPUThreadGuard for up to its 5s timeout),
-        // so claiming all threads have been continued would lie to the
-        // client -- it would transition its UI to "running" while the
-        // emulator is still single-stepping toward the next return. The
-        // earlier form mirrored the synchronous path's
-        // allThreadsContinued: true here, which Bugbot flagged as
-        // "Continue deferred during step-out". Continue() actually runs
-        // in PollBreakpointStop once the worker joins; that fires the
-        // state hook which queues the `continued` event with
-        // allThreadsContinued: true at that point. The client treats the
-        // immediate response as "request acknowledged, resume pending"
-        // and waits for the `continued` event before flipping to running.
-        Respond(request->seq, command, picojson::object{});
+        RespondError(request->seq, command, continued.error());
         return;
       }
-      // DESNOTE(jbarber, 2026-07-22): use ContinueCore so the resulting
-      // `continued` event is attributed to this session only -- the state
-      // hook consumes the per-session ownership flag. Bugbot #70.
-      ContinueCore();
-      SyncSteppingBaseline();
       picojson::object body;
       body.emplace("allThreadsContinued", true);
       Respond(request->seq, command, std::move(body));
@@ -992,20 +883,16 @@ private:
 
     if (command == "pause")
     {
-      // Same deferred-execution rationale as continue above -- the step-out
-      // worker holds the stepping lock, so pause can't take effect until
-      // it bails. Queue it for PollBreakpointStop to apply post-join.
-      if (m_step_out_thread.joinable() && !m_step_out_done.load())
+      if (!CancelAndJoinStepWorker(*request))
+        return;
+      DiscardQueuedStoppedEvents();
+      const auto paused = m_controller.Pause();
+      if (!paused)
       {
-        m_step_cancelled.store(true);
-        m_deferred_step_action.store(DeferredStepAction::Pause);
-        Respond(request->seq, command, picojson::object{});
+        RespondError(request->seq, command, paused.error());
         return;
       }
-      m_controller.Pause();
       Respond(request->seq, command, picojson::object{});
-      SendStoppedEvent("pause");
-      SyncSteppingBaseline();
       return;
     }
 
@@ -1031,47 +918,34 @@ private:
       // spurious `stopped`/"step". Pause first so the step has a frame to step
       // from, mirroring how VS Code's own client pauses before stepping.
       if (!m_system.GetCPU().IsStepping())
-        m_controller.Pause();
-      // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason from the
-      // pre-step Pause above. That Pause fires the state hook which stashes
-      // GetStopInfo at the pre-step PC -- and if the pre-step PC has a code
-      // breakpoint (the user installed one AT the current instruction), the
-      // stash is CodeBreakpoint. After Step advances the PC, the stale
-      // CodeBreakpoint stash would misclassify this stop as a breakpoint hit
-      // instead of a step. Clearing here leaves SendClassifiedStoppedEvent
-      // with an empty stash, so it falls back to a fresh GetStopInfo at
-      // the post-step PC and classifies correctly (CodeBreakpoint only if
-      // the NEXT instruction has one, Step otherwise).
+        m_controller.PauseWithoutEvent();
+      const auto operation = m_controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+      if (!operation)
       {
-        std::lock_guard lock(m_stop_info_mutex);
-        m_pending_stop_info.reset();
+        RespondError(request->seq, command, operation.error());
+        return;
       }
       const StepOverResult result = m_controller.StepOver();
       Respond(request->seq, command, picojson::object{});
       if (result == StepOverResult::Stepped)
       {
-        // DESNOTE(jbarber, 2026-07-21): Classify the actual stop via the
-        // stashed reason rather than unconditionally reporting "step" --
-        // StepOver may have advanced onto a code/data breakpoint that was
-        // hiding at the next instruction. SendClassifiedStoppedEvent will
-        // emit "breakpoint" with hitBreakpointIds in that case, "step" when
-        // the step genuinely advanced.
-        SendClassifiedStoppedEvent();
-        SyncSteppingBaseline();
+        // A breakpoint encountered by the step already completed the shared
+        // operation; otherwise this publishes the normal step completion.
+        m_controller.CompleteStep(*operation);
       }
       else if (result == StepOverResult::NotStepped)
       {
+        m_controller.AbandonStep(*operation);
         // DESNOTE(jbarber, 2026-07-21): The underlying StepInto timed out
         // without the CPU thread acknowledging -- the PC has not advanced.
         // Suppress the stopped event (mirroring the stepIn guard) so the
         // client isn't told execution stopped at an unchanged PC. The
         // response still acks the `next` request so the client knows the
         // command was received.
-        SyncSteppingBaseline();
       }
       else
       {
-        SyncSteppingBaseline();
+        m_controller.PublishStepContinued(*operation);
       }
       return;
     }
@@ -1093,44 +967,30 @@ private:
       if (!JoinCompletedStepWorker(*request))
         return;
       if (!m_system.GetCPU().IsStepping())
-        m_controller.Pause();
-      // DESNOTE(jbarber, 2026-07-21): Drop any stashed stop reason from the
-      // pre-step Pause above -- a CodeBreakpoint stash at the pre-step PC
-      // would misclassify this stop as a breakpoint hit instead of a step
-      // once Step advances the PC. Clearing leaves SendClassifiedStoppedEvent
-      // with an empty stash so it falls back to a fresh GetStopInfo at the
-      // post-step PC. (Same rationale as the `next` handler above.)
-      {
-        std::lock_guard lock(m_stop_info_mutex);
-        m_pending_stop_info.reset();
-      }
+        m_controller.PauseWithoutEvent();
       // DESNOTE(jbarber, 2026-07-21): StepInto may return false when the
       // CPU thread can't acknowledge the StepOpcode signal within its 2s
       // wait (e.g. the emulator is mid-block or under load). Emitting a
       // `stopped`/`step` event in that case would lie to the client -- the
       // PC hasn't advanced -- so we only send the stop when the step
-      // actually completed. The earlier "stop arrives later via
-      // PollBreakpointStop" framing was wrong: PollBreakpointStop only
-      // emits stops on a not-stepping->stepping transition, and after
-      // Pause/SyncSteppingBaseline the core is already stepping=true with
-      // no further state change when the late completion fires -- so
-      // suppressing the stop here is the only correct response.
+      // actually completed.
+      const auto operation = m_controller.BeginStep(Core::Debug::ExecutionOperationKind::StepInto);
+      if (!operation)
+      {
+        RespondError(request->seq, command, operation.error());
+        return;
+      }
       const bool completed = m_controller.StepInto();
       Respond(request->seq, command, picojson::object{});
       if (completed)
       {
-        // DESNOTE(jbarber, 2026-07-21): Classify the actual stop reason
-        // (CodeBreakpoint / DataBreakpoint / Step) instead of always
-        // emitting "step" -- StepInto may have walked the PC onto a real
-        // breakpoint the user installed at the next instruction. The state
-        // hook has already stashed the reason while the exception flag was
-        // still set; SendClassifiedStoppedEvent consumes it.
-        SendClassifiedStoppedEvent();
-        SyncSteppingBaseline();
+        // A breakpoint encountered by the step already completed the shared
+        // operation; otherwise this publishes the normal step completion.
+        m_controller.CompleteStep(*operation);
       }
       else
       {
-        SyncSteppingBaseline();
+        m_controller.AbandonStep(*operation);
       }
       return;
     }
@@ -1141,31 +1001,13 @@ private:
       if (!JoinCompletedStepWorker(*request))
         return;
       if (!m_system.GetCPU().IsStepping())
-        m_controller.Pause();
+        m_controller.PauseWithoutEvent();
       // DESNOTE(jbarber, 2026-07-21): Run StepOut on a worker thread so the
       // session loop keeps polling the socket for disconnect / new requests
       // and keeps flushing realtime-watch events while the interpreter
-      // single-steps toward the next return. PollBreakpointStop joins the
-      // worker when it signals completion and emits the stopped event via
-      // SendClassifiedStoppedEvent so a real breakpoint hit on the way out is
-      // reported as 'breakpoint', not as a plain 'step'.
+      // single-steps toward the next return. The worker publishes the exact
+      // stop through the shared execution service.
       //
-      // The pre-step pause fires the state hook and populates
-      // m_pending_stop_info with whatever GetStopInfo sees at that instant
-      // (often a CodeBreakpoint if we stopped on a code breakpoint the user
-      // had planted at the PC). If we left that stash in place, the
-      // post-step SendClassifiedStoppedEvent would consume it and lie about
-      // the stop reason. Reset it here so only a state-hook fire *during*
-      // the worker's interpreter loop can attribute the eventual stop --
-      // otherwise SendClassifiedStoppedEvent defaults to 'step' (which is
-      // the correct characterization for a step-out that ran to a return).
-      //
-      // A previous step-out is still in flight only if the client reissued
-      // step-out within one 50ms poll window -- in that pathological case we
-      // can't safely start a second concurrent interpreter loop, so we
-      // acknowledge the request with success and let the prior worker
-      // complete. (Previously this branch returned without responding,
-      // which left the client's request un-answered.)
       // DESNOTE(jbarber, 2026-07-21): A previous step-out may still be in
       // flight (client reissued stepOut within one 50ms poll window). We
       // can't safely start a second concurrent interpreter loop against
@@ -1176,21 +1018,32 @@ private:
       // classified stop will arrive. Reject the duplicate explicitly so
       // the client knows the second step-out didn't start -- it can retry
       // once the in-flight worker's stopped event arrives.
-      {
-        std::lock_guard lock(m_stop_info_mutex);
-        m_pending_stop_info.reset();
-      }
       m_step_out_done.store(false);
       m_step_cancelled.store(false);
-      m_deferred_step_action.store(DeferredStepAction::None);
-      m_step_out_thread = std::thread([self = shared_from_this()]() {
-        self->m_controller.StepOut(self->m_step_cancelled);
-        self->m_step_out_done.store(true);
-      });
+      const auto operation =
+          m_controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOut, &m_step_cancelled);
+      if (!operation)
+      {
+        m_step_out_done.store(true);
+        RespondError(request->seq, command, operation.error());
+        return;
+      }
       Respond(request->seq, command, picojson::object{});
-      // Don't emit stopped here -- PollBreakpointStop will, once the
-      // worker signals completion. SyncSteppingBaseline is also deferred to
-      // the join site so the polling baseline matches the post-step state.
+      m_controller.PublishStepContinued(*operation);
+      m_step_out_thread = std::thread([self = shared_from_this(), operation = *operation]() {
+        const Core::Debug::PPCStepResult result =
+            self->m_controller.StepOut(self->m_step_cancelled);
+        self->m_step_out_done.store(true);
+        if (self->m_step_cancelled.load())
+          self->m_controller.AbandonStep(operation);
+        else if (result == Core::Debug::PPCStepResult::Stepped)
+          self->m_controller.CompleteStep(operation);
+        else if (result == Core::Debug::PPCStepResult::Continuing)
+          self->m_controller.PublishStepContinued(operation);
+        else
+          self->m_controller.AbandonStep(operation);
+      });
+      // The worker publishes the stopped event when it completes.
       return;
     }
 
@@ -1333,7 +1186,6 @@ private:
       // m_config_done, so the deferred fire picks up the override.
       m_config_done = true;
       MaybeFireEntryStop(command);
-      SyncSteppingBaseline();
       return;
     }
 
@@ -1356,7 +1208,6 @@ private:
       m_launch_seen = true;
       m_launch_kind = command;
       MaybeFireEntryStop(command);
-      SyncSteppingBaseline();
       return;
     }
 
@@ -1848,19 +1699,17 @@ private:
       return;
     }
 
-    // DESNOTE(jbarber, 2026-07-21): Pause before SetPC so the post-goto
-    // stopped event is truthful. Without this, if the client called goto
-    // while emulation was running, the CPU would keep executing at the new
-    // PC while the adapter told the client emulation halted -- the same
-    // desync Restart previously had. Pause mirrors what Restart/Terminate
-    // do before emitting a stopped event.
-    if (!m_system.GetCPU().IsStepping())
-      m_controller.Pause();
+    if (!CancelAndJoinStepWorker(request))
+      return;
+    DiscardQueuedStoppedEvents();
     ClearDebugValueHandles();
-    m_controller.SetPC(arguments->target);
+    const auto result = m_controller.Goto(arguments->target);
+    if (!result)
+    {
+      RespondError(request.seq, "goto", result.error());
+      return;
+    }
     Respond(request.seq, "goto", picojson::object{});
-    SendStoppedEvent("goto");
-    SyncSteppingBaseline();
   }
 
   void HandleExceptionInfo(const Protocol::Request& request)
@@ -1954,8 +1803,16 @@ private:
 
   void HandleTerminate(const Protocol::Request& request)
   {
+    if (!CancelAndJoinStepWorker(request))
+      return;
+    DiscardQueuedStoppedEvents();
     ClearDebugValueHandles();
-    m_controller.Terminate();
+    const auto result = m_controller.Terminate();
+    if (!result)
+    {
+      RespondError(request.seq, "terminate", result.error());
+      return;
+    }
     Respond(request.seq, "terminate", picojson::object{});
 
     picojson::object body;
@@ -1966,11 +1823,17 @@ private:
 
   void HandleRestart(const Protocol::Request& request)
   {
+    if (!CancelAndJoinStepWorker(request))
+      return;
+    DiscardQueuedStoppedEvents();
     ClearDebugValueHandles();
-    m_controller.Restart();
+    const auto result = m_controller.Restart();
+    if (!result)
+    {
+      RespondError(request.seq, "restart", result.error());
+      return;
+    }
     Respond(request.seq, "restart", picojson::object{});
-    SendStoppedEvent("restart");
-    SyncSteppingBaseline();
   }
 
   void HandleSetDataBreakpoints(const Protocol::Request& request)
@@ -2699,7 +2562,6 @@ private:
   DapTransport& m_transport;
   DapDebugController m_controller;
   Core::System& m_system;
-  Common::EventHook m_state_hook;
   std::unique_ptr<RealtimeWatchSampler> m_watch_sampler;
   std::unique_ptr<DapMemoryEngine> m_memory_engine;
   // DESNOTE(jbarber, 2026-07-22): Maps watch_id → freeze_id returned by
@@ -2710,27 +2572,11 @@ private:
   std::map<int, DebugValueContext> m_debug_value_handles;
   int m_next_debug_value_handle = 0x10000;
   std::atomic<bool> m_running{true};
-  // DESNOTE(jbarber, 2026-07-22): Set just before this session calls
-  // m_controller.Continue(); the state hook consumes it via exchange so
-  // only the initiating session emits `continued`. Without this gate, every
-  // session's state hook emits `continued` on every Running transition --
-  // a session B calling Continue would notify session A's client as well,
-  // making it look like session A initiated the resume. Bugbot #70.
-  // The flag is consumed atomically by the state hook (running on the CPU
-  // thread). The race (Continue is a no-op because the core was already
-  // running → no hook fires → flag stays set → next transition emits
-  // spuriously) is bounded: the hook checks state == Running, and Continue
-  // can be a no-op only when the state is already Running, so the next
-  // transition is Paused (no continued emitted) -- the flag would carry
-  // forward but the future `continued` emission only fires on the next
-  // Running transition, which this session did NOT initiate. To bound
-  // that, ContinueCore clears the flag if no transition occurred.
-  std::atomic<bool> m_owns_next_continue{false};
+  std::atomic<bool> m_invalidate_debug_values{false};
   // Sequence numbers are handed out from both the session loop (responses) and
   // the core state-changed callback (the "continued" event), which may run on
   // the CPU thread; keep allocation race-free.
   std::atomic<int> m_next_seq{1};
-  bool m_was_stepping = false;
   bool m_debugging_started = false;
   // Stop-on-entry policy. Seeded from `Dolphin.General.DAPStopOnEntry` at
   // construction (so it can be configured at dolphin launch without a
@@ -2757,12 +2603,6 @@ private:
   // configurationDone, even when a client interleaves them.
   bool m_entry_stop_sent = false;
 
-  // Stop reason captured synchronously by the state hook at break time (on the
-  // CPU thread), before EXCEPTION_FAKE_MEMCHECK_HIT is cleared. Consumed by
-  // SendClassifiedStoppedEvent on the session thread.
-  std::mutex m_stop_info_mutex;
-  std::optional<StopInfo> m_pending_stop_info;
-
   std::mutex m_event_mutex;
   std::vector<std::pair<std::string, picojson::object>> m_pending_events;
   bool m_accept_events = true;
@@ -2773,7 +2613,7 @@ private:
   // the breakpoint hit (clients correlate via the id and would mis-associate
   // a hit if we shipped the address instead). We assign a monotonic id per
   // installed breakpoint site and remember the (address -> id) mapping so
-  // SendClassifiedStoppedEvent can translate the hit PC back to an id.
+  // HandleExecutionEvent can translate the hit PC back to an id.
   std::mutex m_bp_id_mutex;
   std::unordered_map<u32, int> m_bp_id_by_address;
   std::map<std::pair<u32, u32>, int> m_data_bp_id_by_range;
@@ -2785,30 +2625,24 @@ private:
   // the interpreter. That blocked `HandleMessage` from polling the socket, so
   // disconnect, new requests, and realtime-watch event dispatch stalled until
   // the step completed. We now run StepOut on a worker thread so the session
-  // loop keeps draining its 50ms `WaitForReadable` poll, and `PollBreakpointStop`
-  // joins the worker and emits the `stopped`/`step` event when it completes.
+  // loop keeps draining its 50ms `WaitForReadable` poll, and
+  // PollAsyncStepAndEvents joins the worker after it publishes its stop.
   // The worker captures a shared_ptr<Session> (rather than `this`) so a late
   // tear-down can't free the Session while the worker still holds the guard.
-  //
-  // `m_deferred_step_action` stores the latest continue/pause intent while a
-  // worker still holds the stepping lock.
-  // We respond success immediately and defer the actual SetState call to
-  // PollBreakpointStop (which runs after the worker joins), so the session
-  // thread never blocks on the stepping lock.
   std::thread m_step_out_thread;
   std::atomic<bool> m_step_out_done{true};
   std::atomic<bool> m_step_cancelled{false};
-  std::atomic<DeferredStepAction> m_deferred_step_action{DeferredStepAction::None};
+  const SessionTestHooks* m_test_hooks;
 };
 }  // namespace
 
-void RunSession(DapTransport& transport, Core::System& system)
+void RunSession(DapTransport& transport, Core::System& system, const SessionTestHooks* test_hooks)
 {
   // DESNOTE(jbarber, 2026-07-21): Session derives from enable_shared_from_this
   // so the realtime-watch sampler's dispatch lambda can capture a weak_ptr and
   // keep *this alive across an in-flight vi_end_field_event Tick() on the CPU
   // thread. Constructing here via make_shared (rather than a stack local)
   // makes weak_from_this() valid by the time Run() is entered.
-  std::make_shared<Session>(transport, system)->Run();
+  std::make_shared<Session>(transport, system, test_hooks)->Run();
 }
 }  // namespace DAP

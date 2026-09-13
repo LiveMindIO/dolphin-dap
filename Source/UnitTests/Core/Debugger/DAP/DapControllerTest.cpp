@@ -1133,7 +1133,7 @@ TEST_F(DapControllerTest, StepOutHonorsCancellationBeforeFirstInstruction)
 
   std::atomic<bool> cancelled{true};
   DAP::DapDebugController controller(System());
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
 }
 
@@ -1171,7 +1171,7 @@ TEST_F(DapControllerTest, StepOutWhenNotSteppingIsNoOp)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
 }
 
@@ -1219,7 +1219,7 @@ TEST_F(DapControllerTest, StepOutRunsUntilReturn)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -1239,7 +1239,7 @@ TEST_F(DapControllerTest, StepOutStopsAtBreakpointBeforeReturn)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4}});
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
 
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS + 0x200u);
@@ -1259,7 +1259,8 @@ TEST_F(DapControllerTest, StepOutTimesOutOnNonReturningCode)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::milliseconds(5));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::milliseconds(5)),
+            Core::Debug::PPCStepResult::NotStepped);
 
   // The branch loops back to itself, so the bounded step-out returns with the
   // PC still parked on the branch instead of hanging.
@@ -1280,7 +1281,8 @@ TEST_F(DapControllerTest, StepOutReturnsImmediatelyWhenPcIsOnReturn)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::seconds(1));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -1300,7 +1302,8 @@ TEST_F(DapControllerTest, StepOutStepsOverNestedCall)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::seconds(1));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
 
   // bl sets LR to TEST_ADDRESS + 4; the callee returns there, so the inner loop
   // ends on the instruction after the call rather than parking inside the
@@ -1521,7 +1524,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
   ppc_state.gpr[3] = 0xdeadbeef;
 
   DAP::DapDebugController controller(System());
-  controller.Restart();
+  ASSERT_TRUE(controller.Restart().has_value());
 
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS);
   EXPECT_EQ(ppc_state.gpr[3], 0u);
@@ -1530,7 +1533,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
 TEST_F(DapControllerTest, TerminateBreaksCpu)
 {
   DAP::DapDebugController controller(System());
-  controller.Terminate();
+  ASSERT_TRUE(controller.Terminate().has_value());
   EXPECT_TRUE(System().GetCPU().IsStepping());
 }
 

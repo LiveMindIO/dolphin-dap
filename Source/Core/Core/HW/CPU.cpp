@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+#include <utility>
 
 #include "AudioCommon/AudioCommon.h"
 #include "Common/Event.h"
@@ -24,7 +25,8 @@
 
 namespace CPU
 {
-CPUManager::CPUManager(Core::System& system) : m_system(system)
+CPUManager::CPUManager(Core::System& system)
+    : m_system(system), m_host_execution_client_id(m_execution_state.RegisterClient())
 {
 }
 CPUManager::~CPUManager() = default;
@@ -326,20 +328,53 @@ void CPUManager::SetStepping(bool stepping)
 
 void CPUManager::Break()
 {
-  std::lock_guard state_lock(m_state_change_lock);
+  Break(std::nullopt, true);
+}
 
-  // If another thread is trying to PauseAndLock then we need to remember this
-  // for later to ignore the unpause_on_unlock.
-  if (m_state_paused_and_locked)
+void CPUManager::BreakWithoutDebugStop()
+{
+  Break(std::nullopt, false);
+}
+
+void CPUManager::Break(Core::Debug::ExecutionStopDetails details)
+{
+  Break(std::make_optional(std::move(details)), true);
+}
+
+void CPUManager::Break(std::optional<Core::Debug::ExecutionStopDetails> details,
+                       const bool publish_unclassified_stop)
+{
+  bool publish_stop = false;
   {
-    m_state_system_request_stepping = true;
-    return;
+    std::lock_guard state_lock(m_state_change_lock);
+
+    // If another thread is trying to PauseAndLock then we need to remember this
+    // for later to ignore the unpause_on_unlock.
+    if (m_state_paused_and_locked)
+    {
+      m_state_system_request_stepping = true;
+      publish_stop = details.has_value();
+    }
+    else
+    {
+      const bool transitioned = m_state == State::Running;
+
+      // We'll deadlock if we synchronize, the CPU may block waiting for our caller to
+      // finish resulting in the CPU loop never terminating.
+      SetStateLocked(State::Stepping);
+      RunAdjacentSystems(false);
+      publish_stop = details.has_value() || (publish_unclassified_stop && transitioned);
+    }
   }
 
-  // We'll deadlock if we synchronize, the CPU may block waiting for our caller to
-  // finish resulting in the CPU loop never terminating.
-  SetStateLocked(State::Stepping);
-  RunAdjacentSystems(false);
+  if (!publish_stop)
+    return;
+  if (!details)
+  {
+    details = Core::Debug::ExecutionStopDetails{.cause = Core::Debug::ExecutionStopCause::Unknown,
+                                                .pc = m_system.GetPPCState().pc};
+  }
+  m_execution_state.PublishStopped(std::move(*details));
 }
 
 void CPUManager::Continue()

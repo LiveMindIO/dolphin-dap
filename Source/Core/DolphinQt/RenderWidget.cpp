@@ -19,6 +19,8 @@
 
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/HW/CPU.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/State.h"
 #include "Core/System.h"
 
@@ -424,7 +426,20 @@ bool RenderWidget::event(QEvent* event)
     if (m_should_unpause_on_focus &&
         Core::GetState(Core::System::GetInstance()) == Core::State::Paused)
     {
-      Core::SetState(Core::System::GetInstance(), Core::State::Running);
+      auto& system = Core::System::GetInstance();
+      auto& cpu = system.GetCPU();
+      auto& execution = cpu.GetExecutionState();
+      if (execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+      {
+        const auto operation = execution.BeginOperation(
+            cpu.GetHostExecutionClientId(), Core::Debug::ExecutionOperationKind::Continue);
+        if (operation)
+        {
+          Core::SetState(system, Core::State::Running);
+          static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                                       system.GetPPCState().pc));
+        }
+      }
     }
 
     m_should_unpause_on_focus = false;
@@ -456,8 +471,23 @@ bool RenderWidget::event(QEvent* event)
       // the cause of this event), so trying to pause the core would cause a deadlock
       if (!Core::IsCPUThread() && !Core::IsGPUThread())
       {
-        m_should_unpause_on_focus = true;
-        Core::SetState(Core::System::GetInstance(), Core::State::Paused);
+        auto& system = Core::System::GetInstance();
+        auto& cpu = system.GetCPU();
+        auto& execution = cpu.GetExecutionState();
+        if (execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+        {
+          const auto operation = execution.BeginOperation(
+              cpu.GetHostExecutionClientId(), Core::Debug::ExecutionOperationKind::Pause);
+          if (operation)
+          {
+            m_should_unpause_on_focus = true;
+            Core::SetState(system, Core::State::Paused);
+            cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+                       .origin = cpu.GetHostExecutionClientId(),
+                       .operation_id = *operation,
+                       .pc = system.GetPPCState().pc});
+          }
+        }
       }
     }
 

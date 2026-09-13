@@ -210,7 +210,8 @@ static void ReadCommand()
   else if (c == 0x03)
   {
     auto& system = Core::System::GetInstance();
-    system.GetCPU().Break();
+    system.GetCPU().Break(
+        {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = system.GetPPCState().pc});
     SendSignal(Signal::Sigtrap);
     s_has_control = true;
     INFO_LOG_FMT(GDB_STUB, "gdb: CPU::Break due to break command");

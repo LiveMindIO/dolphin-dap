@@ -45,6 +45,7 @@
 #include "Common/Logging/Log.h"
 
 #include "Core/Core.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/GPFifo.h"
 #include "Core/HW/MMIO.h"
@@ -312,8 +313,10 @@ T MMU::ReadFromHardware(u32 em_address)
     PanicAlertFmt("Unable to resolve read address {:x} PC {:x}", em_address, m_ppc_state.pc);
     if (m_system.IsPauseOnPanicMode())
     {
-      m_system.GetCPU().Break();
       m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+      m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Exception,
+                               .pc = m_ppc_state.pc,
+                               .exceptions = m_ppc_state.Exceptions});
     }
   }
 
@@ -508,8 +511,10 @@ void MMU::WriteToHardware(u32 em_address, const u32 data, const u32 size)
   PanicAlertFmt("Unable to resolve write address {:x} PC {:x}", em_address, m_ppc_state.pc);
   if (m_system.IsPauseOnPanicMode())
   {
-    m_system.GetCPU().Break();
     m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Exception,
+                             .pc = m_ppc_state.pc,
+                             .exceptions = m_ppc_state.Exceptions});
   }
 }
 // =====================
@@ -640,7 +645,14 @@ bool MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
   if (m_system.GetCPU().IsStepping())
     m_power_pc.NotifySteppingMemcheckHit();
 
-  m_system.GetCPU().Break();
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::DataBreakpoint,
+                           .pc = m_ppc_state.pc,
+                           .data_address = address,
+                           .data_size = static_cast<u32>(size),
+                           .watchpoint_start = mc->start_address,
+                           .watchpoint_end = mc->end_address,
+                           .data_access = write ? Core::Debug::DataAccessType::Write :
+                                                  Core::Debug::DataAccessType::Read});
 
   if (GDBStub::IsActive())
     GDBStub::TakeControl();
@@ -1252,8 +1264,10 @@ void MMU::GenerateDSIException(u32 effective_address, bool write)
     }
     if (m_system.IsPauseOnPanicMode())
     {
-      m_system.GetCPU().Break();
       m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+      m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Exception,
+                               .pc = m_ppc_state.pc,
+                               .exceptions = m_ppc_state.Exceptions});
     }
     return;
   }

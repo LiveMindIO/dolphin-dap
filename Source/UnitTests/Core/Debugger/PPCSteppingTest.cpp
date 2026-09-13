@@ -3,6 +3,8 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -163,5 +165,98 @@ TEST_F(PPCSteppingTest, InstructionOutCanIgnoreCodeBreakpointAtCurrentPc)
   Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Out,
                        Core::Debug::PPCStepGranularity::Instruction, options);
   EXPECT_EQ(state.pc, TEST_ADDRESS + 0x100);
+}
+
+TEST_F(PPCSteppingTest, StepOutCancellationIsNotReportedAsCompletion)
+{
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, NOP.data(), NOP.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  std::atomic<bool> cancelled{true};
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+
+  EXPECT_EQ(Core::Debug::StepPPC(System(), Core::Debug::PPCStepMode::Out,
+                                 Core::Debug::PPCStepGranularity::Instruction, options),
+            Core::Debug::PPCStepResult::NotStepped);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
+}
+
+TEST_F(PPCSteppingTest, RawBreakPublishesOnlyOnRunningToSteppingTransition)
+{
+  auto& cpu = System().GetCPU();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto client = cpu.GetExecutionState().RegisterClient(
+      [&](std::shared_ptr<const Core::Debug::ExecutionEvent> event) {
+        events.emplace_back(std::move(event));
+        cpu.SetStepping(true);
+      });
+  System().GetPPCState().pc = TEST_ADDRESS;
+  cpu.SetStepping(false);
+
+  cpu.Break();
+  cpu.Break();
+
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events.front()->stop_cause, Core::Debug::ExecutionStopCause::Unknown);
+  EXPECT_EQ(events.front()->pc, TEST_ADDRESS);
+  cpu.GetExecutionState().UnregisterClient(client);
+}
+
+TEST_F(PPCSteppingTest, BreakWithoutDebugStopTransitionsWithoutPublishing)
+{
+  auto& cpu = System().GetCPU();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto client = cpu.GetExecutionState().RegisterClient(
+      [&](std::shared_ptr<const Core::Debug::ExecutionEvent> event) {
+        events.emplace_back(std::move(event));
+      });
+  cpu.SetStepping(false);
+
+  cpu.BreakWithoutDebugStop();
+
+  EXPECT_TRUE(cpu.IsStepping());
+  EXPECT_TRUE(events.empty());
+  cpu.GetExecutionState().UnregisterClient(client);
+}
+
+TEST_F(PPCSteppingTest, ClassifiedBreakPublishesWhileAlreadyStepping)
+{
+  auto& cpu = System().GetCPU();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto client = cpu.GetExecutionState().RegisterClient(
+      [&](std::shared_ptr<const Core::Debug::ExecutionEvent> event) {
+        events.emplace_back(std::move(event));
+      });
+
+  cpu.Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
+             .pc = TEST_ADDRESS,
+             .code_breakpoint_address = TEST_ADDRESS});
+  cpu.Break({.cause = Core::Debug::ExecutionStopCause::Exception,
+             .pc = TEST_ADDRESS + 4,
+             .exceptions = 1});
+
+  ASSERT_EQ(events.size(), 2u);
+  EXPECT_EQ(events[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(events[1]->stop_cause, Core::Debug::ExecutionStopCause::Exception);
+  cpu.GetExecutionState().UnregisterClient(client);
+}
+
+TEST_F(PPCSteppingTest, CodeBreakpointPublishesExactlyOneClassifiedStop)
+{
+  auto& cpu = System().GetCPU();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto client = cpu.GetExecutionState().RegisterClient(
+      [&](std::shared_ptr<const Core::Debug::ExecutionEvent> event) {
+        events.emplace_back(std::move(event));
+      });
+  System().GetPPCState().pc = TEST_ADDRESS;
+  ASSERT_TRUE(System().GetPowerPC().GetBreakPoints().Add(TEST_ADDRESS));
+
+  EXPECT_TRUE(System().GetPowerPC().CheckAndHandleBreakPoints());
+
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events.front()->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(events.front()->code_breakpoint_address, TEST_ADDRESS);
+  cpu.GetExecutionState().UnregisterClient(client);
 }
 }  // namespace

@@ -124,7 +124,8 @@ std::string DescribeExceptions(u32 exceptions)
 DapDebugController::DapDebugController(Core::System& system)
     : m_system(system),
       m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient()),
-      m_memcheck_client_id(system.GetPowerPC().GetMemChecks().RegisterClient())
+      m_memcheck_client_id(system.GetPowerPC().GetMemChecks().RegisterClient()),
+      m_execution_client_id(system.GetCPU().GetExecutionState().RegisterClient())
 {
 }
 
@@ -132,17 +133,109 @@ DapDebugController::~DapDebugController()
 {
   m_system.GetPowerPC().GetBreakPoints().UnregisterClient(m_breakpoint_client_id);
   m_system.GetPowerPC().GetMemChecks().UnregisterClient(m_memcheck_client_id);
+  m_system.GetCPU().GetExecutionState().UnregisterClient(m_execution_client_id);
 }
 
-void DapDebugController::Continue()
+std::expected<void, std::string> DapDebugController::Continue()
 {
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation = execution.BeginOperation(m_execution_client_id,
+                                                  Core::Debug::ExecutionOperationKind::Continue);
+  if (!operation)
+    return std::unexpected(operation.error());
   m_system.GetPowerPC().ClearSteppingMemcheckHit();
   Core::SetState(m_system, Core::State::Running);
+  if (Core::GetState(m_system) != Core::State::Running)
+  {
+    execution.AbandonStep(*operation);
+    return std::unexpected("core did not resume");
+  }
+  return execution.PublishContinued(m_execution_client_id, *operation, m_system.GetPPCState().pc);
 }
 
-void DapDebugController::Pause()
+std::expected<void, std::string> DapDebugController::Pause()
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Pause);
+  if (!operation)
+    return std::unexpected(operation.error());
+  Core::SetState(m_system, Core::State::Paused);
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = m_system.GetPPCState().pc});
+  return {};
+}
+
+std::expected<void, std::string> DapDebugController::CancelActiveStep()
+{
+  return m_system.GetCPU().GetExecutionState().CancelActiveStep(m_execution_client_id);
+}
+
+void DapDebugController::PauseWithoutEvent()
 {
   Core::SetState(m_system, Core::State::Paused);
+}
+
+void DapDebugController::PublishEntryStop()
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Entry);
+  if (operation)
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Entry,
+                             .origin = m_execution_client_id,
+                             .operation_id = *operation,
+                             .pc = m_system.GetPPCState().pc});
+}
+
+void DapDebugController::SetExecutionEventCallback(
+    Core::Debug::ExecutionState::EventCallback callback)
+{
+  m_system.GetCPU().GetExecutionState().SetClientEventCallback(m_execution_client_id,
+                                                               std::move(callback));
+}
+
+std::expected<Core::Debug::ExecutionState::OperationId, std::string>
+DapDebugController::BeginStep(const Core::Debug::ExecutionOperationKind kind,
+                              std::atomic<bool>* const cancellation)
+{
+  return m_system.GetCPU().GetExecutionState().BeginOperation(m_execution_client_id, kind,
+                                                              cancellation);
+}
+
+void DapDebugController::PublishStepContinued(
+    const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  static_cast<void>(m_system.GetCPU().GetExecutionState().PublishContinued(
+      m_execution_client_id, operation_id, m_system.GetPPCState().pc));
+}
+
+void DapDebugController::CompleteStep(const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  if (!execution.IsOperationActive(operation_id))
+    return;
+  const u32 pc = m_system.GetPPCState().pc;
+  if (m_system.GetPowerPC().GetBreakPoints().IsAddressBreakPoint(pc))
+  {
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
+                             .origin = m_execution_client_id,
+                             .operation_id = operation_id,
+                             .pc = pc,
+                             .code_breakpoint_address = pc});
+    return;
+  }
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
+                           .origin = m_execution_client_id,
+                           .operation_id = operation_id,
+                           .pc = pc});
+}
+
+void DapDebugController::AbandonStep(const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  m_system.GetCPU().GetExecutionState().AbandonStep(operation_id);
 }
 
 bool DapDebugController::StepInto()
@@ -167,27 +260,28 @@ StepOverResult DapDebugController::StepOver()
   return StepOverResult::NotStepped;
 }
 
-void DapDebugController::StepSource(const bool step_over, const std::atomic<bool>& cancelled,
-                                    const std::chrono::milliseconds timeout,
-                                    const size_t instruction_cap)
+Core::Debug::PPCStepResult DapDebugController::StepSource(const bool step_over,
+                                                          const std::atomic<bool>& cancelled,
+                                                          const std::chrono::milliseconds timeout,
+                                                          const size_t instruction_cap)
 {
   Core::Debug::PPCStepOptions options;
   options.cancelled = &cancelled;
   options.timeout = timeout;
   options.instruction_cap = instruction_cap;
-  Core::Debug::StepPPC(m_system,
-                       step_over ? Core::Debug::PPCStepMode::Over : Core::Debug::PPCStepMode::Into,
-                       Core::Debug::PPCStepGranularity::SourceRow, options);
+  return Core::Debug::StepPPC(
+      m_system, step_over ? Core::Debug::PPCStepMode::Over : Core::Debug::PPCStepMode::Into,
+      Core::Debug::PPCStepGranularity::SourceRow, options);
 }
 
-void DapDebugController::StepOut(const std::atomic<bool>& cancelled,
-                                 std::chrono::milliseconds timeout_ms)
+Core::Debug::PPCStepResult DapDebugController::StepOut(const std::atomic<bool>& cancelled,
+                                                       std::chrono::milliseconds timeout_ms)
 {
   Core::Debug::PPCStepOptions options;
   options.cancelled = &cancelled;
   options.timeout = timeout_ms;
-  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
-                       Core::Debug::PPCStepGranularity::Instruction, options);
+  return Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
+                              Core::Debug::PPCStepGranularity::Instruction, options);
 }
 
 std::vector<BreakPoints::CodeBreakpoint>
@@ -1172,8 +1266,13 @@ DapDebugController::GetBreakpointLocations(const SourceReference source_referenc
   return locations;
 }
 
-void DapDebugController::Restart()
+std::expected<void, std::string> DapDebugController::Restart()
 {
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Restart);
+  if (!operation)
+    return std::unexpected(operation.error());
   Core::CPUThreadGuard guard(m_system);
   m_system.GetPowerPC().Reset();
   // DESNOTE(jbarber, 2026-07-21): PowerPC::Reset only clears PPC/MMU/cache
@@ -1183,14 +1282,41 @@ void DapDebugController::Restart()
   // lie -- the client would believe emulation halted while the CPU kept
   // running. Force Break + State::Paused here so the post-restart stop is
   // truthful, mirroring what Terminate does.
-  m_system.GetCPU().Break();
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Restart,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = m_system.GetPPCState().pc});
   Core::SetState(m_system, Core::State::Paused);
+  return {};
 }
 
-void DapDebugController::Terminate()
+std::expected<void, std::string> DapDebugController::Terminate()
 {
-  m_system.GetCPU().Break();
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation = execution.BeginOperation(m_execution_client_id,
+                                                  Core::Debug::ExecutionOperationKind::Terminate);
+  if (!operation)
+    return std::unexpected(operation.error());
+  m_system.GetCPU().BreakWithoutDebugStop();
   Core::SetState(m_system, Core::State::Paused);
+  execution.AbandonStep(*operation);
+  return {};
+}
+
+std::expected<void, std::string> DapDebugController::Goto(const u32 address)
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Goto);
+  if (!operation)
+    return std::unexpected(operation.error());
+  Core::SetState(m_system, Core::State::Paused);
+  SetPC(address);
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Goto,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = address});
+  return {};
 }
 
 void DapDebugController::ClearBreakpoints()

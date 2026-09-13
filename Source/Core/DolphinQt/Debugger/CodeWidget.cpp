@@ -23,9 +23,11 @@
 #include <QWidget>
 
 #include "Core/Core.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "Core/Debugger/PPCStack.h"
 #include "Core/Debugger/PPCStepping.h"
 #include "Core/HW/CPU.h"
+#include "Core/Host.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -40,7 +42,11 @@ static const QString BOX_SPLITTER_STYLESHEET = QStringLiteral(
 
 CodeWidget::CodeWidget(QWidget* parent)
     : QDockWidget(parent), m_system(Core::System::GetInstance()),
-      m_ppc_symbol_db(m_system.GetPPCSymbolDB())
+      m_ppc_symbol_db(m_system.GetPPCSymbolDB()),
+      m_execution_observer_id(m_system.GetCPU().GetExecutionState().RegisterClient(
+          [](std::shared_ptr<const Core::Debug::ExecutionEvent>) {
+            Core::QueueHostJob([](Core::System&) { Host_UpdateDisasmDialog(); }, true);
+          }))
 {
   setWindowTitle(tr("Code"));
   setObjectName(QStringLiteral("code"));
@@ -82,6 +88,7 @@ CodeWidget::CodeWidget(QWidget* parent)
 
 CodeWidget::~CodeWidget()
 {
+  m_system.GetCPU().GetExecutionState().UnregisterClient(m_execution_observer_id);
   auto& settings = Settings::GetQSettings();
 
   settings.setValue(QStringLiteral("codewidget/geometry"), saveGeometry());
@@ -552,8 +559,24 @@ void CodeWidget::Step()
 
   Core::Debug::PPCStepOptions options;
   options.instruction_timeout = std::chrono::milliseconds(20);
-  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Into,
-                       Core::Debug::PPCStepGranularity::Instruction, options);
+  auto& execution = cpu.GetExecutionState();
+  const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::StepInto);
+  if (!operation)
+  {
+    Core::DisplayMessage(tr("Another step is already in progress.").toStdString(), 2000);
+    return;
+  }
+  const Core::Debug::PPCStepResult result =
+      Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Into,
+                           Core::Debug::PPCStepGranularity::Instruction, options);
+  if (result == Core::Debug::PPCStepResult::NotStepped)
+    execution.AbandonStep(*operation);
+  else
+    cpu.Break({.cause = Core::Debug::ExecutionStopCause::Step,
+               .origin = cpu.GetHostExecutionClientId(),
+               .operation_id = *operation,
+               .pc = m_system.GetPPCState().pc});
   Core::DisplayMessage(tr("Step successful!").toStdString(), 2000);
   // Will get a UpdateDisasmDialog(), don't update the GUI here.
 
@@ -571,15 +594,32 @@ void CodeWidget::StepOver()
 
   Core::Debug::PPCStepOptions options;
   options.instruction_timeout = std::chrono::milliseconds(20);
+  auto& execution = cpu.GetExecutionState();
+  const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::StepOver);
+  if (!operation)
+  {
+    Core::DisplayMessage(tr("Another step is already in progress.").toStdString(), 2000);
+    return;
+  }
   const Core::Debug::PPCStepResult result =
       Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Over,
                            Core::Debug::PPCStepGranularity::Instruction, options);
   if (result == Core::Debug::PPCStepResult::Continuing)
   {
+    static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                                 m_system.GetPPCState().pc));
     Core::DisplayMessage(tr("Step over in progress...").toStdString(), 2000);
   }
   else
   {
+    if (result == Core::Debug::PPCStepResult::Stepped)
+      cpu.Break({.cause = Core::Debug::ExecutionStopCause::Step,
+                 .origin = cpu.GetHostExecutionClientId(),
+                 .operation_id = *operation,
+                 .pc = m_system.GetPPCState().pc});
+    else
+      execution.AbandonStep(*operation);
     Core::DisplayMessage(tr("Step successful!").toStdString(), 2000);
     if (m_branch_watch_dialog != nullptr)
       m_branch_watch_dialog->Update();
@@ -599,8 +639,26 @@ void CodeWidget::StepOut()
   Core::Debug::PPCStepOptions options;
   options.timeout = std::chrono::seconds(5);
   options.ignore_current_code_breakpoint = true;
-  Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
-                       Core::Debug::PPCStepGranularity::Instruction, options);
+  auto& execution = cpu.GetExecutionState();
+  const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::StepOut);
+  if (!operation)
+  {
+    Core::DisplayMessage(tr("Another step is already in progress.").toStdString(), 2000);
+    return;
+  }
+  static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                               m_system.GetPPCState().pc));
+  const Core::Debug::PPCStepResult result =
+      Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
+                           Core::Debug::PPCStepGranularity::Instruction, options);
+  if (result == Core::Debug::PPCStepResult::Stepped)
+    cpu.Break({.cause = Core::Debug::ExecutionStopCause::Step,
+               .origin = cpu.GetHostExecutionClientId(),
+               .operation_id = *operation,
+               .pc = m_system.GetPPCState().pc});
+  else if (result == Core::Debug::PPCStepResult::NotStepped)
+    execution.AbandonStep(*operation);
 
   emit Host::GetInstance()->UpdateDisasmDialog();
 

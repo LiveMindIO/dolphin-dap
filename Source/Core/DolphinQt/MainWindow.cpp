@@ -52,6 +52,7 @@
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/Core.h"
 #include "Core/FreeLookManager.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GCKeyboard.h"
@@ -65,6 +66,7 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/NetPlayServer.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "Core/WiiUtils.h"
@@ -877,7 +879,18 @@ void MainWindow::Play(const std::optional<std::string>& savestate_path)
   // Otherwise, prompt for a new game.
   if (Core::GetState(m_system) == Core::State::Paused)
   {
-    Core::SetState(m_system, Core::State::Running);
+    auto& cpu = m_system.GetCPU();
+    auto& execution = cpu.GetExecutionState();
+    if (!execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+      return;
+    const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                    Core::Debug::ExecutionOperationKind::Continue);
+    if (operation)
+    {
+      Core::SetState(m_system, Core::State::Running);
+      static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                                   m_system.GetPPCState().pc));
+    }
   }
   else
   {
@@ -905,7 +918,20 @@ void MainWindow::Play(const std::optional<std::string>& savestate_path)
 
 void MainWindow::Pause()
 {
-  Core::SetState(m_system, Core::State::Paused);
+  auto& cpu = m_system.GetCPU();
+  auto& execution = cpu.GetExecutionState();
+  if (!execution.CancelActiveStep(cpu.GetHostExecutionClientId()))
+    return;
+  const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::Pause);
+  if (operation)
+  {
+    Core::SetState(m_system, Core::State::Paused);
+    cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+               .origin = cpu.GetHostExecutionClientId(),
+               .operation_id = *operation,
+               .pc = m_system.GetPPCState().pc});
+  }
 }
 
 void MainWindow::TogglePause()

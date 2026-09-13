@@ -9,6 +9,8 @@
 // serialization -- against a real (un-booted) Core::System, no ISO required.
 
 #include <array>
+#include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -34,6 +36,7 @@
 #include "Core/Debugger/DAP/DapTransport.h"
 #include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/HW/AddressSpace.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
@@ -134,7 +137,7 @@ protected:
       // CPUThreadGuards from trying to PauseAndLock an un-booted core.
       Core::DeclareAsCPUThread();
       DAP::DapTransport transport(m_fds[1]);
-      DAP::RunSession(transport, Core::System::GetInstance());
+      DAP::RunSession(transport, Core::System::GetInstance(), &m_session_test_hooks);
       Core::UndeclareAsCPUThread();
     });
   }
@@ -206,6 +209,7 @@ protected:
 
   int m_fds[2] = {-1, -1};
   std::thread m_server;
+  DAP::SessionTestHooks m_session_test_hooks;
 };
 
 TEST_F(DapSessionTest, InitializeAdvertisesCapabilities)
@@ -1308,6 +1312,49 @@ TEST_F(DapSessionTest, SetDataBreakpointsRangedLengthInstallsRangedWatchpoint)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, RangedDataStopCorrelatesInteriorAccessWithBreakpointId)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({
+    "seq": 3,
+    "type": "request",
+    "command": "setDataBreakpoints",
+    "arguments": {
+      "breakpoints": [{"dataId": "0x00003100", "accessType": "write", "length": 16}]
+    }
+  })");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto& breakpoints =
+      response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(breakpoints.size(), 1u);
+  const double breakpoint_id = breakpoints[0].get<picojson::object>().at("id").get<double>();
+
+  Core::System::GetInstance().GetCPU().GetExecutionState().PublishStopped(
+      {.cause = Core::Debug::ExecutionStopCause::DataBreakpoint,
+       .pc = CODE_ADDRESS,
+       .data_address = CODE_ADDRESS + 8,
+       .data_size = 4,
+       .watchpoint_start = CODE_ADDRESS,
+       .watchpoint_end = CODE_ADDRESS + 15,
+       .data_access = Core::Debug::DataAccessType::Write});
+
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  const auto& body = stopped->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("reason").to_str(), "data breakpoint");
+  const auto& hit_ids = body.at("hitBreakpointIds").get<picojson::array>();
+  ASSERT_EQ(hit_ids.size(), 1u);
+  EXPECT_EQ(hit_ids[0].get<double>(), breakpoint_id);
+
+  client.Send(R"({"seq":9,"type":"request","command":"disconnect"})");
+  (void)client.Receive();
+}
+
 TEST_F(DapSessionTest, StackTraceWithUnknownThreadFails)
 {
   TestClient client(m_client_fd());
@@ -1336,9 +1383,7 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
   TestClient client(m_client_fd());
   Handshake(client);
 
-  // next, stepIn and stepOut must all be recognized (stepOut previously fell
-  // through to the "unsupported" error) and each acknowledges with a response
-  // followed by a stopped(step) event.
+  // next and stepIn each acknowledge with a response followed by a stopped(step) event.
   const auto expect_step = [&](std::string_view command) {
     client.Send(
         std::string(R"({"type":"request","seq":3,"command":")").append(command).append(R"("})"));
@@ -1348,6 +1393,10 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
     EXPECT_EQ(response->at("command").to_str(), command);
     EXPECT_TRUE(response->at("success").get<bool>());
 
+    const auto continued = client.Receive();
+    ASSERT_TRUE(continued.has_value());
+    EXPECT_EQ(continued->at("event").to_str(), "continued");
+
     const auto stopped = client.Receive();
     ASSERT_TRUE(stopped.has_value());
     EXPECT_EQ(stopped->at("event").to_str(), "stopped");
@@ -1356,7 +1405,6 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
 
   expect_step("stepIn");
   expect_step("next");
-  expect_step("stepOut");
 
   client.Send(R"({
     "seq": 9,
@@ -1364,6 +1412,134 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
     "command": "disconnect"
   })");
   (void)client.Receive();
+}
+
+class DapAsyncStepOrderingTest : public DapSessionTest
+{
+protected:
+  void SetUp() override
+  {
+    m_session_test_hooks.async_step_worker_joined = [this] {
+      std::unique_lock lock(m_join_mutex);
+      m_worker_joined = true;
+      m_join_condition.notify_one();
+      m_join_condition.wait(lock, [this] { return m_release_join; });
+    };
+    DapSessionTest::SetUp();
+  }
+
+  void TearDown() override
+  {
+    ReleaseJoinedWorker();
+    DapSessionTest::TearDown();
+  }
+
+  bool WaitForWorkerJoin()
+  {
+    std::unique_lock lock(m_join_mutex);
+    return m_join_condition.wait_for(lock, std::chrono::seconds(5),
+                                     [this] { return m_worker_joined; });
+  }
+
+  void ReleaseJoinedWorker()
+  {
+    {
+      std::lock_guard lock(m_join_mutex);
+      m_release_join = true;
+    }
+    m_join_condition.notify_one();
+  }
+
+private:
+  std::mutex m_join_mutex;
+  std::condition_variable m_join_condition;
+  bool m_worker_joined = false;
+  bool m_release_join = false;
+};
+
+TEST_F(DapAsyncStepOrderingTest, CompletedStepStopPrecedesAlreadyReadableRequestResponse)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({"seq":20,"type":"request","command":"stepIn","arguments":{"threadId":1}})");
+  const auto step_response = client.Receive();
+  ASSERT_TRUE(step_response.has_value());
+  ASSERT_EQ(step_response->at("type").to_str(), "response");
+  ASSERT_TRUE(WaitForWorkerJoin());
+
+  client.Send(R"({"seq":21,"type":"request","command":"threads"})");
+  ReleaseJoinedWorker();
+
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued.has_value());
+  EXPECT_EQ(continued->at("event").to_str(), "continued");
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "step");
+  const auto threads_response = client.Receive();
+  ASSERT_TRUE(threads_response.has_value());
+  EXPECT_EQ(threads_response->at("type").to_str(), "response");
+  EXPECT_EQ(threads_response->at("command").to_str(), "threads");
+}
+
+TEST_F(DapSessionTest, DisconnectCancelsAndReleasesActiveStep)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  auto& system = Core::System::GetInstance();
+  const std::array<u8, 4> loop{{0x48, 0x00, 0x00, 0x00}};
+  system.GetMemory().CopyToEmu(CODE_ADDRESS, loop.data(), loop.size());
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().npc = CODE_ADDRESS;
+
+  client.Send(R"({"seq":20,"type":"request","command":"stepOut","arguments":{"threadId":1}})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued.has_value());
+  EXPECT_EQ(continued->at("event").to_str(), "continued");
+  shutdown(m_client_fd(), SHUT_RDWR);
+  ASSERT_TRUE(m_server.joinable());
+  m_server.join();
+
+  auto& execution = system.GetCPU().GetExecutionState();
+  const auto operation = execution.BeginOperation(system.GetCPU().GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::StepInto);
+  ASSERT_TRUE(operation.has_value());
+  execution.AbandonStep(*operation);
+}
+
+TEST_F(DapSessionTest, PauseCancelsAndJoinsActiveStepBeforePublishingStop)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  auto& system = Core::System::GetInstance();
+  const std::array<u8, 4> loop{{0x48, 0x00, 0x00, 0x00}};
+  system.GetMemory().CopyToEmu(CODE_ADDRESS, loop.data(), loop.size());
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().npc = CODE_ADDRESS;
+
+  client.Send(R"({"seq":20,"type":"request","command":"stepOut","arguments":{"threadId":1}})");
+  ASSERT_TRUE(client.Receive().has_value());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued.has_value());
+  EXPECT_EQ(continued->at("event").to_str(), "continued");
+
+  client.Send(R"({"seq":21,"type":"request","command":"pause","arguments":{"threadId":1}})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->at("type").to_str(), "response");
+  EXPECT_TRUE(response->at("success").get<bool>());
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "pause");
+  EXPECT_FALSE(system.GetCPU().GetExecutionState().GetActiveStepOrigin().has_value());
 }
 
 TEST_F(DapSessionTest, SetInstructionBreakpointsInstallsCodeBreakpoint)
@@ -2485,6 +2661,120 @@ protected:
   int m_second_fds[2] = {-1, -1};
   std::thread m_second_server;
 };
+
+TEST_F(DapMultiSessionTest, ExecutionEventsFanOutWithRequesterResponseFirst)
+{
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  auto& cpu = Core::System::GetInstance().GetCPU();
+  auto& execution = cpu.GetExecutionState();
+  const auto continue_operation = execution.BeginOperation(
+      cpu.GetHostExecutionClientId(), Core::Debug::ExecutionOperationKind::Continue);
+  ASSERT_TRUE(continue_operation.has_value());
+  ASSERT_TRUE(
+      execution.PublishContinued(cpu.GetHostExecutionClientId(), *continue_operation, CODE_ADDRESS)
+          .has_value());
+  const auto first_continued = first.Receive();
+  const auto second_continued = second.Receive();
+  ASSERT_TRUE(first_continued.has_value());
+  ASSERT_TRUE(second_continued.has_value());
+  EXPECT_EQ(first_continued->at("event").to_str(), "continued");
+  EXPECT_EQ(second_continued->at("event").to_str(), "continued");
+
+  second.Send(R"({"seq":21,"type":"request","command":"pause","arguments":{"threadId":1}})");
+  const auto pause_response = second.Receive();
+  ASSERT_TRUE(pause_response.has_value());
+  EXPECT_EQ(pause_response->at("type").to_str(), "response");
+  EXPECT_EQ(pause_response->at("command").to_str(), "pause");
+  const auto second_stopped = second.Receive();
+  const auto first_stopped = first.Receive();
+  ASSERT_TRUE(second_stopped.has_value());
+  ASSERT_TRUE(first_stopped.has_value());
+  EXPECT_EQ(second_stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(first_stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(second_stopped->at("body").get<picojson::object>().at("reason").to_str(), "pause");
+  EXPECT_EQ(first_stopped->at("body").get<picojson::object>().at("reason").to_str(), "pause");
+}
+
+TEST_F(DapMultiSessionTest, TerminateWhileRunningPublishesOnlyRequesterTerminatedEvent)
+{
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  auto& cpu = Core::System::GetInstance().GetCPU();
+  cpu.SetStepping(false);
+  second.Send(R"({"seq":21,"type":"request","command":"terminate","arguments":{}})");
+
+  const auto terminate_response = second.Receive();
+  ASSERT_TRUE(terminate_response.has_value());
+  EXPECT_EQ(terminate_response->at("type").to_str(), "response");
+  EXPECT_EQ(terminate_response->at("command").to_str(), "terminate");
+  const auto terminated = second.Receive();
+  ASSERT_TRUE(terminated.has_value());
+  EXPECT_EQ(terminated->at("event").to_str(), "terminated");
+
+  first.Send(R"({"seq":22,"type":"request","command":"threads"})");
+  const auto first_response = first.Receive();
+  ASSERT_TRUE(first_response.has_value());
+  EXPECT_EQ(first_response->at("type").to_str(), "response");
+  EXPECT_EQ(first_response->at("command").to_str(), "threads");
+}
+
+TEST_F(DapMultiSessionTest, ConcurrentStepIsRejectedAcrossSessions)
+{
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  auto& system = Core::System::GetInstance();
+  auto& execution = system.GetCPU().GetExecutionState();
+  const auto active = execution.BeginOperation(system.GetCPU().GetHostExecutionClientId(),
+                                               Core::Debug::ExecutionOperationKind::StepOut);
+  ASSERT_TRUE(active.has_value());
+
+  second.Send(R"({"seq":21,"type":"request","command":"stepOut","arguments":{"threadId":1}})");
+  const auto rejected = second.Receive();
+  ASSERT_TRUE(rejected.has_value());
+  EXPECT_FALSE(rejected->at("success").get<bool>());
+  EXPECT_EQ(rejected->at("message").to_str(), "step already in progress");
+  execution.AbandonStep(*active);
+}
+
+TEST_F(DapMultiSessionTest, MutatingRequestsRejectAnotherClientsActiveStep)
+{
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  auto& system = Core::System::GetInstance();
+  auto& execution = system.GetCPU().GetExecutionState();
+  const auto active = execution.BeginOperation(system.GetCPU().GetHostExecutionClientId(),
+                                               Core::Debug::ExecutionOperationKind::StepOut);
+  ASSERT_TRUE(active.has_value());
+
+  const std::array requests{
+      R"({"seq":21,"type":"request","command":"continue","arguments":{"threadId":1}})",
+      R"({"seq":22,"type":"request","command":"goto","arguments":{"threadId":1,"targetId":12544}})",
+      R"({"seq":23,"type":"request","command":"restart","arguments":{}})",
+      R"({"seq":24,"type":"request","command":"terminate","arguments":{}})"};
+  for (const char* request : requests)
+  {
+    second.Send(request);
+    const auto rejected = second.Receive();
+    ASSERT_TRUE(rejected.has_value());
+    EXPECT_FALSE(rejected->at("success").get<bool>());
+    EXPECT_EQ(rejected->at("message").to_str(), "step is owned by another debugger client");
+    EXPECT_TRUE(execution.IsOperationActive(*active));
+  }
+  execution.AbandonStep(*active);
+}
 
 TEST_F(DapMultiSessionTest, BreakpointsSynchronizeWithoutCrossClientRemoval)
 {
