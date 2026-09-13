@@ -1034,6 +1034,12 @@ bool PPCSymbolDB::LoadMap(const Core::CPUThreadGuard& guard, std::string filenam
     }
   }
 
+  if (good_count == 0)
+  {
+    ERROR_LOG_FMT(SYMBOLS, "No valid symbols found in map file '{}'", filename);
+    return false;
+  }
+
   Index(&new_functions);
   DetermineNoteLayers(&new_notes);
   FillInCallers(&new_functions);

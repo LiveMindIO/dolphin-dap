@@ -28,6 +28,7 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Core/Boot/ElfReader.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
@@ -281,19 +282,47 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
 
   auto& ppc_symbol_db = system.GetPPCSymbolDB();
 
-  ppc_symbol_db.ClearSourceLineInfo();
+  const bool had_source_line_info = ppc_symbol_db.HasSourceLineInfo();
+  bool symbols_changed = ppc_symbol_db.Clear() || had_source_line_info;
   ppc_symbol_db.SetSourcePaths(SplitString(Config::Get(Config::MAIN_DEBUG_SOURCE_PATHS), ';'));
 
-  bool symbols_changed = false;
-  if (ppc_symbol_db.LoadMapOnBoot(guard))
+  const std::string symbol_map = Config::Get(Config::MAIN_DEBUG_SYMBOL_MAP);
+  if (symbol_map.empty())
+  {
+    if (ppc_symbol_db.LoadMapOnBoot(guard))
+      symbols_changed = true;
+  }
+  else if (ppc_symbol_db.LoadMap(guard, symbol_map))
+  {
     symbols_changed = true;
+  }
+  else
+  {
+    ERROR_LOG_FMT(SYMBOLS, "Failed to load configured symbol map '{}'", symbol_map);
+  }
   if (Core::Debug::ImportConfiguredDwarfElf(guard, ppc_symbol_db))
     symbols_changed = true;
   if (Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
     symbols_changed = true;
+  HLE::Reload(system);
+
+  const std::string alternate_elf = Config::Get(Config::MAIN_DEBUG_ALTERNATE_ELF);
+  if (!alternate_elf.empty() && !Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE))
+  {
+    const ElfReader reader(alternate_elf);
+    if (reader.IsPPCExecutable() &&
+        reader.LoadSymbols(guard, ppc_symbol_db, PathToFileName(alternate_elf)))
+    {
+      symbols_changed = true;
+    }
+    else
+    {
+      ERROR_LOG_FMT(SYMBOLS, "Failed to load configured alternate ELF '{}'", alternate_elf);
+    }
+  }
+
   if (symbols_changed)
     Host_PPCSymbolsChanged();
-  HLE::Reload(system);
 
   PatchEngine::Reload(system);
   WC24PatchEngine::Reload();

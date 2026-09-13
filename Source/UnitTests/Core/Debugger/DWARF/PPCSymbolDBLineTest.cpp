@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Common/FileUtil.h"
 #include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
@@ -76,6 +77,26 @@ TEST_F(PPCSymbolDBLineTest, ClearRemovesSourceLineInfo)
   ASSERT_TRUE(SymbolDB().HasSourceLineInfo());
   SymbolDB().Clear();
   EXPECT_FALSE(SymbolDB().HasSourceLineInfo());
+}
+
+TEST_F(PPCSymbolDBLineTest, MalformedMapPreservesExistingSymbols)
+{
+  constexpr u32 function_address = 0x00004100;
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  Core::System::GetInstance().GetMemory().CopyToEmu(function_address, code.data(), code.size());
+  Core::CPUThreadGuard guard(Core::System::GetInstance());
+  SymbolDB().AddKnownSymbol(guard, function_address, code.size(), "existing", "existing.o");
+
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  const std::string map_path = temp_dir + "/malformed.map";
+  ASSERT_TRUE(File::WriteStringToFile(map_path, "not a symbol map\n"));
+
+  EXPECT_FALSE(SymbolDB().LoadMap(guard, map_path));
+  ASSERT_NE(SymbolDB().GetSymbolFromAddr(function_address), nullptr);
+  EXPECT_EQ(SymbolDB().GetSymbolFromAddr(function_address)->name, "existing");
+
+  File::DeleteDirRecursively(temp_dir);
 }
 
 TEST_F(PPCSymbolDBLineTest, DwarfDebugInfoUsesSharedImmutableStorage)

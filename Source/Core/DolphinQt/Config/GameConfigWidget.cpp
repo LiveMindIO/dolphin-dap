@@ -3,6 +3,8 @@
 
 #include "DolphinQt/Config/GameConfigWidget.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -27,8 +29,11 @@
 #include "DolphinQt/Config/ConfigControls/ConfigFloatSlider.h"
 #include "DolphinQt/Config/ConfigControls/ConfigInteger.h"
 #include "DolphinQt/Config/ConfigControls/ConfigRadio.h"
+#include "DolphinQt/Config/ConfigControls/ConfigText.h"
 #include "DolphinQt/Config/GameConfigEdit.h"
 #include "DolphinQt/Config/Graphics/GraphicsPane.h"
+#include "DolphinQt/QtUtils/DolphinFileDialog.h"
+#include "DolphinQt/QtUtils/NonDefaultQPushButton.h"
 #include "DolphinQt/QtUtils/QtUtils.h"
 #include "DolphinQt/QtUtils/WrapInScrollArea.h"
 
@@ -177,6 +182,53 @@ void GameConfigWidget::CreateWidgets()
   auto* general_widget = new QWidget;
   general_widget->setLayout(general_layout);
 
+  // Debugging
+  auto* debugging_layout = new QGridLayout;
+  debugging_layout->setColumnStretch(1, 1);
+  auto* debugging_widget = new QWidget;
+  debugging_widget->setLayout(debugging_layout);
+
+  m_debug_symbol_map = new ConfigText(Config::MAIN_DEBUG_SYMBOL_MAP, layer);
+  m_debug_alternate_elf = new ConfigText(Config::MAIN_DEBUG_ALTERNATE_ELF, layer);
+  m_debug_replace_disc_executable =
+      new ConfigBool(tr("Replace the disc executable with the alternate ELF"),
+                     Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE, layer);
+  m_debug_replace_disc_executable->SetDescription(
+      tr("Runs the disc bootstrap and apploader, then overlays the alternate ELF and starts at its "
+         "entry point. When disabled, Dolphin only imports symbols and DWARF from the ELF. Changes "
+         "take effect the next time the game is started."));
+
+  auto* map_browse = new NonDefaultQPushButton(QStringLiteral("..."));
+  auto* elf_browse = new NonDefaultQPushButton(QStringLiteral("..."));
+  const auto initial_directory = [this](const ConfigText* edit) {
+    if (!edit->text().isEmpty())
+      return QFileInfo(edit->text()).absolutePath();
+    return QFileInfo(QString::fromStdString(m_game.GetFilePath())).absolutePath();
+  };
+  connect(map_browse, &QPushButton::clicked, this, [this, initial_directory] {
+    const QString path = DolphinFileDialog::getOpenFileName(this, tr("Select Memory Map File"),
+                                                            initial_directory(m_debug_symbol_map),
+                                                            tr("Map Files (*.map);;All Files (*)"));
+    if (!path.isEmpty())
+      m_debug_symbol_map->SetTextAndUpdate(QDir::toNativeSeparators(path));
+  });
+  connect(elf_browse, &QPushButton::clicked, this, [this, initial_directory] {
+    const QString path = DolphinFileDialog::getOpenFileName(
+        this, tr("Select Alternate ELF"), initial_directory(m_debug_alternate_elf),
+        tr("ELF Files (*.elf);;All Files (*)"));
+    if (!path.isEmpty())
+      m_debug_alternate_elf->SetTextAndUpdate(QDir::toNativeSeparators(path));
+  });
+
+  debugging_layout->addWidget(new QLabel(tr("Memory map file:")), 0, 0);
+  debugging_layout->addWidget(m_debug_symbol_map, 0, 1);
+  debugging_layout->addWidget(map_browse, 0, 2);
+  debugging_layout->addWidget(new QLabel(tr("Alternate ELF:")), 1, 0);
+  debugging_layout->addWidget(m_debug_alternate_elf, 1, 1);
+  debugging_layout->addWidget(elf_browse, 1, 2);
+  debugging_layout->addWidget(m_debug_replace_disc_executable, 2, 0, 1, 3);
+  debugging_layout->setRowStretch(3, 1);
+
   // Editor tab
   auto* advanced_layout = new QVBoxLayout;
 
@@ -207,6 +259,19 @@ void GameConfigWidget::CreateWidgets()
 
   auto* const gfx_widget = new GraphicsPane{nullptr, m_layer.get()};
   tab_widget->addTab(gfx_widget, tr("Graphics"));
+
+  const bool is_disc = m_game.GetPlatform() == DiscIO::Platform::GameCubeDisc ||
+                       m_game.GetPlatform() == DiscIO::Platform::Triforce ||
+                       m_game.GetPlatform() == DiscIO::Platform::WiiDisc;
+  if (is_disc)
+    tab_widget->addTab(debugging_widget, tr("Debugging"));
+  else
+  {
+    delete debugging_widget;
+    m_debug_symbol_map = nullptr;
+    m_debug_alternate_elf = nullptr;
+    m_debug_replace_disc_executable = nullptr;
+  }
 
   const int editor_index = tab_widget->addTab(advanced_widget, tr("Editor"));
 
@@ -329,6 +394,18 @@ void GameConfigWidget::LoadSettings()
     }
   };
 
+  auto update_string = [this](ConfigText* config) {
+    const Config::Location& setting = config->GetLocation();
+    if (m_layer->Exists(setting) || !m_global_layer->Exists(setting))
+      return;
+    const std::optional<std::string> value = m_global_layer->Get<std::string>(setting);
+    if (value)
+    {
+      const QSignalBlocker blocker(config);
+      config->setText(QString::fromStdString(*value));
+    }
+  };
+
   for (ConfigBool* config : {m_enable_dual_core, m_enable_mmu, m_enable_fprf, m_sync_gpu,
                              m_use_dsp_hle, m_use_monoscopic_shadows})
   {
@@ -336,6 +413,12 @@ void GameConfigWidget::LoadSettings()
   }
 
   update_bool(m_emulate_disc_speed, true);
+  if (m_debug_replace_disc_executable)
+  {
+    update_bool(m_debug_replace_disc_executable);
+    update_string(m_debug_symbol_map);
+    update_string(m_debug_alternate_elf);
+  }
 
   update_int(m_depth_slider);
   update_int(m_convergence_slider);
@@ -364,6 +447,8 @@ void GameConfigWidget::SetItalics()
   for (auto* config : findChildren<ConfigChoice*>())
     italics(config);
   for (auto* config : findChildren<ConfigStringChoice*>())
+    italics(config);
+  for (auto* config : findChildren<ConfigText*>())
     italics(config);
 
   for (auto* config : findChildren<ConfigComplexChoice*>())

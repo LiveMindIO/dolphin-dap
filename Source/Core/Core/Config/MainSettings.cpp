@@ -578,6 +578,10 @@ const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF{{System::Main, "Debug", "JitR
                                                    false};
 const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING{{System::Main, "Debug", "JitEnableProfiling"},
                                                  false};
+const Info<std::string> MAIN_DEBUG_SYMBOL_MAP{{System::Main, "Debug", "SymbolMap"}, ""};
+const Info<std::string> MAIN_DEBUG_ALTERNATE_ELF{{System::Main, "Debug", "AlternateElf"}, ""};
+const Info<bool> MAIN_DEBUG_REPLACE_DISC_EXECUTABLE{
+    {System::Main, "Debug", "ReplaceDiscExecutable"}, false};
 const Info<std::string> MAIN_DEBUG_DWARF_ELF{{System::Main, "Debug", "DwarfElf"}, ""};
 const Info<std::string> MAIN_DEBUG_ENTRYPOINTS{{System::Main, "Debug", "Entrypoints"}, ""};
 const Info<std::string> MAIN_DEBUG_SOURCE_PATHS{{System::Main, "Debug", "SourcePaths"}, ""};

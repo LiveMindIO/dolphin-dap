@@ -111,6 +111,9 @@ struct BootParameters
     std::string path;
     std::unique_ptr<DiscIO::VolumeDisc> volume;
     std::vector<std::string> auto_disc_change_paths;
+    std::string alternate_elf_path;
+    std::unique_ptr<BootExecutableReader> alternate_elf;
+    bool replace_executable = false;
   };
 
   struct Executable

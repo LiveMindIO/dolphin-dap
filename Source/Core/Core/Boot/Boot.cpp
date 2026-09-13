@@ -541,7 +541,26 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (!EmulatedBS2(system, guard, system.IsWii(), *volume, riivolution_patches))
         return false;
 
+      if (disc.alternate_elf && disc.replace_executable)
+      {
+        if (!disc.alternate_elf->LoadIntoMemory(system))
+        {
+          PanicAlertFmtT("Failed to load the alternate ELF to memory.");
+          return false;
+        }
+        system.GetPPCState().pc = disc.alternate_elf->GetEntryPoint();
+      }
+
       SConfig::OnTitleDirectlyBooted(guard);
+
+      if (disc.alternate_elf &&
+          disc.alternate_elf->LoadSymbols(guard, system.GetPPCSymbolDB(),
+                                          PathToFileName(disc.alternate_elf_path)))
+      {
+        if (disc.replace_executable)
+          HLE::PatchFunctions(system);
+        Host_PPCSymbolsChanged();
+      }
       return true;
     }
 

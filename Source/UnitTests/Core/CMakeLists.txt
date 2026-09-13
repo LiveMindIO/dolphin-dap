@@ -4,6 +4,7 @@ add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(ElfReaderTest Boot/ElfReaderTest.cpp)
 target_sources(ElfReaderTest PRIVATE Debugger/DWARF/DwarfTestFixture.h)
+add_dolphin_test(GameConfigLoaderTest ConfigLoaders/GameConfigLoaderTest.cpp)
 
 add_dolphin_test(DapFramingTest Debugger/DAP/DapFramingTest.cpp)
 add_dolphin_test(DapJsonTest Debugger/DAP/DapJsonTest.cpp)

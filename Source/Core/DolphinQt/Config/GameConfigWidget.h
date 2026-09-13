@@ -21,6 +21,7 @@ class ConfigBool;
 class ConfigInteger;
 class ConfigFloatSlider;
 class ConfigStringChoice;
+class ConfigText;
 class QPushButton;
 class QTabWidget;
 
@@ -48,6 +49,10 @@ private:
   ConfigBool* m_emulate_disc_speed;
   ConfigBool* m_use_dsp_hle;
   ConfigBool* m_use_monoscopic_shadows;
+  ConfigBool* m_debug_replace_disc_executable;
+
+  ConfigText* m_debug_symbol_map;
+  ConfigText* m_debug_alternate_elf;
 
   ConfigStringChoice* m_deterministic_dual_core;
   ConfigFloatSlider* m_depth_slider;
