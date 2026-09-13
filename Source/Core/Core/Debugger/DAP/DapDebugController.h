@@ -217,9 +217,12 @@ public:
   bool UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints,
                                     std::string* error = nullptr);
   void SetBreakpointEventCallback(BreakPoints::EventCallback callback);
+  void SetDataBreakpointEventCallback(MemChecks::EventCallback callback);
   BreakPoints::ClientId GetBreakpointClientId() const { return m_breakpoint_client_id; }
+  MemChecks::ClientId GetMemCheckClientId() const { return m_memcheck_client_id; }
   void ClearCodeBreakpoints();
-  void SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
+  std::expected<void, std::string>
+  SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
   // Evaluates a PPC debugger expression (same syntax as breakpoint conditions).
   std::optional<std::string> EvaluateExpression(std::string_view expression);
 
@@ -239,11 +242,10 @@ public:
                                                          int start_line, int end_line);
   void Restart();
   void Terminate();
-  // Clears this controller's owned code breakpoints and the still-global data
-  // breakpoint store. Memory watchpoint ownership is a later slice.
+  // Clears this controller's owned code and data breakpoints.
   void ClearBreakpoints();
   // Installs a hardware-level write freeze on [address, address+count) via
-  // a `is_freeze` TMemCheck. The emulated CPU's stores to this range are
+  // a private MemChecks freeze range. The emulated CPU's stores to this range are
   // silently dropped at the MMU layer (MMU::Write<T> returns before
   // WriteToHardware). The frozen `value` is written to RAM immediately so
   // reads return the frozen bytes. A lightweight field-rate Tick in
@@ -324,9 +326,10 @@ private:
 
   Core::System& m_system;
   BreakPoints::ClientId m_breakpoint_client_id;
+  MemChecks::ClientId m_memcheck_client_id;
 
   // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
-  // `is_freeze` TMemCheck in the global MemChecks store (for MMU-level write
+  // private range in the global MemChecks store (for MMU-level write
   // suppression + JIT de-opt) and tracks the (address, count, id) here so
   // RemoveFreeze/ClearFreezes can tear it down. The frozen value itself is
   // owned by RealtimeWatchSampler (which needs it for the field-rate DMA
@@ -337,6 +340,7 @@ private:
     u32 freeze_id = 0;
     u32 address = 0;
     u32 count = 0;
+    MemChecks::FreezeId registry_id = 0;
   };
   std::vector<FreezeEntry> m_freezes;
   u32 m_next_freeze_id = 1;

@@ -333,8 +333,7 @@ private:
   void GenerateDSIException(u32 effective_address, bool write);
   void GenerateISIException(u32 effective_address);
 
-  // Returns true when the access hits a `is_freeze` memcheck and `write`
-  // is true — signals callers to suppress the store (skip WriteToHardware).
+  // Returns true when a write overlaps a private freeze range, signaling callers to suppress it.
   bool Memcheck(u32 address, u64 var, bool write, size_t size);
 
   void ClearPageTable();

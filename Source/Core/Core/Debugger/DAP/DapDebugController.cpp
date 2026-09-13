@@ -123,13 +123,15 @@ std::string DescribeExceptions(u32 exceptions)
 
 DapDebugController::DapDebugController(Core::System& system)
     : m_system(system),
-      m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient())
+      m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient()),
+      m_memcheck_client_id(system.GetPowerPC().GetMemChecks().RegisterClient())
 {
 }
 
 DapDebugController::~DapDebugController()
 {
   m_system.GetPowerPC().GetBreakPoints().UnregisterClient(m_breakpoint_client_id);
+  m_system.GetPowerPC().GetMemChecks().UnregisterClient(m_memcheck_client_id);
 }
 
 void DapDebugController::Continue()
@@ -216,6 +218,12 @@ void DapDebugController::SetBreakpointEventCallback(BreakPoints::EventCallback c
 {
   m_system.GetPowerPC().GetBreakPoints().SetClientEventCallback(m_breakpoint_client_id,
                                                                 std::move(callback));
+}
+
+void DapDebugController::SetDataBreakpointEventCallback(MemChecks::EventCallback callback)
+{
+  m_system.GetPowerPC().GetMemChecks().SetClientEventCallback(m_memcheck_client_id,
+                                                              std::move(callback));
 }
 
 std::optional<u32>
@@ -335,33 +343,11 @@ bool DapDebugController::UpdateInstructionBreakpoints(
   return result.has_value();
 }
 
-void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
+std::expected<void, std::string>
+DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
 {
-  // DESNOTE(jbarber, 2026-07-21): Dolphin has a single global memcheck store
-  // tied to the one emulated PPC core, so installing this client's list
-  // replaces the global set. Concurrent DAP clients on the same core (a rare
-  // multi-client setup) will clobber each other's watchpoints here; DAP and
-  // GDB are mutually exclusive, and the typical flow is one client per core.
-  // DESNOTE(jbarber, 2026-07-26): memchecks.Clear() also wipes freeze memchecks
-  // installed by dolphin_freeze. Clear m_freezes so a later RemoveFreeze /
-  // dolphin_unfreeze safely returns false instead of calling
-  // MemChecks::Remove at a stale address and deleting an unrelated data
-  // watchpoint at the same address. The session's m_watch_to_freeze map
-  // becomes stale (freeze_ids no longer in m_freezes), but HandleUnfreeze
-  // and HandleRealtimeWatchCancel both handle RemoveFreeze returning false
-  // gracefully. The RealtimeWatchSampler's field-rate Tick remains as a
-  // fallback, so the frozen value is still restored on DMA drift — only the
-  // MMU-level CPU write suppression is lost (collateral damage of the global
-  // memcheck store being wiped). Bugbot #77.
-  // DESNOTE(jbarber, 2026-07-26): Clear() and Add() each take their own
-  // CPUThreadGuard. Since the DAP session runs on the CPU thread (declared
-  // via DeclareAsCPUThread), these guards are no-ops — the core isn't
-  // unpaused between calls. On a non-CPU thread, there would be a brief
-  // window with no memchecks between Clear and Add, but that doesn't apply
-  // here. Bugbot #80.
-  auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-  memchecks.Clear();
-  m_freezes.clear();
+  std::vector<MemChecks::MemoryBreakpoint> converted;
+  converted.reserve(breakpoints.size());
   for (const DataBreakpointRequest& request : breakpoints)
   {
     const u32 length = request.length == 0 ? 1 : request.length;
@@ -372,22 +358,29 @@ void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> b
                         std::numeric_limits<u32>::max() :
                         request.address + (length - 1u);
 
-    TMemCheck check;
+    MemChecks::MemoryBreakpoint check;
     check.start_address = request.address;
     check.end_address = end;
     // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck distinguishes single-
     // byte vs ranged checks; DAP data breakpoints default to one byte, but a
     // client may pass `length` (a Dolphin extension) to watch a region.
-    check.is_ranged = (length > 1);
     check.is_break_on_read = request.read;
     check.is_break_on_write = request.write;
     check.break_on_hit = true;
     check.log_on_hit = false;
     check.is_enabled = true;
     if (request.condition && !request.condition->empty())
-      check.condition = Expression::TryParse(*request.condition);
-    memchecks.Add(std::move(check));
+    {
+      const auto condition = Expression::TryParse(*request.condition);
+      if (!condition)
+        return std::unexpected(
+            fmt::format("invalid data breakpoint condition: {}", *request.condition));
+      check.condition = condition->GetText();
+    }
+    converted.push_back(std::move(check));
   }
+  return m_system.GetPowerPC().GetMemChecks().ReplaceClientBreakpoints(m_memcheck_client_id,
+                                                                       std::move(converted));
 }
 
 std::optional<std::string> DapDebugController::EvaluateExpression(const std::string_view expression)
@@ -1202,21 +1195,9 @@ void DapDebugController::Terminate()
 
 void DapDebugController::ClearBreakpoints()
 {
-  // Code claims are origin-aware, while memory watchpoints remain global until
-  // their ownership slice. Never clear the shared physical code projection.
   ClearCodeBreakpoints();
-  {
-    Core::CPUThreadGuard guard(m_system);
-    m_system.GetPowerPC().GetMemChecks().Clear();
-  }
-  // Also clear any freezes this controller installed. ClearFreezes itself
-  // takes the guard and removes memchecks, so call it after the above guard
-  // scope ends to avoid nested guards (ClearFreezes opens its own).
-  // Actually -- ClearBreakpoints just wiped ALL memchecks via .Clear(), so
-  // the freeze memchecks are already gone from the global store. Just clear
-  // our tracking vector so RemoveFreeze/ClearFreezes don't try to remove
-  // already-gone entries. Bugbot-resistent: idempotent.
-  m_freezes.clear();
+  m_system.GetPowerPC().GetMemChecks().ClearClientBreakpoints(m_memcheck_client_id);
+  ClearFreezes();
 }
 
 void DapDebugController::ClearCodeBreakpoints()
@@ -1226,7 +1207,7 @@ void DapDebugController::ClearCodeBreakpoints()
 
 u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8> value)
 {
-  // DESNOTE(jbarber, 2026-07-22): Installs a `is_freeze` TMemCheck on
+  // DESNOTE(jbarber, 2026-07-22): Installs a private MemChecks freeze range on
   // [address, address+count) so MMU::Write<T> suppresses CPU stores to that
   // range. The frozen `value` is written to RAM immediately (via HostWrite,
   // which bypasses the freeze memcheck — so the freeze back-write itself
@@ -1240,19 +1221,14 @@ u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8
     return 0;
 
   const u32 freeze_id = m_next_freeze_id++;
-  m_freezes.push_back({freeze_id, address, count});
-
   {
     Core::CPUThreadGuard guard(m_system);
     auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    TMemCheck mc;
-    mc.start_address = address;
-    mc.end_address = address + count - 1;
-    mc.is_ranged = true;
-    mc.is_enabled = true;
-    mc.is_freeze = true;
-    // No break/log — freeze memchecks suppress silently.
-    memchecks.Add(std::move(mc));
+    const auto registry_id =
+        memchecks.AddClientFreeze(m_memcheck_client_id, address, address + count - 1);
+    if (!registry_id)
+      return 0;
+    m_freezes.push_back({freeze_id, address, count, *registry_id});
 
     // Write the frozen value into RAM so reads return the frozen bytes.
     // HostWrite bypasses Memcheck (and thus the freeze suppression), so
@@ -1275,10 +1251,7 @@ bool DapDebugController::RemoveFreeze(u32 freeze_id)
     return false;
   {
     Core::CPUThreadGuard guard(m_system);
-    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    // Remove the freeze memcheck matching this address range. MemChecks
-    // doesn't have a RemoveById, so we remove by address.
-    memchecks.Remove(it->address);
+    m_system.GetPowerPC().GetMemChecks().RemoveClientFreeze(m_memcheck_client_id, it->registry_id);
   }
   m_freezes.erase(it);
   return true;
@@ -1290,9 +1263,7 @@ void DapDebugController::ClearFreezes()
     return;
   {
     Core::CPUThreadGuard guard(m_system);
-    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    for (const FreezeEntry& e : m_freezes)
-      memchecks.Remove(e.address);
+    m_system.GetPowerPC().GetMemChecks().ClearClientFreezes(m_memcheck_client_id);
   }
   m_freezes.clear();
 }

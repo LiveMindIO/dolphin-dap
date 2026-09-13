@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -242,13 +243,6 @@ public:
 
     {
       std::lock_guard lock(s_session_lifetime_mutex);
-      if (s_active_session_count == 0)
-      {
-        // ClearBreakpoints now clears this connection's empty code collection
-        // and the still-global memory-watchpoint store; GUI code claims survive.
-        m_controller.ClearBreakpoints();
-        m_controller.ClearFreezes();
-      }
       ++s_active_session_count;
     }
 
@@ -265,6 +259,11 @@ public:
         [weak = std::weak_ptr<Session>(self)](std::shared_ptr<const BreakPoints::Event> event) {
           if (auto sp = weak.lock())
             sp->HandleBreakpointEvent(std::move(event));
+        });
+    m_controller.SetDataBreakpointEventCallback(
+        [weak = std::weak_ptr<Session>(self)](std::shared_ptr<const MemChecks::Event> event) {
+          if (auto sp = weak.lock())
+            sp->HandleDataBreakpointEvent(std::move(event));
         });
     m_watch_sampler = std::make_unique<RealtimeWatchSampler>(
         m_system,
@@ -342,22 +341,11 @@ public:
     m_step_cancelled.store(true);
     if (m_step_out_thread.joinable())
       m_step_out_thread.join();
-    m_controller.ClearCodeBreakpoints();
+    m_controller.ClearBreakpoints();
     {
       std::lock_guard lock(s_session_lifetime_mutex);
       if (--s_active_session_count == 0)
-      {
-        m_controller.ClearBreakpoints();
-        m_controller.ClearFreezes();
         s_entry_stop_handled.store(false);
-      }
-      else
-      {
-        // A non-last session removes only its own freezes so it cannot clobber
-        // debugger state that another connected client still uses.
-        for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
-          m_controller.RemoveFreeze(freeze_id);
-      }
     }
   }
 
@@ -392,6 +380,39 @@ private:
         body.emplace("reason", std::string("changed"));
         break;
       case BreakPoints::ChangeReason::Removed:
+        body.emplace("reason", std::string("removed"));
+        break;
+      }
+      body.emplace("breakpoint", std::move(breakpoint));
+      QueueEvent("breakpoint", std::move(body));
+    }
+  }
+
+  void HandleDataBreakpointEvent(std::shared_ptr<const MemChecks::Event> event)
+  {
+    if (event->origin == m_controller.GetMemCheckClientId())
+      return;
+
+    for (const MemChecks::Change& change : event->changes)
+    {
+      picojson::object breakpoint;
+      breakpoint.emplace(
+          "id", static_cast<double>(AssignDataBreakpointId(change.breakpoint.start_address,
+                                                           change.breakpoint.end_address)));
+      breakpoint.emplace("verified", change.reason != MemChecks::ChangeReason::Removed);
+      breakpoint.emplace("instructionReference",
+                         Json::FormatAddress(change.breakpoint.start_address));
+
+      picojson::object body;
+      switch (change.reason)
+      {
+      case MemChecks::ChangeReason::New:
+        body.emplace("reason", std::string("new"));
+        break;
+      case MemChecks::ChangeReason::Changed:
+        body.emplace("reason", std::string("changed"));
+        break;
+      case MemChecks::ChangeReason::Removed:
         body.emplace("reason", std::string("removed"));
         break;
       }
@@ -659,7 +680,9 @@ private:
       // temporary step-over breakpoint set via SetTemporary, which never
       // got a DAP response), omit hitBreakpointIds entirely rather than
       // fabricate one.
-      std::optional<int> hit_id = LookupBreakpointId(*info.hit_breakpoint_address);
+      std::optional<int> hit_id = info.reason == StopReason::DataBreakpoint ?
+                                      LookupDataBreakpointId(*info.hit_breakpoint_address) :
+                                      LookupBreakpointId(*info.hit_breakpoint_address);
       if (hit_id)
       {
         picojson::array hit_ids;
@@ -699,6 +722,28 @@ private:
     if (it == m_bp_id_by_address.end())
       return std::nullopt;
     return it->second;
+  }
+
+  int AssignDataBreakpointId(u32 start_address, u32 end_address)
+  {
+    std::lock_guard lock(m_bp_id_mutex);
+    const std::pair key{start_address, end_address};
+    if (const auto it = m_data_bp_id_by_range.find(key); it != m_data_bp_id_by_range.end())
+      return it->second;
+    const int id = m_next_bp_id++;
+    m_data_bp_id_by_range.emplace(key, id);
+    return id;
+  }
+
+  std::optional<int> LookupDataBreakpointId(u32 address)
+  {
+    std::lock_guard lock(m_bp_id_mutex);
+    for (const auto& [range, id] : m_data_bp_id_by_range)
+    {
+      if (range.first <= address && address <= range.second)
+        return id;
+    }
+    return std::nullopt;
   }
 
   // DESNOTE(jbarber, 2026-07-21): Removed the per-set `ClearBreakpointIds`
@@ -1934,75 +1979,43 @@ private:
         Protocol::ParseSetDataBreakpoints(request.arguments);
 
     std::vector<DataBreakpointRequest> breakpoint_requests;
-    picojson::array breakpoints;
-    // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck store keys on
-    // start_address and MemChecks::Add replaces an existing entry at the
-    // same address, so a single setDataBreakpoints request that lists two
-    // entries with the same dataId installs only the LAST -- earlier
-    // entries are silently overwritten. Without de-dup, every entry was
-    // reported verified:true and the client believed N watchpoints were
-    // installed when only one was.
-    //
-    // The earlier de-dup marked later duplicates verified:false and skipped
-    // them entirely, but Bugbot flagged that as wrong: a request listing
-    // the same dataId twice with different length / accessType is the
-    // client's way of REPLACING the prior config with a new range/access
-    // kind. Dropping the later entry silently left the configured ranged
-    // watch inactive while still telling the client nothing changed.
-    //
-    // New behavior: pass ALL entries through to the controller (so
-    // MemChecks::Add's replace-on-same-address makes the LAST config win)
-    // and report entries accordingly. For a duplicate address, mark the
-    // PRIOR entry's response slot verified:false (it was overridden) and
-    // the CURRENT entry verified:true (its config is the one now active).
-    // That way the client sees which entry is the survivor and isn't told
-    // a changed configuration is active when it has been replaced by a
-    // later sibling.
-    std::unordered_map<u32, size_t> first_index_for_address;
     for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
     {
-      picojson::object entry;
-      entry.emplace("verified", breakpoint.address.has_value());
       if (breakpoint.address)
       {
-        const u32 addr = *breakpoint.address;
-        auto prev = first_index_for_address.find(addr);
-        if (prev != first_index_for_address.end())
-        {
-          // Mark the prior entry (which will be overwritten by MemChecks::Add
-          // when the controller processes this list) as not-verified in the
-          // response so the client knows it isn't the live config.
-          picojson::object& prev_obj = breakpoints[prev->second].get<picojson::object>();
-          prev_obj["verified"] = picojson::value(false);
-        }
-        first_index_for_address[addr] = breakpoints.size();
-
         DataBreakpointRequest bp;
-        bp.address = addr;
+        bp.address = *breakpoint.address;
         bp.length = breakpoint.length;
         bp.read = breakpoint.read;
         bp.write = breakpoint.write;
         bp.condition = breakpoint.condition;
         breakpoint_requests.push_back(std::move(bp));
       }
-      breakpoints.emplace_back(std::move(entry));
     }
 
-    m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
+    const auto result = m_controller.SetDataBreakpoints(std::move(breakpoint_requests));
+    if (!result)
+    {
+      RespondError(request.seq, "setDataBreakpoints", result.error());
+      return;
+    }
 
-    // DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
-    // which wipes all freeze memchecks from the global store (collateral
-    // damage of the single global memcheck store). Clear this session's
-    // freeze tracking so the sampler doesn't desync — without this, the
-    // sampler's frozen_value stays set (Tick keeps restoring via HostWrite)
-    // while the MMU write suppression is gone (CPU writes reach RAM for up
-    // to ~16ms before Tick restores). Unfreezing in the sampler clears
-    // frozen_value so Tick dispatches change events normally again, matching
-    // the now-absent MMU memcheck. Bugbot #81.
-    for (const auto& [watch_id, freeze_id] : m_watch_to_freeze)
-      m_watch_sampler->Unfreeze(watch_id);
-    m_watch_to_freeze.clear();
-
+    picojson::array breakpoints;
+    for (const Protocol::RequestedDataBreakpoint& breakpoint : arguments.breakpoints)
+    {
+      picojson::object entry;
+      entry.emplace("verified", breakpoint.address.has_value());
+      if (breakpoint.address)
+      {
+        const u32 length = breakpoint.length == 0 ? 1 : breakpoint.length;
+        const u32 end = length - 1 > std::numeric_limits<u32>::max() - *breakpoint.address ?
+                            std::numeric_limits<u32>::max() :
+                            *breakpoint.address + length - 1;
+        entry.emplace("id", static_cast<double>(AssignDataBreakpointId(*breakpoint.address, end)));
+        entry.emplace("instructionReference", Json::FormatAddress(*breakpoint.address));
+      }
+      breakpoints.emplace_back(std::move(entry));
+    }
     picojson::object body;
     body.emplace("breakpoints", std::move(breakpoints));
     Respond(request.seq, "setDataBreakpoints", std::move(body));
@@ -2336,7 +2349,7 @@ private:
   void HandleFreeze(const Protocol::Request& request)
   {
     // DESNOTE(jbarber, 2026-07-22): `dolphin_freeze` now installs an MMU-level
-    // write suppression (via `is_freeze` TMemCheck) in addition to the
+    // write suppression (via a private MemChecks freeze range) in addition to the
     // existing field-rate Tick fallback. CPU stores to the frozen range are
     // silently dropped at the MMU layer — the game never sees its own
     // writes. The field-rate Tick remains as a fallback for DMA/peripheral
@@ -2409,7 +2422,7 @@ private:
       }
     }
 
-    // Install the MMU-level `is_freeze` memcheck so CPU writes to
+    // Install the MMU-level private freeze range so CPU writes to
     // [address, address+count) are silently suppressed. The frozen value
     // is written to RAM by InstallFreeze (via HostWrite, which bypasses
     // the freeze memcheck). Bugbot-safe: Freeze already wrote the canon
@@ -2455,7 +2468,7 @@ private:
       return;
     }
 
-    // DESNOTE(jbarber, 2026-07-22): Also tear down the MMU-level `is_freeze`
+    // DESNOTE(jbarber, 2026-07-22): Also tear down the MMU-level private freeze
     // memcheck so CPU writes to the formerly-frozen range are no longer
     // suppressed. The field-rate Tick (which was the DMA fallback) also
     // stops restoring the value (Unfreeze cleared `frozen_value`).
@@ -2691,7 +2704,7 @@ private:
   std::unique_ptr<DapMemoryEngine> m_memory_engine;
   // DESNOTE(jbarber, 2026-07-22): Maps watch_id → freeze_id returned by
   // DapDebugController::InstallFreeze, so HandleUnfreeze can call
-  // RemoveFreeze to tear down the MMU-level `is_freeze` memcheck that
+  // RemoveFreeze to tear down the MMU-level private freeze range that
   // suppresses CPU writes to the frozen range.
   std::map<int, u32> m_watch_to_freeze;
   std::map<int, DebugValueContext> m_debug_value_handles;
@@ -2763,6 +2776,7 @@ private:
   // SendClassifiedStoppedEvent can translate the hit PC back to an id.
   std::mutex m_bp_id_mutex;
   std::unordered_map<u32, int> m_bp_id_by_address;
+  std::map<std::pair<u32, u32>, int> m_data_bp_id_by_range;
   int m_next_bp_id = 1;
 
   // DESNOTE(jbarber, 2026-07-21): Asynchronous step-out worker. The previous

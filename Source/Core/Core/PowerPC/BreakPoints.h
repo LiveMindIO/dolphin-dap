@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Common/BitSet.h"
@@ -37,6 +38,12 @@ struct TBreakPoint
 
 struct TMemCheck
 {
+  TMemCheck() = default;
+  TMemCheck(const TMemCheck& other) = delete;
+  TMemCheck(TMemCheck&& other) noexcept = default;
+  TMemCheck& operator=(const TMemCheck& other) = delete;
+  TMemCheck& operator=(TMemCheck&& other) noexcept = default;
+
   u32 start_address = 0;
   u32 end_address = 0;
 
@@ -49,23 +56,18 @@ struct TMemCheck
   bool log_on_hit = false;
   bool break_on_hit = false;
 
-  u32 num_hits = 0;
+  u32 GetNumHits() const;
+  void ResetNumHits();
 
   std::optional<Expression> condition;
 
-  // DESNOTE(jbarber, 2026-07-22): When true, this memcheck represents a DAP
-  // "hard freeze" — writes to the range are silently suppressed (dropped
-  // before WriteToHardware) instead of pausing the CPU. Reads are unaffected
-  // (the frozen value persists in RAM because writes are suppressed).
-  // Piggy-backs on the existing TMemCheck infrastructure (range lookup, JIT
-  // de-optimization via OverlapsMemcheck/DBAT rebuild) so frozen pages are
-  // forced onto the slow MMU::Write<T> path where suppression can fire.
-  // The field-rate Tick in RealtimeWatchSampler remains as a fallback for
-  // DMA/peripheral writes that bypass MMU::Write entirely.
-  bool is_freeze = false;
-
   // returns whether to break
-  bool Action(Core::System& system, u64 value, u32 addr, bool write, size_t size, u32 pc);
+  bool Action(Core::System& system, u64 value, u32 addr, bool write, size_t size, u32 pc) const;
+
+private:
+  friend class MemChecks;
+  void ShareHitCounter(const TMemCheck& other);
+  std::shared_ptr<std::atomic<u32>> m_num_hits = std::make_shared<std::atomic<u32>>(0);
 };
 
 // Code breakpoints.
@@ -234,6 +236,46 @@ class DelayedMemCheckUpdate;
 class MemChecks
 {
 public:
+  using ClientId = u64;
+  using FreezeId = u64;
+
+  struct MemoryBreakpoint
+  {
+    u32 start_address = 0;
+    u32 end_address = 0;
+    bool is_enabled = true;
+    bool is_break_on_read = false;
+    bool is_break_on_write = false;
+    bool log_on_hit = false;
+    bool break_on_hit = false;
+    std::optional<std::string> condition;
+
+    bool operator==(const MemoryBreakpoint&) const = default;
+  };
+
+  enum class ChangeReason
+  {
+    New,
+    Changed,
+    Removed,
+  };
+
+  struct Change
+  {
+    ChangeReason reason = ChangeReason::New;
+    MemoryBreakpoint breakpoint;
+  };
+
+  struct Event
+  {
+    u64 revision = 0;
+    std::optional<ClientId> origin;
+    std::vector<Change> changes;
+    std::vector<MemoryBreakpoint> breakpoints;
+  };
+
+  using EventCallback = std::function<void(std::shared_ptr<const Event>)>;
+
   explicit MemChecks(Core::System& system);
   MemChecks(const MemChecks& other) = delete;
   MemChecks(MemChecks&& other) = delete;
@@ -244,38 +286,93 @@ public:
   using TMemChecks = std::vector<TMemCheck>;
   using TMemChecksStr = std::vector<std::string>;
 
-  const TMemChecks& GetMemChecks() const { return m_mem_checks; }
+  struct Snapshot
+  {
+    u64 revision = 0;
+    bool breaking_enabled = true;
+    TMemChecks mem_checks;
+    std::vector<std::pair<u32, u32>> private_freeze_ranges;
+    BitSet32 gprs_used_in_conditions;
+    BitSet32 fprs_used_in_conditions;
+
+    const TMemCheck* GetMemCheck(u32 address, size_t size = 1) const;
+    bool OverlapsPrivateFreeze(u32 address, size_t size = 1) const;
+  };
+
+  std::shared_ptr<const Snapshot> GetSnapshot() const;
+  std::shared_ptr<const TMemChecks> GetMemChecks() const;
   TMemChecksStr GetStrings() const;
   void AddFromStrings(const TMemChecksStr& mc_strings);
 
+  ClientId RegisterClient(EventCallback callback = {});
+  void SetClientEventCallback(ClientId client_id, EventCallback callback);
+  std::expected<void, std::string>
+  ReplaceClientBreakpoints(ClientId client_id, std::vector<MemoryBreakpoint> breakpoints);
+  void ClearClientBreakpoints(ClientId client_id);
+  std::expected<FreezeId, std::string> AddClientFreeze(ClientId client_id, u32 start_address,
+                                                       u32 end_address);
+  bool RemoveClientFreeze(ClientId client_id, FreezeId freeze_id);
+  void ClearClientFreezes(ClientId client_id);
+  void UnregisterClient(ClientId client_id);
+  u64 GetRevision() const;
+
   DelayedMemCheckUpdate Add(TMemCheck memory_check);
+  DelayedMemCheckUpdate Replace(u32 old_address, TMemCheck memory_check);
 
   bool ToggleEnable(u32 address);
 
-  TMemCheck* GetMemCheck(u32 address, size_t size = 1);
+  std::shared_ptr<const TMemCheck> GetMemCheck(u32 address, size_t size = 1) const;
   bool OverlapsMemcheck(u32 address, u32 length) const;
   DelayedMemCheckUpdate Remove(u32 address);
 
   void EnableBreaking(bool enable);
-  bool IsBreakingEnabled() const { return m_breaking_enabled; }
+  bool IsBreakingEnabled() const { return GetSnapshot()->breaking_enabled; }
 
   void Update();
   void Clear();
-  bool HasAny() const { return !m_mem_checks.empty() && m_breaking_enabled; }
+  bool HasAny() const;
 
-  BitSet32 GetGPRsUsedInConditions() { return m_gprs_used_in_conditions; }
-  BitSet32 GetFPRsUsedInConditions() { return m_fprs_used_in_conditions; }
+  BitSet32 GetGPRsUsedInConditions() const { return GetSnapshot()->gprs_used_in_conditions; }
+  BitSet32 GetFPRsUsedInConditions() const { return GetSnapshot()->fprs_used_in_conditions; }
 
 private:
-  // Returns whether any change was made
-  bool UpdateRegistersUsedInConditions();
+  friend class DelayedMemCheckUpdate;
+  void FinishDelayedUpdate();
+  struct ClientMemChecks
+  {
+    std::vector<MemoryBreakpoint> breakpoints;
+    std::map<FreezeId, std::pair<u32, u32>> freezes;
+    EventCallback callback;
+  };
 
-  TMemChecks m_mem_checks;
+  using Projection = std::vector<MemoryBreakpoint>;
+
+  std::expected<Projection, std::string>
+  BuildProjection(const std::vector<MemoryBreakpoint>& legacy,
+                  const std::unordered_map<ClientId, ClientMemChecks>& clients) const;
+  bool ApplyProjectionLocked(Projection projection, std::optional<ClientId> origin);
+  void PublishSnapshotLocked();
+  void DrainDispatchQueue();
+  void SynchronizeDispatch();
+  static MemoryBreakpoint ToMemoryBreakpoint(const TMemCheck& memory_check);
+  static bool Overlaps(u32 first_start, u32 first_end, u32 second_start, u32 second_end);
+
+  Projection m_projection;
+  std::vector<MemoryBreakpoint> m_legacy_mem_checks;
+  std::unordered_map<ClientId, ClientMemChecks> m_clients;
   Core::System& m_system;
   BitSet32 m_gprs_used_in_conditions;
   BitSet32 m_fprs_used_in_conditions;
   bool m_mem_breakpoints_set = false;
   bool m_breaking_enabled = true;
+  mutable std::mutex m_mutex;
+  std::recursive_mutex m_dispatch_mutex;
+  bool m_is_draining = false;
+  std::deque<std::shared_ptr<const Event>> m_pending_dispatches;
+  std::atomic<std::shared_ptr<const Snapshot>> m_snapshot;
+  ClientId m_next_client_id = 1;
+  FreezeId m_next_freeze_id = 1;
+  u64 m_revision = 0;
 };
 
 class DelayedMemCheckUpdate final
@@ -294,7 +391,7 @@ public:
   ~DelayedMemCheckUpdate()
   {
     if (m_update_needed)
-      m_memchecks->Update();
+      m_memchecks->FinishDelayedUpdate();
   }
 
   DelayedMemCheckUpdate& operator|=(DelayedMemCheckUpdate&& other)

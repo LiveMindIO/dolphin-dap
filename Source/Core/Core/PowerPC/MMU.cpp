@@ -600,7 +600,7 @@ std::optional<ReadResult<u32>> MMU::HostTryReadInstruction(const Core::CPUThread
 }
 
 // DESNOTE(jbarber, 2026-07-22): Returns true when the access hits a
-// `is_freeze` memcheck AND this is a write — signals the caller (Write<T>)
+// private freeze range AND this is a write — signals the caller (Write<T>)
 // to suppress the store entirely (skip WriteToHardware). Reads are never
 // suppressed; freeze memchecks on reads are a no-op (the frozen value
 // already persists in RAM because writes are suppressed). Non-freeze
@@ -610,31 +610,28 @@ std::optional<ReadResult<u32>> MMU::HostTryReadInstruction(const Core::CPUThread
 // prevented — same behavior as before this change).
 bool MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
 {
-  if (!m_power_pc.GetMemChecks().HasAny())
+  const auto snapshot = m_power_pc.GetMemChecks().GetSnapshot();
+  if (write && snapshot->OverlapsPrivateFreeze(address, size))
+    return true;
+
+  if (!snapshot->breaking_enabled || snapshot->mem_checks.empty())
     return false;
 
-  TMemCheck* mc = m_power_pc.GetMemChecks().GetMemCheck(address, size);
-  if (mc == nullptr)
+  const u32 end = size - 1 > std::numeric_limits<u32>::max() - address ?
+                      std::numeric_limits<u32>::max() :
+                      address + static_cast<u32>(size - 1);
+  const auto overlaps = [address, end](const TMemCheck& check) {
+    return check.end_address >= address && end >= check.start_address;
+  };
+  const auto mc = std::ranges::find_if(snapshot->mem_checks, overlaps);
+  if (mc == snapshot->mem_checks.end())
     return false;
-
-  // DESNOTE(jbarber, 2026-07-22): Freeze memchecks suppress writes but
-  // never pause the CPU. The IsStepping early-return below is skipped for
-  // freezes — a freeze should hold even while stepping (that's exactly
-  // when the game's own stores should be defeated). The write is dropped
-  // silently; no DSI, no Break(), no num_hits increment (freeze suppression
-  // is not a "hit" in the watchpoint sense). Read accesses to a freeze
-  // memcheck are also a no-op — reads return RAM, which holds the frozen
-  // value because writes are suppressed.
-  if (mc->is_freeze)
-    return write;  // suppress writes, allow reads through
 
   if (m_system.GetCPU().IsStepping() && !m_power_pc.AreSteppingMemchecksEnabled())
   {
     // Disable when stepping so that resume works.
     return false;
   }
-
-  mc->num_hits++;
 
   const bool pause = mc->Action(m_system, var, address, write, size, m_ppc_state.pc);
   if (!pause)

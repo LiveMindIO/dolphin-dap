@@ -56,7 +56,7 @@ struct RealtimeWatchChange
 //
 // DESNOTE(jbarber, 2026-07-22): Freeze now uses two layers of defense:
 // 1. MMU-level write suppression: DapDebugController::InstallFreeze installs
-//    a `is_freeze` TMemCheck on the frozen range. MMU::Write<T> checks this
+//    a private MemChecks freeze range. MMU::Write<T> checks this
 //    before WriteToHardware and silently drops the store — the game's CPU
 //    writes to the frozen range never reach RAM. CPU writes are perfectly
 //    unobservable.
@@ -96,7 +96,7 @@ public:
   // mismatch.
   //
   // DESNOTE(jbarber, 2026-07-22): With MMU-level write suppression now active
-  // (via a `is_freeze` TMemCheck installed by DapDebugController::InstallFreeze),
+  // (via a private range installed by DapDebugController::InstallFreeze),
   // CPU stores to the frozen range are silently dropped — they never reach RAM.
   // The Tick's drift-detection and write-back path now only fires for DMA /
   // peripheral writes that bypass MMU::Write entirely. The field-rate Tick

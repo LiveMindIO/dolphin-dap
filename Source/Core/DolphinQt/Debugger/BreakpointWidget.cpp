@@ -394,7 +394,8 @@ void BreakpointWidget::Update()
   m_table->sortItems(ADDRESS_COLUMN);
 
   // Memory Breakpoints
-  for (const auto& mbp : memchecks.GetMemChecks())
+  const auto memory_breakpoints = memchecks.GetMemChecks();
+  for (const auto& mbp : *memory_breakpoints)
   {
     m_table->setRowCount(i + 1);
     auto* active = create_item();
@@ -489,8 +490,8 @@ void BreakpointWidget::OnEditBreakpoint(u32 address, bool is_instruction_bp)
   }
   else
   {
-    auto* dialog =
-        new BreakpointDialog(this, m_system.GetPowerPC().GetMemChecks().GetMemCheck(address));
+    const auto memcheck = m_system.GetPowerPC().GetMemChecks().GetMemCheck(address);
+    auto* dialog = new BreakpointDialog(this, memcheck.get());
     dialog->setAttribute(Qt::WA_DeleteOnClose, true);
     dialog->exec();
   }
@@ -595,8 +596,8 @@ void BreakpointWidget::OnContextMenu(const QPoint& pos)
   }
   else
   {
-    const auto& memory_breakpoints = m_system.GetPowerPC().GetMemChecks().GetMemChecks();
-    if (!Common::Contains(memory_breakpoints, bp_address, &TMemCheck::start_address))
+    const auto memory_breakpoints = m_system.GetPowerPC().GetMemChecks().GetMemChecks();
+    if (!Common::Contains(*memory_breakpoints, bp_address, &TMemCheck::start_address))
       return;
 
     menu->addAction(tr("Show in Memory"), [this, bp_address] { emit ShowMemory(bp_address); });
@@ -769,10 +770,8 @@ void BreakpointWidget::AddRangedMBP(u32 from, u32 to, bool on_read, bool on_writ
 
 void BreakpointWidget::EditMBP(u32 address, int edit, std::optional<QString> string)
 {
-  bool address_changed = false;
-
   TMemCheck mbp;
-  const TMemCheck* old_mbp = m_system.GetPowerPC().GetMemChecks().GetMemCheck(address);
+  const auto old_mbp = m_system.GetPowerPC().GetMemChecks().GetMemCheck(address);
   mbp.is_enabled = edit == ENABLED_COLUMN ? !old_mbp->is_enabled : old_mbp->is_enabled;
   mbp.log_on_hit = edit == LOG_COLUMN ? !old_mbp->log_on_hit : old_mbp->log_on_hit;
   mbp.break_on_hit = edit == BREAK_COLUMN ? !old_mbp->break_on_hit : old_mbp->break_on_hit;
@@ -792,7 +791,6 @@ void BreakpointWidget::EditMBP(u32 address, int edit, std::optional<QString> str
     {
       mbp.start_address = new_address;
       mbp.end_address = old_mbp->end_address;
-      address_changed = true;
     }
     else if (edit == END_ADDRESS_COLUMN)
     {
@@ -816,9 +814,7 @@ void BreakpointWidget::EditMBP(u32 address, int edit, std::optional<QString> str
 
   {
     const QSignalBlocker blocker(Settings::Instance());
-    m_system.GetPowerPC().GetMemChecks().Add(std::move(mbp));
-    if (address_changed)
-      m_system.GetPowerPC().GetMemChecks().Remove(address);
+    m_system.GetPowerPC().GetMemChecks().Replace(address, std::move(mbp));
   }
 
   emit Host::GetInstance()->PPCBreakpointsChanged();

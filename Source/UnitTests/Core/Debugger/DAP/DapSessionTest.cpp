@@ -720,7 +720,7 @@ TEST_F(DapSessionTest, RealtimeWatchSubscribeAndCancelRoundTrip)
   (void)client.Receive();
 }
 
-// DESNOTE(jbarber, 2026-07-26): dolphin_freeze installs an is_freeze memcheck
+// DESNOTE(jbarber, 2026-07-26): dolphin_freeze installs a private freeze range
 // in the global memchecks store. dolphin_unfreeze must remove it. Bugbot #74.
 TEST_F(DapSessionTest, FreezeAndUnfreezeRemovesMemcheck)
 {
@@ -860,12 +860,7 @@ TEST_F(DapSessionTest, ReFreezeSameWatchDoesNotLeakMemcheck)
   (void)client.Receive();
 }
 
-// DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints wipes freeze memchecks from
-// the global store (memchecks.Clear). The session must unfreeze its watches
-// in the sampler to avoid a desync (sampler thinks it's frozen but MMU
-// suppression is gone). After SetDataBreakpoints, the freeze memcheck should
-// be gone and unfreeze should be a no-op (already unfrozen). Bugbot #81.
-TEST_F(DapSessionTest, SetDataBreakpointsClearsFreezeAndSampler)
+TEST_F(DapSessionTest, SetDataBreakpointsPreservesFreezeAndSampler)
 {
   TestClient client(m_client_fd());
   Handshake(client);
@@ -883,7 +878,7 @@ TEST_F(DapSessionTest, SetDataBreakpointsClearsFreezeAndSampler)
   ASSERT_TRUE(freeze->at("success").get<bool>());
   EXPECT_TRUE(Core::System::GetInstance().GetPowerPC().GetMemChecks().HasAny());
 
-  // SetDataBreakpoints wipes the freeze memcheck and clears sampler freeze.
+  // Replacing watchpoints must not mutate this session's independent freezes.
   client.Send(R"({
     "seq": 4,
     "type": "request",
@@ -898,11 +893,13 @@ TEST_F(DapSessionTest, SetDataBreakpointsClearsFreezeAndSampler)
   // The data breakpoint should be installed.
   EXPECT_NE(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(0x00005000),
             nullptr);
-  // The freeze memcheck at 0x4000 should be gone.
   EXPECT_EQ(Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(0x00004000),
             nullptr);
+  EXPECT_TRUE(
+      Core::System::GetInstance().GetPowerPC().GetMemChecks().GetSnapshot()->OverlapsPrivateFreeze(
+          0x00004000, 4));
 
-  // Unfreeze should still succeed (idempotent — sampler was already unfrozen).
+  // Unfreeze still owns and removes the preserved freeze.
   const double watch_id = freeze->at("body").get<picojson::object>().at("watchId").get<double>();
   client.Send(std::string(R"({
     "seq": 5,
@@ -1296,7 +1293,7 @@ TEST_F(DapSessionTest, SetDataBreakpointsRangedLengthInstallsRangedWatchpoint)
   ASSERT_TRUE(response.has_value());
   EXPECT_TRUE(response->at("success").get<bool>());
 
-  const TMemCheck* check =
+  const auto check =
       Core::System::GetInstance().GetPowerPC().GetMemChecks().GetMemCheck(CODE_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_ranged);
@@ -2729,6 +2726,97 @@ TEST_F(DapMultiSessionTest, GuiSiteMutationsFanOutAndAllowAuthoritativeDapReAdd)
   ASSERT_TRUE(first.Receive().has_value());
   second.Send(R"({"seq":26,"type":"request","command":"disconnect"})");
   ASSERT_TRUE(second.Receive().has_value());
+}
+
+TEST_F(DapMultiSessionTest, DataBreakpointsAndFreezesAreOriginAwareAndIndependent)
+{
+  constexpr u32 first_address = 0x00004100;
+  constexpr u32 second_address = 0x00004200;
+  constexpr u32 freeze_address = 0x00004300;
+  constexpr u32 gui_address = 0x00004400;
+  constexpr u32 second_freeze_address = 0x00004500;
+  auto& memchecks = Core::System::GetInstance().GetPowerPC().GetMemChecks();
+  TestClient first(m_client_fd());
+  TestClient second(m_second_fds[0]);
+  Handshake(first);
+  HandshakeAdditional(second);
+
+  first.Send(R"({"seq":30,"type":"request","command":"setDataBreakpoints",
+    "arguments":{"breakpoints":[{"dataId":"0x00004100","accessType":"write"}]}})");
+  const auto first_response = first.Receive();
+  ASSERT_TRUE(first_response.has_value());
+  ASSERT_TRUE(first_response->at("success").get<bool>());
+  const auto& first_breakpoints =
+      first_response->at("body").get<picojson::object>().at("breakpoints").get<picojson::array>();
+  ASSERT_EQ(first_breakpoints.size(), 1u);
+  const double first_breakpoint_id =
+      first_breakpoints.front().get<picojson::object>().at("id").get<double>();
+  const auto first_external = second.Receive();
+  ASSERT_TRUE(first_external.has_value());
+  EXPECT_EQ(first_external->at("event").to_str(), "breakpoint");
+  EXPECT_EQ(first_external->at("body")
+                .get<picojson::object>()
+                .at("breakpoint")
+                .get<picojson::object>()
+                .at("id")
+                .get<double>(),
+            first_breakpoint_id);
+
+  second.Send(R"({"seq":31,"type":"request","command":"setDataBreakpoints",
+    "arguments":{"breakpoints":[{"dataId":"0x00004200","accessType":"read"}]}})");
+  ASSERT_TRUE(second.Receive().has_value());
+  ASSERT_TRUE(first.Receive().has_value());
+  EXPECT_NE(memchecks.GetMemCheck(first_address), nullptr);
+  EXPECT_NE(memchecks.GetMemCheck(second_address), nullptr);
+
+  first.Send(R"({"seq":32,"type":"request","command":"dolphin_freeze",
+    "arguments":{"memoryReference":"0x00004300","count":4,"data":"AAAAAA=="}})");
+  ASSERT_TRUE(first.Receive().has_value());
+  second.Send(R"({"seq":33,"type":"request","command":"setDataBreakpoints",
+    "arguments":{"breakpoints":[{"dataId":"0x00004200","accessType":"read"}]}})");
+  ASSERT_TRUE(second.Receive().has_value());
+  second.Send(R"({"seq":34,"type":"request","command":"dolphin_freeze",
+    "arguments":{"memoryReference":"0x00004500","count":4,"data":"AAAAAA=="}})");
+  ASSERT_TRUE(second.Receive().has_value());
+  EXPECT_EQ(memchecks.GetMemCheck(freeze_address), nullptr);
+  EXPECT_EQ(memchecks.GetMemCheck(second_freeze_address), nullptr);
+  EXPECT_TRUE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(freeze_address, 4));
+  EXPECT_TRUE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(second_freeze_address, 4));
+
+  TMemCheck gui;
+  gui.start_address = gui_address;
+  gui.end_address = gui_address;
+  gui.is_break_on_write = true;
+  gui.break_on_hit = true;
+  memchecks.Add(std::move(gui));
+  for (TestClient* client : {&first, &second})
+  {
+    const auto event = client->Receive();
+    ASSERT_TRUE(event.has_value());
+    EXPECT_EQ(event->at("body").get<picojson::object>().at("reason").to_str(), "new");
+  }
+  first.Send(R"({"seq":35,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(first.Receive().has_value());
+  const auto removed = second.Receive();
+  ASSERT_TRUE(removed.has_value());
+  EXPECT_EQ(removed->at("body").get<picojson::object>().at("reason").to_str(), "removed");
+  EXPECT_EQ(removed->at("body")
+                .get<picojson::object>()
+                .at("breakpoint")
+                .get<picojson::object>()
+                .at("id")
+                .get<double>(),
+            first_breakpoint_id);
+  EXPECT_EQ(memchecks.GetMemCheck(first_address), nullptr);
+  EXPECT_NE(memchecks.GetMemCheck(second_address), nullptr);
+  EXPECT_NE(memchecks.GetMemCheck(gui_address), nullptr);
+  EXPECT_FALSE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(freeze_address, 4));
+  EXPECT_TRUE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(second_freeze_address, 4));
+
+  second.Send(R"({"seq":36,"type":"request","command":"disconnect"})");
+  ASSERT_TRUE(second.Receive().has_value());
+  EXPECT_NE(memchecks.GetMemCheck(gui_address), nullptr);
+  memchecks.Remove(gui_address);
 }
 }  // namespace
 #endif  // _WIN32
