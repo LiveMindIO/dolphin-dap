@@ -4,6 +4,7 @@
 #include "Core/Debugger/DAP/DAP.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -24,6 +25,7 @@ typedef SSIZE_T ssize_t;
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
@@ -42,6 +44,10 @@ static std::thread s_accept_thread;
 static std::atomic<bool> s_shutting_down{false};
 static std::atomic<bool> s_active{false};
 static int s_listen_sock = -1;
+static std::mutex s_lifecycle_mutex;
+#ifndef _WIN32
+static std::string s_local_socket_path;
+#endif
 constexpr size_t MAX_CONCURRENT_CLIENTS = 2;
 
 // A connected DAP client session. The DAP layer owns the client fd (closed in
@@ -325,6 +331,7 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
 #ifndef _WIN32
 void InitLocal(const char* socket_path)
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
   if (s_active.load() || s_accept_thread.joinable())
   {
     WARN_LOG_FMT(CONSOLE, "DAP: server is already active.");
@@ -342,7 +349,22 @@ void InitLocal(const char* socket_path)
     return;
   }
 
-  unlink(socket_path);
+  struct stat path_stat;
+  if (lstat(socket_path, &path_stat) == 0)
+  {
+    if (!S_ISSOCK(path_stat.st_mode))
+    {
+      ERROR_LOG_FMT(CONSOLE, "DAP: refusing to replace non-socket path: {}", socket_path);
+      return;
+    }
+    unlink(socket_path);
+  }
+  else if (errno != ENOENT)
+  {
+    ERROR_LOG_FMT(CONSOLE, "DAP: failed to inspect socket path {}: {}", socket_path,
+                  std::strerror(errno));
+    return;
+  }
 
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
@@ -350,12 +372,16 @@ void InitLocal(const char* socket_path)
 
   InitGeneric(PF_LOCAL, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
   if (s_active.load())
+  {
+    s_local_socket_path = socket_path;
     INFO_LOG_FMT(CONSOLE, "DAP: listening on unix socket {}", socket_path);
+  }
 }
 #endif
 
 void Init(u32 port)
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(static_cast<u16>(port));
@@ -372,6 +398,7 @@ void Init(u32 port)
 
 void Deinit()
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
   const bool empty = [&] {
     std::lock_guard lock(s_sessions_mutex);
     return s_sessions.empty();
@@ -407,6 +434,13 @@ void Deinit()
   }
 
   s_socket_context.reset();
+#ifndef _WIN32
+  if (!s_local_socket_path.empty())
+  {
+    unlink(s_local_socket_path.c_str());
+    s_local_socket_path.clear();
+  }
+#endif
   s_active.store(false);
   s_shutting_down.store(false);
 }

@@ -66,8 +66,6 @@ const Info<bool> MAIN_CPU_THREAD{{System::Main, "Core", "CPUThread"}, DEFAULT_CP
 const Info<bool> MAIN_LOAD_GAME_INTO_MEMORY{{System::Main, "Core", "LoadGameIntoMemory"}, false};
 const Info<bool> MAIN_SYNC_ON_SKIP_IDLE{{System::Main, "Core", "SyncOnSkipIdle"}, true};
 const Info<std::string> MAIN_DEFAULT_ISO{{System::Main, "Core", "DefaultISO"}, ""};
-const Info<bool> MAIN_BOOT_EXECUTABLE_WITH_DEFAULT_DISC{
-    {System::Main, "Core", "BootExecutableWithDefaultDisc"}, false};
 const Info<bool> MAIN_ENABLE_CHEATS{{System::Main, "Core", "EnableCheats"}, false};
 const Info<int> MAIN_GC_LANGUAGE{{System::Main, "Core", "SelectedLanguage"}, 0};
 const Info<bool> MAIN_OVERRIDE_REGION_SETTINGS{{System::Main, "Core", "OverrideRegionSettings"},
@@ -579,10 +577,9 @@ const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF{{System::Main, "Debug", "JitR
 const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING{{System::Main, "Debug", "JitEnableProfiling"},
                                                  false};
 const Info<std::string> MAIN_DEBUG_SYMBOL_MAP{{System::Main, "Debug", "SymbolMap"}, ""};
-const Info<std::string> MAIN_DEBUG_ALTERNATE_ELF{{System::Main, "Debug", "AlternateElf"}, ""};
+const Info<std::string> MAIN_DEBUG_ELF_FILE{{System::Main, "Debug", "ELFFile"}, ""};
 const Info<bool> MAIN_DEBUG_REPLACE_DISC_EXECUTABLE{
     {System::Main, "Debug", "ReplaceDiscExecutable"}, false};
-const Info<std::string> MAIN_DEBUG_DWARF_ELF{{System::Main, "Debug", "DwarfElf"}, ""};
 const Info<std::string> MAIN_DEBUG_ENTRYPOINTS{{System::Main, "Debug", "Entrypoints"}, ""};
 const Info<std::string> MAIN_DEBUG_SOURCE_PATHS{{System::Main, "Debug", "SourcePaths"}, ""};
 

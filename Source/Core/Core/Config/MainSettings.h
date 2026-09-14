@@ -72,7 +72,6 @@ extern const Info<bool> MAIN_CPU_THREAD;
 extern const Info<bool> MAIN_LOAD_GAME_INTO_MEMORY;
 extern const Info<bool> MAIN_SYNC_ON_SKIP_IDLE;
 extern const Info<std::string> MAIN_DEFAULT_ISO;
-extern const Info<bool> MAIN_BOOT_EXECUTABLE_WITH_DEFAULT_DISC;
 extern const Info<bool> MAIN_ENABLE_CHEATS;
 extern const Info<int> MAIN_GC_LANGUAGE;
 extern const Info<bool> MAIN_OVERRIDE_REGION_SETTINGS;
@@ -373,9 +372,8 @@ extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
 extern const Info<std::string> MAIN_DEBUG_SYMBOL_MAP;
-extern const Info<std::string> MAIN_DEBUG_ALTERNATE_ELF;
+extern const Info<std::string> MAIN_DEBUG_ELF_FILE;
 extern const Info<bool> MAIN_DEBUG_REPLACE_DISC_EXECUTABLE;
-extern const Info<std::string> MAIN_DEBUG_DWARF_ELF;
 extern const Info<std::string> MAIN_DEBUG_ENTRYPOINTS;
 extern const Info<std::string> MAIN_DEBUG_SOURCE_PATHS;
 

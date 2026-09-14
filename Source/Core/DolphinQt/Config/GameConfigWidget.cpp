@@ -8,9 +8,12 @@
 #include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
+#include <QPushButton>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTimer>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -189,17 +192,30 @@ void GameConfigWidget::CreateWidgets()
   debugging_widget->setLayout(debugging_layout);
 
   m_debug_symbol_map = new ConfigText(Config::MAIN_DEBUG_SYMBOL_MAP, layer);
-  m_debug_alternate_elf = new ConfigText(Config::MAIN_DEBUG_ALTERNATE_ELF, layer);
+  m_debug_elf_file = new ConfigText(Config::MAIN_DEBUG_ELF_FILE, layer);
+  m_debug_source_paths = new QTableWidget(0, 1);
+  m_debug_source_paths->setHorizontalHeaderLabels({tr("Directory")});
+  m_debug_source_paths->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+  m_debug_source_paths->verticalHeader()->setVisible(false);
+  m_debug_source_paths->setAlternatingRowColors(true);
+  m_debug_source_paths->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_debug_source_paths->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_debug_source_paths->setEditTriggers(QAbstractItemView::DoubleClicked |
+                                        QAbstractItemView::EditKeyPressed);
+  m_debug_source_paths->setMinimumHeight(120);
   m_debug_replace_disc_executable =
-      new ConfigBool(tr("Replace the disc executable with the alternate ELF"),
+      new ConfigBool(tr("Replace the disc executable with the ELF file"),
                      Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE, layer);
   m_debug_replace_disc_executable->SetDescription(
-      tr("Runs the disc bootstrap and apploader, then overlays the alternate ELF and starts at its "
+      tr("Runs the disc bootstrap and apploader, then overlays the ELF file and starts at its "
          "entry point. When disabled, Dolphin only imports symbols and DWARF from the ELF. Changes "
          "take effect the next time the game is started."));
 
   auto* map_browse = new NonDefaultQPushButton(QStringLiteral("..."));
   auto* elf_browse = new NonDefaultQPushButton(QStringLiteral("..."));
+  auto* source_browse = new NonDefaultQPushButton(tr("Add..."));
+  m_debug_remove_source_path = new NonDefaultQPushButton(tr("Remove"));
+  m_debug_remove_source_path->setEnabled(false);
   const auto initial_directory = [this](const ConfigText* edit) {
     if (!edit->text().isEmpty())
       return QFileInfo(edit->text()).absolutePath();
@@ -213,21 +229,60 @@ void GameConfigWidget::CreateWidgets()
       m_debug_symbol_map->SetTextAndUpdate(QDir::toNativeSeparators(path));
   });
   connect(elf_browse, &QPushButton::clicked, this, [this, initial_directory] {
-    const QString path = DolphinFileDialog::getOpenFileName(
-        this, tr("Select Alternate ELF"), initial_directory(m_debug_alternate_elf),
-        tr("ELF Files (*.elf);;All Files (*)"));
+    const QString path = DolphinFileDialog::getOpenFileName(this, tr("Select ELF File"),
+                                                            initial_directory(m_debug_elf_file),
+                                                            tr("ELF Files (*.elf);;All Files (*)"));
     if (!path.isEmpty())
-      m_debug_alternate_elf->SetTextAndUpdate(QDir::toNativeSeparators(path));
+      m_debug_elf_file->SetTextAndUpdate(QDir::toNativeSeparators(path));
   });
+  connect(source_browse, &QPushButton::clicked, this, [this] {
+    const QString path = DolphinFileDialog::getExistingDirectory(
+        this, tr("Add Source Directory"),
+        QFileInfo(QString::fromStdString(m_game.GetFilePath())).absolutePath());
+    if (path.isEmpty())
+      return;
+
+    const QSignalBlocker blocker(m_debug_source_paths);
+    const int row = m_debug_source_paths->rowCount();
+    m_debug_source_paths->insertRow(row);
+    m_debug_source_paths->setItem(row, 0, new QTableWidgetItem(QDir::toNativeSeparators(path)));
+    m_debug_source_paths->selectRow(row);
+    SaveSourcePaths();
+  });
+  connect(m_debug_remove_source_path, &QPushButton::clicked, this, [this] {
+    const int row = m_debug_source_paths->currentRow();
+    if (row < 0)
+      return;
+    const QSignalBlocker blocker(m_debug_source_paths);
+    m_debug_source_paths->removeRow(row);
+    SaveSourcePaths();
+  });
+  connect(m_debug_source_paths, &QTableWidget::itemSelectionChanged, this, [this] {
+    m_debug_remove_source_path->setEnabled(m_debug_source_paths->currentRow() >= 0);
+  });
+  connect(m_debug_source_paths, &QTableWidget::itemChanged, this, [this] { SaveSourcePaths(); });
+
+  auto* source_paths_description =
+      new QLabel(tr("Dolphin searches these directories in order to resolve relative or "
+                    "basename-only paths stored in DWARF. Double-click an entry to edit it."));
+  source_paths_description->setWordWrap(true);
 
   debugging_layout->addWidget(new QLabel(tr("Memory map file:")), 0, 0);
   debugging_layout->addWidget(m_debug_symbol_map, 0, 1);
   debugging_layout->addWidget(map_browse, 0, 2);
-  debugging_layout->addWidget(new QLabel(tr("Alternate ELF:")), 1, 0);
-  debugging_layout->addWidget(m_debug_alternate_elf, 1, 1);
+  debugging_layout->addWidget(new QLabel(tr("ELF file:")), 1, 0);
+  debugging_layout->addWidget(m_debug_elf_file, 1, 1);
   debugging_layout->addWidget(elf_browse, 1, 2);
-  debugging_layout->addWidget(m_debug_replace_disc_executable, 2, 0, 1, 3);
-  debugging_layout->setRowStretch(3, 1);
+  auto* source_buttons = new QVBoxLayout;
+  source_buttons->addWidget(source_browse);
+  source_buttons->addWidget(m_debug_remove_source_path);
+  source_buttons->addStretch();
+  debugging_layout->addWidget(new QLabel(tr("Source paths:")), 2, 0, Qt::AlignTop);
+  debugging_layout->addWidget(m_debug_source_paths, 2, 1);
+  debugging_layout->addLayout(source_buttons, 2, 2);
+  debugging_layout->addWidget(source_paths_description, 3, 1, 1, 2);
+  debugging_layout->addWidget(m_debug_replace_disc_executable, 4, 0, 1, 3);
+  debugging_layout->setRowStretch(5, 1);
 
   // Editor tab
   auto* advanced_layout = new QVBoxLayout;
@@ -269,7 +324,9 @@ void GameConfigWidget::CreateWidgets()
   {
     delete debugging_widget;
     m_debug_symbol_map = nullptr;
-    m_debug_alternate_elf = nullptr;
+    m_debug_elf_file = nullptr;
+    m_debug_source_paths = nullptr;
+    m_debug_remove_source_path = nullptr;
     m_debug_replace_disc_executable = nullptr;
   }
 
@@ -417,11 +474,59 @@ void GameConfigWidget::LoadSettings()
   {
     update_bool(m_debug_replace_disc_executable);
     update_string(m_debug_symbol_map);
-    update_string(m_debug_alternate_elf);
+    update_string(m_debug_elf_file);
+    LoadSourcePaths();
   }
 
   update_int(m_depth_slider);
   update_int(m_convergence_slider);
+}
+
+void GameConfigWidget::LoadSourcePaths()
+{
+  const Config::Location& location = Config::MAIN_DEBUG_SOURCE_PATHS.GetLocation();
+  const bool has_local_value = m_layer->Exists(location);
+  const bool has_global_value = m_global_layer->Exists(location);
+
+  std::string value;
+  if (has_local_value)
+    value = m_layer->Get(Config::MAIN_DEBUG_SOURCE_PATHS);
+  else if (has_global_value)
+    value = m_global_layer->Get(Config::MAIN_DEBUG_SOURCE_PATHS);
+  else
+    value = Config::GetBase(Config::MAIN_DEBUG_SOURCE_PATHS);
+
+  const QSignalBlocker blocker(m_debug_source_paths);
+  m_debug_source_paths->setRowCount(0);
+  m_debug_remove_source_path->setEnabled(false);
+  const QStringList paths =
+      QString::fromStdString(value).split(QLatin1Char(';'), Qt::SkipEmptyParts);
+  for (const QString& path : paths)
+  {
+    const int row = m_debug_source_paths->rowCount();
+    m_debug_source_paths->insertRow(row);
+    m_debug_source_paths->setItem(row, 0, new QTableWidgetItem(path));
+  }
+
+  QFont font = m_debug_source_paths->font();
+  font.setBold(has_local_value);
+  font.setItalic(!has_local_value && has_global_value);
+  m_debug_source_paths->setFont(font);
+}
+
+void GameConfigWidget::SaveSourcePaths()
+{
+  QStringList paths;
+  for (int row = 0; row < m_debug_source_paths->rowCount(); ++row)
+  {
+    const QTableWidgetItem* const item = m_debug_source_paths->item(row, 0);
+    if (item && !item->text().trimmed().isEmpty())
+      paths.push_back(item->text().trimmed());
+  }
+
+  m_layer->Set(Config::MAIN_DEBUG_SOURCE_PATHS.GetLocation(),
+               paths.join(QLatin1Char(';')).toStdString());
+  Config::OnConfigChanged();
 }
 
 void GameConfigWidget::SetItalics()

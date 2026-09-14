@@ -6,11 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Core/Boot/ElfReader.h"
-#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DWARF/DwarfReader.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
@@ -93,20 +91,5 @@ bool ImportDwarfFromElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
   return ImportDwarf(guard, symbol_db, {debug_data, debug_size},
                      line_data ? std::span<const u8>{line_data, line_size} : std::span<const u8>{},
                      elf_path);
-}
-
-bool ImportConfiguredDwarfElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db)
-{
-  const std::string& path = Config::Get(Config::MAIN_DEBUG_DWARF_ELF);
-  if (path.empty())
-    return false;
-
-  if (!File::Exists(path))
-  {
-    WARN_LOG_FMT(SYMBOLS, "Configured DWARF ELF not found: {}", path);
-    return false;
-  }
-
-  return ImportDwarfFromElf(guard, symbol_db, path);
 }
 }  // namespace Core::Debug

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <numeric>
@@ -34,6 +35,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
+#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HW/DVD/AMMediaboard.h"
@@ -541,24 +543,32 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (!EmulatedBS2(system, guard, system.IsWii(), *volume, riivolution_patches))
         return false;
 
-      if (disc.alternate_elf && disc.replace_executable)
+      if (disc.debug_elf && disc.replace_executable)
       {
-        if (!disc.alternate_elf->LoadIntoMemory(system))
+        if (!disc.debug_elf->LoadIntoMemory(system))
         {
-          PanicAlertFmtT("Failed to load the alternate ELF to memory.");
+          PanicAlertFmtT("Failed to load the debug ELF to memory.");
           return false;
         }
-        system.GetPPCState().pc = disc.alternate_elf->GetEntryPoint();
+        system.GetPPCState().pc = disc.debug_elf->GetEntryPoint();
       }
 
-      SConfig::OnTitleDirectlyBooted(guard);
+      SConfig::OnTitleDirectlyBooted(guard, disc.load_debug_elf);
 
-      if (disc.alternate_elf &&
-          disc.alternate_elf->LoadSymbols(guard, system.GetPPCSymbolDB(),
-                                          PathToFileName(disc.alternate_elf_path)))
+      bool debug_symbols_changed = false;
+      if (disc.debug_elf && disc.debug_elf->LoadSymbols(guard, system.GetPPCSymbolDB(),
+                                                        PathToFileName(disc.debug_elf_path)))
       {
-        if (disc.replace_executable)
-          HLE::PatchFunctions(system);
+        debug_symbols_changed = true;
+      }
+      if (disc.replace_executable && Core::Debug::ImportConfiguredEntrypoints(
+                                         guard, system.GetPPCSymbolDB(), disc.debug_elf_path))
+      {
+        debug_symbols_changed = true;
+      }
+      if (debug_symbols_changed)
+      {
+        HLE::PatchFunctions(system);
         Host_PPCSymbolsChanged();
       }
       return true;
@@ -574,7 +584,7 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       const DiscIO::VolumeDisc* const default_disc = SetDefaultDisc(system.GetDVDInterface());
 
       auto& ppc_state = system.GetPPCState();
-      if (Config::Get(Config::MAIN_BOOT_EXECUTABLE_WITH_DEFAULT_DISC))
+      if (executable.boot_with_default_disc)
       {
         if (!default_disc ||
             !EmulatedBS2(system, guard, system.IsWii(), *default_disc, riivolution_patches))
@@ -619,8 +629,8 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
         return false;
       }
 
-      AchievementManager::GetInstance().LoadGame(
-          Config::Get(Config::MAIN_BOOT_EXECUTABLE_WITH_DEFAULT_DISC) ? default_disc : nullptr);
+      AchievementManager::GetInstance().LoadGame(executable.boot_with_default_disc ? default_disc :
+                                                                                     nullptr);
 
       ppc_state.pc = executable.reader->GetEntryPoint();
 
@@ -629,11 +639,26 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       auto& ppc_symbol_db = system.GetPPCSymbolDB();
       bool symbols_changed = ppc_symbol_db.Clear();
 
+      const std::string& configured_elf = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+      std::error_code equivalent_error;
+      const bool configured_elf_is_executable =
+          !configured_elf.empty() &&
+          std::filesystem::equivalent(configured_elf, executable.path, equivalent_error);
+      const bool defer_configured_elf =
+          executable.boot_with_default_disc || configured_elf_is_executable;
+
       // Title setup can clear or replace the symbol DB while loading a map, so it must finish
       // before the executable's intrinsic symbols and DWARF are imported.
-      SConfig::OnTitleDirectlyBooted(guard);
+      SConfig::OnTitleDirectlyBooted(guard, !defer_configured_elf);
 
       if (executable.reader->LoadSymbols(guard, ppc_symbol_db, filename))
+      {
+        symbols_changed = true;
+        HLE::PatchFunctions(system);
+      }
+
+      if (defer_configured_elf &&
+          Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db, executable.path))
       {
         symbols_changed = true;
         HLE::PatchFunctions(system);

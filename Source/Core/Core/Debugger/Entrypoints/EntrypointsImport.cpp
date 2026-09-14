@@ -21,17 +21,17 @@ namespace Core::Debug
 namespace
 {
 std::optional<std::string> ResolveEntrypointsPath(const std::string& configured_path,
-                                                   const std::string& dwarf_elf_path)
+                                                  const std::string& elf_path)
 {
   if (!configured_path.empty())
     return configured_path;
 
-  if (dwarf_elf_path.empty())
+  if (elf_path.empty())
     return std::nullopt;
 
   std::string directory;
   std::string filename;
-  SplitPath(dwarf_elf_path, &directory, &filename, nullptr);
+  SplitPath(elf_path, &directory, &filename, nullptr);
   const std::string sibling =
       directory.empty() ? "entrypoints.json" : directory + "/entrypoints.json";
   if (File::Exists(sibling))
@@ -127,11 +127,13 @@ bool ImportEntrypointsFromJson(const CPUThreadGuard& guard, PPCSymbolDB& symbol_
   return imported > 0;
 }
 
-bool ImportConfiguredEntrypoints(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db)
+bool ImportConfiguredEntrypoints(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
+                                 const std::string& elf_path)
 {
-  const std::string& dwarf_elf = Config::Get(Config::MAIN_DEBUG_DWARF_ELF);
   const std::string& configured = Config::Get(Config::MAIN_DEBUG_ENTRYPOINTS);
-  const std::optional<std::string> path = ResolveEntrypointsPath(configured, dwarf_elf);
+  const std::string& configured_elf = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+  const std::optional<std::string> path =
+      ResolveEntrypointsPath(configured, elf_path.empty() ? configured_elf : elf_path);
   if (!path)
     return false;
 

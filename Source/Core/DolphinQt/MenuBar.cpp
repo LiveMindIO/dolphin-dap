@@ -7,12 +7,19 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QComboBox>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFontDialog>
+#include <QFormLayout>
 #include <QInputDialog>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMap>
+#include <QSpinBox>
 #include <QUrl>
 
 #include <fmt/format.h>
@@ -27,6 +34,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/Debugger/RSO.h"
 #include "Core/HLE/HLE.h"
@@ -107,6 +115,11 @@ MenuBar::MenuBar(QWidget* parent) : QMenuBar(parent)
   connect(this, &MenuBar::SelectionChanged, this, &MenuBar::OnSelectionChanged);
   connect(this, &MenuBar::RecordingStatusChanged, this, &MenuBar::OnRecordingStatusChanged);
   connect(this, &MenuBar::ReadOnlyModeChanged, this, &MenuBar::OnReadOnlyModeChanged);
+}
+
+MenuBar::~MenuBar()
+{
+  DAP::Deinit();
 }
 
 void MenuBar::OnEmulationStateChanged(Core::State state)
@@ -285,6 +298,15 @@ void MenuBar::AddToolsMenu()
 
   tools_menu->addAction(tr("FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
 
+  tools_menu->addSeparator();
+
+  m_dap_server_action = tools_menu->addAction(QString{}, this, &MenuBar::ToggleDAPServer);
+  tools_menu->addAction(tr("Configure DAP Server..."), this, &MenuBar::ConfigureDAPServer);
+  connect(tools_menu, &QMenu::aboutToShow, this, &MenuBar::UpdateDAPServerAction);
+  UpdateDAPServerAction();
+
+  tools_menu->addSeparator();
+
   auto* usb_device_menu = new QMenu(tr("Emulated USB Devices"), tools_menu);
   usb_device_menu->addAction(tr("&Skylanders Portal"), this, &MenuBar::ShowSkylanderPortal);
   usb_device_menu->addAction(tr("&Infinity Base"), this, &MenuBar::ShowInfinityBase);
@@ -382,6 +404,170 @@ void MenuBar::AddToolsMenu()
   m_wii_remotes[4] = connect_wii_remotes_menu->addAction(tr("Connect Balance Board"), this,
                                                          [this] { emit ConnectWiiRemote(4); });
   m_wii_remotes[4]->setCheckable(true);
+}
+
+void MenuBar::ToggleDAPServer()
+{
+  if (DAP::IsActive())
+  {
+    DAP::Deinit();
+    UpdateDAPServerAction();
+    return;
+  }
+
+  if (Config::Get(Config::MAIN_DAP_PORT) <= 0 && Config::Get(Config::MAIN_DAP_SOCKET).empty())
+  {
+    ConfigureDAPServer();
+    if (Config::Get(Config::MAIN_DAP_PORT) <= 0 && Config::Get(Config::MAIN_DAP_SOCKET).empty())
+    {
+      return;
+    }
+  }
+
+  StartDAPServer();
+}
+
+void MenuBar::ConfigureDAPServer()
+{
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Configure DAP Server"));
+
+  auto* transport = new QComboBox(&dialog);
+  transport->addItem(tr("TCP"), false);
+#ifndef _WIN32
+  transport->addItem(tr("Unix socket"), true);
+#endif
+
+  auto* port = new QSpinBox(&dialog);
+  port->setRange(1, 65535);
+  const int configured_port = Config::Get(Config::MAIN_DAP_PORT);
+  port->setValue(configured_port > 0 ? configured_port : 5678);
+
+  auto* socket_path = new QLineEdit(&dialog);
+  socket_path->setText(QString::fromStdString(Config::Get(Config::MAIN_DAP_SOCKET)));
+#ifndef _WIN32
+  socket_path->setPlaceholderText(QStringLiteral("/tmp/dolphin-dap"));
+#else
+  socket_path->setVisible(false);
+#endif
+
+  auto* port_label = new QLabel(tr("Port:"), &dialog);
+  auto* socket_label = new QLabel(tr("Socket path:"), &dialog);
+#ifdef _WIN32
+  socket_label->setVisible(false);
+#endif
+  auto update_transport = [=] {
+    const bool use_socket = transport->currentData().toBool();
+    port_label->setEnabled(!use_socket);
+    port->setEnabled(!use_socket);
+    socket_label->setEnabled(use_socket);
+    socket_path->setEnabled(use_socket);
+  };
+  connect(transport, &QComboBox::currentIndexChanged, &dialog, update_transport);
+
+#ifndef _WIN32
+  if (!Config::Get(Config::MAIN_DAP_SOCKET).empty())
+    transport->setCurrentIndex(1);
+#endif
+  update_transport();
+
+  auto* description = new QLabel(
+      tr("The server listens only on this computer. Configuration changes restart an active DAP "
+         "server and are used automatically when future games start."),
+      &dialog);
+  description->setWordWrap(true);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  auto* layout = new QFormLayout(&dialog);
+  layout->addRow(tr("Transport:"), transport);
+  layout->addRow(port_label, port);
+  layout->addRow(socket_label, socket_path);
+  layout->addRow(description);
+  layout->addRow(buttons);
+
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  const bool use_socket = transport->currentData().toBool();
+  const QString trimmed_socket_path = socket_path->text().trimmed();
+  if (use_socket && trimmed_socket_path.isEmpty())
+  {
+    ModalMessageBox::warning(this, tr("Invalid DAP Configuration"),
+                             tr("A Unix socket path is required."));
+    return;
+  }
+
+  const bool restart = DAP::IsActive();
+  if (use_socket)
+  {
+    Config::SetBase(Config::MAIN_DAP_SOCKET, trimmed_socket_path.toStdString());
+    Config::SetBase(Config::MAIN_DAP_PORT, -1);
+  }
+  else
+  {
+    Config::SetBase(Config::MAIN_DAP_SOCKET, std::string{});
+    Config::SetBase(Config::MAIN_DAP_PORT, port->value());
+  }
+  Config::Save();
+
+  if (restart)
+  {
+    DAP::Deinit();
+    StartDAPServer();
+  }
+}
+
+void MenuBar::StartDAPServer()
+{
+  if (DAP::IsActive())
+  {
+    UpdateDAPServerAction();
+    return;
+  }
+
+  if (AchievementManager::GetInstance().IsHardcoreModeActive())
+  {
+    ModalMessageBox::warning(this, tr("DAP Server"),
+                             tr("The DAP server is unavailable in Hardcore Mode."));
+    return;
+  }
+
+  if (Core::GetState(Core::System::GetInstance()) == Core::State::Uninitialized)
+  {
+    ModalMessageBox::information(
+        this, tr("DAP Server"),
+        tr("The DAP server is configured and will start when a game is launched."));
+    UpdateDAPServerAction();
+    return;
+  }
+
+#ifndef _WIN32
+  const std::string socket_path = Config::Get(Config::MAIN_DAP_SOCKET);
+  if (!socket_path.empty())
+    DAP::InitLocal(socket_path.c_str());
+  else
+#endif
+  {
+    const int port = Config::Get(Config::MAIN_DAP_PORT);
+    if (port > 0)
+      DAP::Init(static_cast<u32>(port));
+  }
+
+  if (!DAP::IsActive())
+  {
+    ModalMessageBox::critical(
+        this, tr("DAP Server"),
+        tr("Failed to start the DAP server. The configured port or socket may already be in use."));
+  }
+  UpdateDAPServerAction();
+}
+
+void MenuBar::UpdateDAPServerAction()
+{
+  m_dap_server_action->setText(DAP::IsActive() ? tr("Stop DAP Server") : tr("Start DAP Server"));
 }
 
 void MenuBar::AddEmulationMenu()

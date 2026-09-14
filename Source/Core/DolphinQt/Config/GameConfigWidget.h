@@ -23,6 +23,7 @@ class ConfigFloatSlider;
 class ConfigStringChoice;
 class ConfigText;
 class QPushButton;
+class QTableWidget;
 class QTabWidget;
 
 class GameConfigWidget : public QWidget
@@ -35,6 +36,8 @@ public:
 private:
   void CreateWidgets();
   void LoadSettings();
+  void LoadSourcePaths();
+  void SaveSourcePaths();
   void SetItalics();
 
   QString m_gameini_local_path;
@@ -50,9 +53,11 @@ private:
   ConfigBool* m_use_dsp_hle;
   ConfigBool* m_use_monoscopic_shadows;
   ConfigBool* m_debug_replace_disc_executable;
+  QPushButton* m_debug_remove_source_path;
 
   ConfigText* m_debug_symbol_map;
-  ConfigText* m_debug_alternate_elf;
+  ConfigText* m_debug_elf_file;
+  QTableWidget* m_debug_source_paths;
 
   ConfigStringChoice* m_deterministic_dual_core;
   ConfigFloatSlider* m_depth_slider;

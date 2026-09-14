@@ -56,34 +56,44 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
 
   SConfig& StartUp = SConfig::GetInstance();
 
+  if (auto* executable = std::get_if<BootParameters::Executable>(&boot->parameters))
+  {
+    // Executable boot metadata depends on this decision, so keep the pre-game-layer value for the
+    // complete boot rather than allowing a newly loaded per-game layer to change it midway.
+    executable->boot_with_default_disc = Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE);
+  }
+
   if (!StartUp.SetPathsAndGameMetadata(system, *boot))
     return false;
 
-  if (auto* disc = std::get_if<BootParameters::Disc>(&boot->parameters);
-      disc && Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE))
+  if (auto* disc = std::get_if<BootParameters::Disc>(&boot->parameters))
   {
-    disc->alternate_elf_path = Config::Get(Config::MAIN_DEBUG_ALTERNATE_ELF);
     if (NetPlay::IsNetPlayRunning())
     {
-      WARN_LOG_FMT(BOOT,
-                   "Ignoring local alternate ELF replacement during NetPlay and booting the disc "
-                   "executable");
+      disc->load_debug_elf = false;
+      if (!Config::Get(Config::MAIN_DEBUG_ELF_FILE).empty())
+        WARN_LOG_FMT(BOOT, "Ignoring local debug ELF configuration during NetPlay");
     }
-    else if (!disc->alternate_elf_path.empty())
+    else if (Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE))
     {
-      auto reader = std::make_unique<ElfReader>(disc->alternate_elf_path);
-      if (!reader->IsPPCExecutable())
+      disc->debug_elf_path = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+      if (!disc->debug_elf_path.empty())
       {
-        PanicAlertFmtT(
-            "The alternate ELF \"{0}\" is not a supported executable. Dolphin requires a "
-            "32-bit big-endian PowerPC ELF with an executable load segment containing its entry "
-            "point. Dolphin will boot the original disc executable instead.",
-            disc->alternate_elf_path);
-      }
-      else
-      {
-        disc->alternate_elf = std::move(reader);
-        disc->replace_executable = true;
+        auto reader = std::make_unique<ElfReader>(disc->debug_elf_path);
+        if (!reader->IsPPCExecutable())
+        {
+          PanicAlertFmtT(
+              "The debug ELF \"{0}\" is not a supported executable. Dolphin requires a "
+              "32-bit big-endian PowerPC ELF with an executable load segment containing its entry "
+              "point. Dolphin will boot the original disc executable instead.",
+              disc->debug_elf_path);
+        }
+        else
+        {
+          disc->debug_elf = std::move(reader);
+          disc->replace_executable = true;
+          disc->load_debug_elf = false;
+        }
       }
     }
   }

@@ -44,7 +44,9 @@ TEST_F(GameConfigLoaderTest, PersistsAndRemovesDiscDebugAssociation)
   {
     Config::Layer layer(ConfigLoaders::GenerateLocalGameConfigLoader("GALE01", 2));
     layer.Set(Config::MAIN_DEBUG_SYMBOL_MAP.GetLocation(), std::string{"/debug/main.map"});
-    layer.Set(Config::MAIN_DEBUG_ALTERNATE_ELF.GetLocation(), std::string{"/debug/main.elf"});
+    layer.Set(Config::MAIN_DEBUG_ELF_FILE.GetLocation(), std::string{"/debug/main.elf"});
+    layer.Set(Config::MAIN_DEBUG_SOURCE_PATHS.GetLocation(),
+              std::string{"/source/src;/source/extern/dolphin/src"});
     layer.Set(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE.GetLocation(), true);
     layer.Save();
   }
@@ -52,18 +54,21 @@ TEST_F(GameConfigLoaderTest, PersistsAndRemovesDiscDebugAssociation)
   {
     Config::Layer layer(ConfigLoaders::GenerateLocalGameConfigLoader("GALE01", 2));
     EXPECT_EQ(layer.Get(Config::MAIN_DEBUG_SYMBOL_MAP), "/debug/main.map");
-    EXPECT_EQ(layer.Get(Config::MAIN_DEBUG_ALTERNATE_ELF), "/debug/main.elf");
+    EXPECT_EQ(layer.Get(Config::MAIN_DEBUG_ELF_FILE), "/debug/main.elf");
+    EXPECT_EQ(layer.Get(Config::MAIN_DEBUG_SOURCE_PATHS), "/source/src;/source/extern/dolphin/src");
     EXPECT_TRUE(layer.Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE));
 
     layer.DeleteKey(Config::MAIN_DEBUG_SYMBOL_MAP.GetLocation());
-    layer.DeleteKey(Config::MAIN_DEBUG_ALTERNATE_ELF.GetLocation());
+    layer.DeleteKey(Config::MAIN_DEBUG_ELF_FILE.GetLocation());
+    layer.DeleteKey(Config::MAIN_DEBUG_SOURCE_PATHS.GetLocation());
     layer.DeleteKey(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE.GetLocation());
     layer.Save();
   }
 
   Config::Layer layer(ConfigLoaders::GenerateLocalGameConfigLoader("GALE01", 2));
   EXPECT_FALSE(layer.Exists(Config::MAIN_DEBUG_SYMBOL_MAP.GetLocation()));
-  EXPECT_FALSE(layer.Exists(Config::MAIN_DEBUG_ALTERNATE_ELF.GetLocation()));
+  EXPECT_FALSE(layer.Exists(Config::MAIN_DEBUG_ELF_FILE.GetLocation()));
+  EXPECT_FALSE(layer.Exists(Config::MAIN_DEBUG_SOURCE_PATHS.GetLocation()));
   EXPECT_FALSE(layer.Exists(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE.GetLocation()));
 }
 }  // namespace

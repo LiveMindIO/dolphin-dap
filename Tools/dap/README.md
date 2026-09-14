@@ -124,7 +124,7 @@ dolphin-emu-nogui \
   -C Dolphin.General.DAPPort=5678 \
   -C 'Dolphin.Debug.SourcePaths=/path/to/project/src;/path/to/project/extern/dolphin/src' \
   -C Dolphin.Core.DefaultISO=/path/to/game.iso \
-  -C Dolphin.Core.BootExecutableWithDefaultDisc=true \
+  -C Dolphin.Debug.ReplaceDiscExecutable=true \
   --exec /path/to/main.elf \
   --platform headless
 ```
@@ -277,7 +277,7 @@ safe only when the sidecar ELF preserves the exact addresses used by the running
 If linking the ELF moves code or data, breakpoints and variable values can refer to the
 wrong memory.
 
-Sidecar debug information can also be loaded with `Dolphin.Debug.DwarfElf` or
+Sidecar debug information can also be loaded with `Dolphin.Debug.ELFFile` or
 **Symbols → Load DWARF/Debug Info…** in the Qt interface.
 
 ### Debug information limits

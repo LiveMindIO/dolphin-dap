@@ -44,7 +44,7 @@ public:
       m_values.emplace_back(Config::MAIN_ENABLE_DEBUGGING.GetLocation(), ValueToString(true));
 
     if (!debug_elf.empty())
-      m_values.emplace_back(Config::MAIN_DEBUG_DWARF_ELF.GetLocation(), std::move(debug_elf));
+      m_values.emplace_back(Config::MAIN_DEBUG_ELF_FILE.GetLocation(), std::move(debug_elf));
 
     if (!debug_entrypoints.empty())
     {

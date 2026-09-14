@@ -23,6 +23,4 @@ bool ImportDwarf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
 
 bool ImportDwarfFromElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
                         const std::string& elf_path);
-
-bool ImportConfiguredDwarfElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db);
 }  // namespace Core::Debug
