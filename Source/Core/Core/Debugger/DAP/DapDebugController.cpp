@@ -839,11 +839,12 @@ DapDebugController::GetBreakpointLocations(const SourceReference source_referenc
   if (symbol_db.HasSourceLineInfo() && source_reference > 0 &&
       source_reference <= symbol_db.GetSourceFiles().size())
   {
-    for (u64 i = 0; i < line_count; ++i)
+    const auto line_addresses =
+        symbol_db.GetExactLineAddresses(static_cast<u32>(source_reference - 1));
+    for (auto it = line_addresses.lower_bound(static_cast<u32>(first_line));
+         it != line_addresses.end() && it->first <= static_cast<u32>(capped_last); ++it)
     {
-      const int line = static_cast<int>(static_cast<u64>(first_line) + i);
-      if (symbol_db.GetLineAddress(static_cast<u32>(source_reference - 1), static_cast<u32>(line)))
-        locations.push_back({line});
+      locations.push_back({static_cast<int>(it->first)});
     }
     return locations;
   }

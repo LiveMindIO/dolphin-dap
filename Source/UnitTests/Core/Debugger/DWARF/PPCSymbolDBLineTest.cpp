@@ -156,7 +156,7 @@ TEST_F(PPCSymbolDBLineTest, GetSourceLineDoesNotEscapeContainingFunction)
   EXPECT_FALSE(SymbolDB().GetSourceLine(source_less_function).has_value());
 }
 
-TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNearestPrecedingLine)
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNextExecutableLine)
 {
   const u32 file_index = SymbolDB().AddSourceFile("foo.c");
   SymbolDB().AddLineEntry(0x00004100, file_index, 10);
@@ -164,14 +164,21 @@ TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNearestPrecedingLine)
 
   const std::optional<u32> address = SymbolDB().GetLineAddress("foo.c", 15);
   ASSERT_TRUE(address);
-  EXPECT_EQ(*address, 0x00004100U);
+  EXPECT_EQ(*address, 0x00004110U);
 }
 
-TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptWhenLineBeforeFirstEntry)
+TEST_F(PPCSymbolDBLineTest, GetLineAddressMapsFunctionDeclarationToFirstExecutableLine)
 {
   const u32 file_index = SymbolDB().AddSourceFile("foo.c");
   SymbolDB().AddLineEntry(0x00004100, file_index, 10);
-  EXPECT_FALSE(SymbolDB().GetLineAddress("foo.c", 5).has_value());
+  EXPECT_EQ(SymbolDB().GetLineAddress("foo.c", 5), 0x00004100U);
+}
+
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptAfterLastExecutableLine)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 10);
+  EXPECT_FALSE(SymbolDB().GetLineAddress("foo.c", 11).has_value());
 }
 
 TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)

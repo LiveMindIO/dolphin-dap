@@ -33,6 +33,7 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "DolphinQt/Debugger/BranchWatchDialog.h"
+#include "DolphinQt/Debugger/DebugVariablesWidget.h"
 #include "DolphinQt/Debugger/SourceViewWidget.h"
 #include "DolphinQt/Host.h"
 #include "DolphinQt/Resources.h"
@@ -180,9 +181,9 @@ void CodeWidget::CreateWidgets()
   symbols_tab->addTab(m_note_list, tr("Notes"));
   m_search_symbols = add_search_line_edit(tr("Symbols"), symbols_tab);
 
-  // Function calls
-  m_function_calls_list = new QListWidget;
-  m_search_calls = add_search_line_edit(tr("Calls"), m_function_calls_list);
+  // Variables
+  m_variables_widget = new DebugVariablesWidget(m_system);
+  m_box_splitter->addWidget(m_variables_widget);
 
   // Function callers
   m_function_callers_list = new QListWidget;
@@ -226,10 +227,6 @@ void CodeWidget::ConnectWidgets()
   connect(m_search_address, &QLineEdit::returnPressed, this, &CodeWidget::OnSearchAddress);
   connect(m_lock_btn, &QPushButton::toggled, m_code_view, &CodeViewWidget::OnLockAddress);
   connect(m_search_symbols, &QLineEdit::textChanged, this, &CodeWidget::OnSearchSymbols);
-  connect(m_search_calls, &QLineEdit::textChanged, this, [this] {
-    if (const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress()))
-      UpdateFunctionCalls(symbol);
-  });
   connect(m_search_callers, &QLineEdit::textChanged, this, [this] {
     if (const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress()))
       UpdateFunctionCallers(symbol);
@@ -240,10 +237,11 @@ void CodeWidget::ConnectWidgets()
   connect(m_note_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectNote);
   connect(m_symbols_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectSymbol);
   connect(m_callstack_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectCallstack);
-  connect(m_function_calls_list, &QListWidget::itemPressed, this,
-          &CodeWidget::OnSelectFunctionCalls);
   connect(m_function_callers_list, &QListWidget::itemPressed, this,
           &CodeWidget::OnSelectFunctionCallers);
+  connect(m_variables_widget, &DebugVariablesWidget::RequestWatch, this, &CodeWidget::RequestWatch);
+  connect(m_variables_widget, &DebugVariablesWidget::RequestMemoryBreakpoint, this,
+          &CodeWidget::RequestMemoryBreakpoint);
 
   connect(Host::GetInstance(), &Host::PPCSymbolsChanged, this, &CodeWidget::OnPPCSymbolsChanged);
   connect(Host::GetInstance(), &Host::PPCBreakpointsChanged, m_source_view,
@@ -283,7 +281,6 @@ void CodeWidget::OnPPCSymbolsChanged()
   UpdateCallstack();
 
   const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress());
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
   m_source_view->Clear();
   NavigateToAddress(m_code_view->GetAddress(), CodeViewWidget::SetAddressUpdate::WithoutUpdate);
@@ -338,7 +335,6 @@ void CodeWidget::OnSelectSymbol()
 
   SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
   UpdateCallstack();
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
 
   m_code_tabs->currentWidget()->setFocus();
@@ -358,16 +354,6 @@ void CodeWidget::OnSelectNote()
 void CodeWidget::OnSelectCallstack()
 {
   const auto items = m_callstack_list->selectedItems();
-  if (items.isEmpty())
-    return;
-
-  SetAddress(items[0]->data(Qt::UserRole).toUInt(), CodeViewWidget::SetAddressUpdate::WithUpdate);
-  Update();
-}
-
-void CodeWidget::OnSelectFunctionCalls()
-{
-  const auto items = m_function_calls_list->selectedItems();
   if (items.isEmpty())
     return;
 
@@ -432,7 +418,6 @@ void CodeWidget::Update()
   m_source_view->SetCurrentAddress(pc);
   m_source_view->RefreshBreakpoints();
 
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
 }
 
@@ -449,9 +434,13 @@ void CodeWidget::UpdateCallstack()
 
   for (const Core::Debug::StackFrame& frame : stack.frames)
   {
-    std::string label = fmt::format("{} [{:08x}]", frame.name, frame.address);
+    std::string label = frame.name;
     if (frame.source)
-      label += fmt::format(" - {}:{}", frame.source->file, frame.source->line);
+    {
+      const std::string& path = frame.source->file;
+      const std::size_t filename_start = path.find_last_of("/\\");
+      label += fmt::format(" - {}:{}", path.substr(filename_start + 1), frame.source->line);
+    }
     const QString name = QString::fromStdString(label);
 
     if (!name.contains(filter, Qt::CaseInsensitive))
@@ -519,43 +508,6 @@ void CodeWidget::UpdateNotes()
   m_note_list->sortItems();
 }
 
-void CodeWidget::UpdateFunctionCalls(const Common::Symbol* symbol)
-{
-  m_function_calls_list->clear();
-  if (symbol == nullptr)
-    return;
-
-  const QString filter = m_search_calls->text();
-
-  for (const auto& call : symbol->calls)
-  {
-    const u32 addr = call.function;
-    const Common::Symbol* const call_symbol = m_ppc_symbol_db.GetSymbolFromAddr(addr);
-
-    if (call_symbol)
-    {
-      QString name;
-
-      if (!call_symbol->object_name.empty())
-      {
-        name = QString::fromStdString(
-            fmt::format("< {} ({}, {:08x})", call_symbol->name, call_symbol->object_name, addr));
-      }
-      else
-      {
-        name = QString::fromStdString(fmt::format("< {} ({:08x})", call_symbol->name, addr));
-      }
-
-      if (!name.contains(filter, Qt::CaseInsensitive))
-        continue;
-
-      auto* item = new QListWidgetItem(name);
-      item->setData(Qt::UserRole, addr);
-      m_function_calls_list->addItem(item);
-    }
-  }
-}
-
 void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
 {
   m_function_callers_list->clear();
@@ -564,9 +516,9 @@ void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
 
   const QString filter = m_search_callers->text();
 
-  for (const auto& caller : symbol->callers)
+  for (const auto& caller : symbol->calls)
   {
-    const u32 addr = caller.call_address;
+    const u32 addr = caller.function;
     const Common::Symbol* const caller_symbol = m_ppc_symbol_db.GetSymbolFromAddr(addr);
 
     if (caller_symbol)

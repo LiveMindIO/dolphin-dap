@@ -237,17 +237,17 @@ std::optional<u32> PPCSymbolDB::GetLineAddressLocked(const u32 file_index, const
   if (m_line_table.empty() || file_index >= m_source_files.size())
     return std::nullopt;
 
-  std::optional<u32> best_address;
+  std::optional<std::pair<u32, u32>> best;
   for (const auto& [address, entry] : m_line_table)
   {
     if (entry.file_index != file_index)
       continue;
     if (entry.line == line)
       return address;
-    if (entry.line < line)
-      best_address = address;
+    if (entry.line > line && (!best || entry.line < best->first))
+      best = std::pair{entry.line, address};
   }
-  return best_address;
+  return best ? std::make_optional(best->second) : std::nullopt;
 }
 
 namespace

@@ -16,6 +16,7 @@
 #include "DolphinQt/Debugger/CodeViewWidget.h"
 
 class BranchWatchDialog;
+class DebugVariablesWidget;
 class QCloseEvent;
 class QLineEdit;
 class QShowEvent;
@@ -63,12 +64,13 @@ public:
 signals:
   void RequestPPCComparison(u32 address, bool translate_address);
   void ShowMemory(u32 address);
+  void RequestWatch(const QString& name, u32 address);
+  void RequestMemoryBreakpoint(u32 start, u32 end, bool read, bool write);
 
 private:
   void CreateWidgets();
   void ConnectWidgets();
   void UpdateCallstack();
-  void UpdateFunctionCalls(const Common::Symbol* symbol);
   void UpdateFunctionCallers(const Common::Symbol* symbol);
   void UpdateNotes();
   void NavigateToAddress(u32 address, CodeViewWidget::SetAddressUpdate update);
@@ -84,7 +86,6 @@ private:
   void OnSelectNote();
   void OnSelectCallstack();
   void OnSelectFunctionCallers();
-  void OnSelectFunctionCalls();
 
   void closeEvent(QCloseEvent*) override;
   void showEvent(QShowEvent* event) override;
@@ -103,8 +104,7 @@ private:
   QLineEdit* m_search_symbols;
   QListWidget* m_symbols_list;
   QListWidget* m_note_list;
-  QLineEdit* m_search_calls;
-  QListWidget* m_function_calls_list;
+  DebugVariablesWidget* m_variables_widget;
   QLineEdit* m_search_callers;
   QListWidget* m_function_callers_list;
   CodeViewWidget* m_code_view;

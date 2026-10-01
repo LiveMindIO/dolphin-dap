@@ -594,6 +594,20 @@ TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesDwarfLineTable)
   EXPECT_EQ(*address, DwarfTestFixture::kLineTwoAddress);
 }
 
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesNextExecutableDwarfLine)
+{
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  const u32 file = symbol_db.AddSourceFile("test.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, file, 10);
+  symbol_db.AddLineEntry(TEST_ADDRESS + 0x10, file, 20);
+  DAP::DapDebugController controller(System());
+  const DAP::SourceBreakpointContext context{.source_reference = file + 1};
+
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 5), TEST_ADDRESS);
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 15), TEST_ADDRESS + 0x10);
+  EXPECT_FALSE(controller.ResolveSourceLineBreakpoint(context, 21));
+}
+
 TEST_F(DapControllerTest, ResolveSourceLineBreakpointDoesNotTreatDwarfFileHandleAsAddress)
 {
   DAP::DapDebugController controller(System());
@@ -1856,10 +1870,9 @@ TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfMapsResolvableLines)
 
   DAP::DapDebugController controller(System());
   const std::vector<DAP::BreakpointLocation> locations = controller.GetBreakpointLocations(1, 1, 3);
-  ASSERT_EQ(locations.size(), 3u);
+  ASSERT_EQ(locations.size(), 2u);
   EXPECT_EQ(locations[0].line, 1);
   EXPECT_EQ(locations[1].line, 2);
-  EXPECT_EQ(locations[2].line, 3);
 }
 
 TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfSkipsLinesBeforeFirstEntry)

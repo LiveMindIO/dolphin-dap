@@ -5,13 +5,13 @@
 
 #include <limits>
 
-#include <QCloseEvent>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QTabWidget>
 #include <QTreeView>
+#include <QVBoxLayout>
 
 #include "Core/Core.h"
 #include "Core/HW/CPU.h"
@@ -21,15 +21,9 @@
 #include "DolphinQt/Settings.h"
 
 DebugVariablesWidget::DebugVariablesWidget(Core::System& system, QWidget* parent)
-    : QDockWidget(parent), m_system(system),
+    : QWidget(parent), m_system(system),
       m_execution_observer_id(system.GetCPU().GetExecutionState().RegisterClient())
 {
-  setWindowTitle(tr("Variables"));
-  setObjectName(QStringLiteral("variables"));
-  setAllowedAreas(Qt::AllDockWidgetAreas);
-  setHidden(!Settings::Instance().IsVariablesVisible() ||
-            !Settings::Instance().IsDebugModeEnabled());
-
   m_tabs = new QTabWidget(this);
   m_locals_view = new QTreeView(m_tabs);
   m_globals_view = new QTreeView(m_tabs);
@@ -51,7 +45,9 @@ DebugVariablesWidget::DebugVariablesWidget(Core::System& system, QWidget* parent
   }
   m_tabs->addTab(m_locals_view, tr("Locals (frame 0)"));
   m_tabs->addTab(m_globals_view, tr("Globals"));
-  setWidget(m_tabs);
+  auto* layout = new QVBoxLayout(this);
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->addWidget(m_tabs);
 
   const auto show_error = [this](const QString& error) {
     QMessageBox::warning(this, tr("Variable Error"), error);
@@ -62,11 +58,6 @@ DebugVariablesWidget::DebugVariablesWidget(Core::System& system, QWidget* parent
           [this](const QPoint& pos) { ShowContextMenu(m_locals_view, m_locals_model, pos); });
   connect(m_globals_view, &QTreeView::customContextMenuRequested, this,
           [this](const QPoint& pos) { ShowContextMenu(m_globals_view, m_globals_model, pos); });
-  connect(&Settings::Instance(), &Settings::VariablesVisibilityChanged, this,
-          [this](const bool visible) { setHidden(!visible); });
-  connect(&Settings::Instance(), &Settings::DebugModeToggled, this, [this](const bool enabled) {
-    setHidden(!enabled || !Settings::Instance().IsVariablesVisible());
-  });
   connect(&Settings::Instance(), &Settings::DebugFontChanged, this,
           [this](const QFont& font) { m_tabs->setFont(font); });
   m_tabs->setFont(Settings::Instance().GetDebugFont());
@@ -84,12 +75,6 @@ DebugVariablesWidget::DebugVariablesWidget(Core::System& system, QWidget* parent
 DebugVariablesWidget::~DebugVariablesWidget()
 {
   m_system.GetCPU().GetExecutionState().UnregisterClient(m_execution_observer_id);
-}
-
-void DebugVariablesWidget::closeEvent(QCloseEvent* event)
-{
-  Settings::Instance().SetVariablesVisible(false);
-  QDockWidget::closeEvent(event);
 }
 
 void DebugVariablesWidget::HandleExecutionEvent(

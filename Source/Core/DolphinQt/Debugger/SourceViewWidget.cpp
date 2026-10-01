@@ -327,15 +327,14 @@ void SourceViewWidget::PaintGutter(QPaintEvent* event)
     if (block.isVisible() && bottom >= event->rect().top())
     {
       const u32 line = static_cast<u32>(block.blockNumber() + 1);
-      const auto address = AddressForLine(line);
+      const auto line_it = m_line_addresses.find(line);
       const int center_y = top + fontMetrics().height() / 2;
-      if (address)
+      if (line_it != m_line_addresses.end() && !line_it->second.empty())
       {
         painter.setPen(Qt::NoPen);
         painter.setBrush(palette().mid());
         painter.drawEllipse(QPoint(marker_x, center_y), marker_size / 3, marker_size / 3);
-        const auto& addresses = m_line_addresses.at(line);
-        if (std::ranges::any_of(addresses, [&snapshot](const u32 row_address) {
+        if (std::ranges::any_of(line_it->second, [&snapshot](const u32 row_address) {
               return snapshot->GetRegularBreakpoint(row_address) != nullptr;
             }))
         {
@@ -373,7 +372,7 @@ void SourceViewWidget::HandleGutterClick(QMouseEvent* event)
   const u32 line = static_cast<u32>(cursor.blockNumber() + 1);
   if (const std::optional<u32> address = AddressForLine(line))
   {
-    SelectLine(line);
+    SelectLine(*ResolveLine(line));
     const std::vector<u32> addresses = AddressesForLine(line);
     const auto snapshot = Core::System::GetInstance().GetPowerPC().GetBreakPoints().GetSnapshot();
     bool removed_existing = false;
@@ -425,16 +424,23 @@ void SourceViewWidget::SelectLine(const u32 line)
 
 std::optional<u32> SourceViewWidget::AddressForLine(const u32 line) const
 {
-  const auto it = m_line_addresses.find(line);
-  return it == m_line_addresses.end() || it->second.empty() ?
-             std::nullopt :
-             std::make_optional(it->second.front());
+  const std::optional<u32> resolved_line = ResolveLine(line);
+  if (!resolved_line)
+    return std::nullopt;
+  const auto& addresses = m_line_addresses.at(*resolved_line);
+  return addresses.empty() ? std::nullopt : std::make_optional(addresses.front());
 }
 
 std::vector<u32> SourceViewWidget::AddressesForLine(const u32 line) const
 {
-  const auto it = m_line_addresses.find(line);
-  return it == m_line_addresses.end() ? std::vector<u32>{} : it->second;
+  const std::optional<u32> resolved_line = ResolveLine(line);
+  return resolved_line ? m_line_addresses.at(*resolved_line) : std::vector<u32>{};
+}
+
+std::optional<u32> SourceViewWidget::ResolveLine(const u32 line) const
+{
+  const auto it = m_line_addresses.lower_bound(line);
+  return it == m_line_addresses.end() ? std::nullopt : std::make_optional(it->first);
 }
 
 void SourceViewWidget::resizeEvent(QResizeEvent* event)

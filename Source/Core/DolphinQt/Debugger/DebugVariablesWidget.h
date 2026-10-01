@@ -3,13 +3,12 @@
 
 #pragma once
 
-#include <QDockWidget>
+#include <QWidget>
 
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/ExecutionState.h"
 
 class DebugVariablesModel;
-class QCloseEvent;
 class QTabWidget;
 class QTreeView;
 
@@ -18,7 +17,7 @@ namespace Core
 class System;
 }
 
-class DebugVariablesWidget final : public QDockWidget
+class DebugVariablesWidget final : public QWidget
 {
   Q_OBJECT
 
@@ -29,9 +28,6 @@ public:
 signals:
   void RequestWatch(const QString& name, u32 address);
   void RequestMemoryBreakpoint(u32 start, u32 end, bool read, bool write);
-
-protected:
-  void closeEvent(QCloseEvent* event) override;
 
 private:
   void HandleExecutionEvent(std::shared_ptr<const Core::Debug::ExecutionEvent> event);
