@@ -97,12 +97,18 @@ cmake --build build --target dolphin-nogui
 
 Choose one of these modes when starting Dolphin.
 
+Every debugging launch should include `-C Dolphin.Interface.DebugModeEnabled=True`.
+This enables core breakpoint checks and debugger-aware stepping, including in the
+NoGUI build. Configuring a DAP port or socket alone does not enable core debugging.
+The override applies only to this launch; it does not open GUI panes in NoGUI.
+
 ### Mode 1: Run the ISO
 
 Use this mode to debug the game contained in the ISO:
 
 ```bash
 dolphin-emu-nogui \
+  -C Dolphin.Interface.DebugModeEnabled=True \
   -C Dolphin.General.DAPPort=5678 \
   --exec /path/to/game.iso \
   --platform headless
@@ -121,10 +127,11 @@ Use this mode for source-level debugging of a decomp build:
 
 ```bash
 dolphin-emu-nogui \
+  -C Dolphin.Interface.DebugModeEnabled=True \
   -C Dolphin.General.DAPPort=5678 \
   -C 'Dolphin.Debug.SourcePaths=/path/to/project/src;/path/to/project/extern/dolphin/src' \
   -C Dolphin.Core.DefaultISO=/path/to/game.iso \
-  -C Dolphin.Core.BootExecutableWithDefaultDisc=true \
+  -C Dolphin.Debug.ReplaceDiscExecutable=true \
   --exec /path/to/main.elf \
   --platform headless
 ```
@@ -161,9 +168,13 @@ port setting with:
 -C Dolphin.General.DAPSocket=/tmp/dolphin-dap.sock
 ```
 
-You can also persist either setting in `Dolphin.ini`:
+Keep the core-debugging argument when switching from TCP to a Unix socket.
+You can also persist core debugging and either connection setting in `Dolphin.ini`:
 
 ```ini
+[Interface]
+DebugModeEnabled = True
+
 [General]
 DAPPort = 5678
 # DAPSocket = /tmp/dolphin-dap.sock
@@ -265,6 +276,7 @@ Dolphin executes the DOL from the ISO and loads debug information from a separat
 
 ```bash
 dolphin-emu-nogui \
+  -C Dolphin.Interface.DebugModeEnabled=True \
   -C Dolphin.General.DAPPort=5678 \
   --exec /path/to/game.iso \
   --debug-elf /path/to/main.elf \
@@ -277,7 +289,7 @@ safe only when the sidecar ELF preserves the exact addresses used by the running
 If linking the ELF moves code or data, breakpoints and variable values can refer to the
 wrong memory.
 
-Sidecar debug information can also be loaded with `Dolphin.Debug.DwarfElf` or
+Sidecar debug information can also be loaded with `Dolphin.Debug.ELFFile` or
 **Symbols → Load DWARF/Debug Info…** in the Qt interface.
 
 ### Debug information limits

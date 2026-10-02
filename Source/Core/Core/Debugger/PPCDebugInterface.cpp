@@ -361,7 +361,7 @@ bool PPCDebugInterface::IsBreakpoint(u32 address) const
 
 void PPCDebugInterface::AddBreakpoint(u32 address)
 {
-  m_system.GetPowerPC().GetBreakPoints().Add(address);
+  (void)m_system.GetPowerPC().GetBreakPoints().Add(address);
 }
 
 void PPCDebugInterface::RemoveBreakpoint(u32 address)

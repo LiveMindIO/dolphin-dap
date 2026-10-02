@@ -93,8 +93,7 @@ int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
   u32 readable = 0;
   {
     Core::CPUThreadGuard guard(m_system);
-    AddressSpace::Accessors* accessors =
-        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
     for (; readable < count; ++readable)
     {
       const u32 addr = address + readable;
@@ -131,10 +130,9 @@ int RealtimeWatchSampler::AddSubscription(u32 address, u32 count)
 bool RealtimeWatchSampler::RemoveSubscription(int watch_id)
 {
   std::lock_guard lock(m_mutex);
-  const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
-                               [watch_id](const Subscription& sub) {
-                                 return sub.watch_id == watch_id;
-                               });
+  const auto it =
+      std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+                   [watch_id](const Subscription& sub) { return sub.watch_id == watch_id; });
   if (it == m_subscriptions.end())
     return false;
   m_subscriptions.erase(it);
@@ -157,10 +155,9 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   Core::CPUThreadGuard guard(m_system);
 
   std::lock_guard lock(m_mutex);
-  const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
-                                [watch_id](const Subscription& sub) {
-                                  return sub.watch_id == watch_id;
-                                });
+  const auto it =
+      std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+                   [watch_id](const Subscription& sub) { return sub.watch_id == watch_id; });
   if (it == m_subscriptions.end())
     return false;
   // The frozen canon must match the subscription's width exactly -- a
@@ -192,8 +189,7 @@ bool RealtimeWatchSampler::Freeze(int watch_id, std::vector<u8> value)
   u32 frozen_written = 0;
   if (it->count > 0)
   {
-    AddressSpace::Accessors* accessors =
-        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
     const u8* frozen = it->frozen_value->data();
     for (u32 i = 0; i < it->count; ++i)
     {
@@ -213,10 +209,9 @@ std::optional<RealtimeWatchSampler::SubscriptionInfo>
 RealtimeWatchSampler::GetSubscriptionInfo(int watch_id)
 {
   std::lock_guard lock(m_mutex);
-  const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
-                               [watch_id](const Subscription& sub) {
-                                 return sub.watch_id == watch_id;
-                               });
+  const auto it =
+      std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+                   [watch_id](const Subscription& sub) { return sub.watch_id == watch_id; });
   if (it == m_subscriptions.end())
     return std::nullopt;
   return SubscriptionInfo{.address = it->address, .count = it->count};
@@ -225,10 +220,9 @@ RealtimeWatchSampler::GetSubscriptionInfo(int watch_id)
 bool RealtimeWatchSampler::Unfreeze(int watch_id)
 {
   std::lock_guard lock(m_mutex);
-  const auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
-                               [watch_id](const Subscription& sub) {
-                                 return sub.watch_id == watch_id;
-                               });
+  const auto it =
+      std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+                   [watch_id](const Subscription& sub) { return sub.watch_id == watch_id; });
   if (it == m_subscriptions.end())
     return false;
   // Idempotent: clearing an already-clear frozen_value is a no-op, not an
@@ -247,8 +241,7 @@ void RealtimeWatchSampler::Tick()
       return;
 
     Core::CPUThreadGuard guard(m_system);
-    AddressSpace::Accessors* accessors =
-        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
 
     for (Subscription& sub : m_subscriptions)
     {
@@ -273,7 +266,7 @@ void RealtimeWatchSampler::Tick()
       // and suppress the change event. The dispatch callback is never called
       // for a frozen subscription -- the freeze itself is the response.
       // DESNOTE(jbarber, 2026-07-22): With MMU write suppression active
-      // (DapDebugController::InstallFreeze installed an `is_freeze` memcheck),
+      // (DapDebugController::InstallFreeze installed a private freeze range),
       // CPU stores to this range are dropped before reaching RAM. Drift can
       // only come from DMA/peripheral writes that bypass MMU::Write (PI/DVD
       // transfers, Memory::CopyToEmu, etc.). The memcmp is cheap and ensures
@@ -291,8 +284,7 @@ void RealtimeWatchSampler::Tick()
         // (stale current bytes vs canon) and could overwrite the unreadable
         // tail with canon bytes via an unchecked WriteU8.
         const u32 frozen_bytes = std::min(sub.readable, sub.count);
-        if (frozen_bytes == 0 ||
-            std::memcmp(cur, frozen, frozen_bytes) == 0)
+        if (frozen_bytes == 0 || std::memcmp(cur, frozen, frozen_bytes) == 0)
         {
           continue;
         }

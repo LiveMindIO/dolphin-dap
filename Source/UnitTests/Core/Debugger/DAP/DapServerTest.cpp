@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -84,6 +85,7 @@ TEST_F(DapServerTest, RejectsClientAboveConcurrentLimitAndShutsDownIdleClients)
 
   DAP::Deinit();
   EXPECT_FALSE(DAP::IsActive());
+  EXPECT_NE(access(m_path.c_str(), F_OK), 0);
   EXPECT_TRUE(WaitForEof(clients[0]));
   EXPECT_TRUE(WaitForEof(clients[1]));
   for (int fd : clients)
@@ -98,6 +100,24 @@ TEST_F(DapServerTest, DuplicateInitLeavesOriginalServerActive)
   ASSERT_GE(client, 0);
   EXPECT_TRUE(IsOpenWithoutData(client));
   close(client);
+}
+
+TEST_F(DapServerTest, RefusesToReplaceRegularFileAtSocketPath)
+{
+  DAP::Deinit();
+  {
+    std::ofstream file(m_path);
+    ASSERT_TRUE(file.good());
+    file << "keep";
+  }
+
+  DAP::InitLocal(m_path.c_str());
+  EXPECT_FALSE(DAP::IsActive());
+
+  std::ifstream file(m_path);
+  std::string contents;
+  file >> contents;
+  EXPECT_EQ(contents, "keep");
 }
 }  // namespace
 #endif

@@ -594,6 +594,20 @@ TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesDwarfLineTable)
   EXPECT_EQ(*address, DwarfTestFixture::kLineTwoAddress);
 }
 
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesNextExecutableDwarfLine)
+{
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  const u32 file = symbol_db.AddSourceFile("test.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, file, 10);
+  symbol_db.AddLineEntry(TEST_ADDRESS + 0x10, file, 20);
+  DAP::DapDebugController controller(System());
+  const DAP::SourceBreakpointContext context{.source_reference = file + 1};
+
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 5), TEST_ADDRESS);
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 15), TEST_ADDRESS + 0x10);
+  EXPECT_FALSE(controller.ResolveSourceLineBreakpoint(context, 21));
+}
+
 TEST_F(DapControllerTest, ResolveSourceLineBreakpointDoesNotTreatDwarfFileHandleAsAddress)
 {
   DAP::DapDebugController controller(System());
@@ -661,10 +675,10 @@ TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 0"}});
 
-  const TBreakPoint* bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   ASSERT_TRUE(bp->condition.has_value());
-  EXPECT_EQ(bp->condition->GetText(), "r3 == 0");
+  EXPECT_EQ(bp->condition->GetText(), "r3==0");
 }
 
 TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
@@ -672,10 +686,13 @@ TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}})
+          .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_break_on_read);
   EXPECT_FALSE(check->is_break_on_write);
@@ -688,8 +705,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsReplacesPreviousWatchpoints)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 4, .read = false, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 4, .read = false, .write = true}})
+          .has_value());
 
   EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 4), nullptr);
@@ -700,10 +721,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsRangedInstallsIsRangedMemcheck)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .length = 0x100, .read = false, .write = true}});
+  ASSERT_TRUE(controller
+                  .SetDataBreakpoints(
+                      {{.address = TEST_ADDRESS, .length = 0x100, .read = false, .write = true}})
+                  .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_ranged);
   EXPECT_EQ(check->start_address, TEST_ADDRESS);
@@ -717,10 +740,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsSingleByteIsNotRanged)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .length = 1, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints({{.address = TEST_ADDRESS, .length = 1, .read = true, .write = true}})
+          .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->is_ranged);
   EXPECT_EQ(check->start_address, TEST_ADDRESS);
@@ -735,10 +760,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsRangedOverflowClampsEndAddress)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = NEAR_MAX, .length = 0x100, .read = false, .write = true}});
+  ASSERT_TRUE(controller
+                  .SetDataBreakpoints(
+                      {{.address = NEAR_MAX, .length = 0x100, .read = false, .write = true}})
+                  .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(NEAR_MAX);
+  const auto check = memchecks.GetMemCheck(NEAR_MAX);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_ranged);
   EXPECT_EQ(check->start_address, NEAR_MAX);
@@ -751,10 +778,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsEmptyClearsExisting)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
 
-  controller.SetDataBreakpoints({});
+  ASSERT_TRUE(controller.SetDataBreakpoints({}).has_value());
   EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
   EXPECT_FALSE(memchecks.HasAny());
 }
@@ -768,7 +797,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsInvalidConditionAddsUnconditionalBre
   // unconditional stop rather than silently disappearing.
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "not a condition"}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -780,7 +809,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsEmptyConditionIsUnconditional)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = ""}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -834,10 +863,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckFiresWhenExpressionTrue)
   System().GetPPCState().gpr[3] = 1;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
 }
@@ -848,10 +880,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckSuppressedWhenExpressionFalse)
   System().GetPPCState().gpr[3] = 0;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
 }
@@ -863,10 +898,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckRespectsAccessType)
 
   DAP::DapDebugController controller(System());
   // Read-only watchpoint must not fire on a write even when the condition is true.
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
   EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, false, 4, TEST_ADDRESS));
@@ -1006,7 +1044,7 @@ TEST_F(DapControllerTest, SourceStepIntoStopsAfterEnteringTakenCall)
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
 }
 
-TEST_F(DapControllerTest, SourceStepIntoTraversesSourceLessCallee)
+TEST_F(DapControllerTest, SourceStepIntoStopsAtSourceLessCallee)
 {
   const std::array<u8, 8> caller{{0x48, 0x00, 0x00, 0x41, 0x60, 0x00, 0x00, 0x00}};
   const std::array<u8, 8> callee{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
@@ -1024,7 +1062,7 @@ TEST_F(DapControllerTest, SourceStepIntoTraversesSourceLessCallee)
   std::atomic<bool> cancelled{false};
   DAP::DapDebugController controller(System());
   controller.StepSource(false, cancelled);
-  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
 }
 
 TEST_F(DapControllerTest, SourceStepStopsAtCodeBreakpointBeforeLineChanges)
@@ -1095,7 +1133,8 @@ TEST_F(DapControllerTest, SourceStepStopsOnDataBreakpoint)
 
   std::atomic<bool> cancelled{false};
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = data_address, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = data_address, .write = true}}).has_value());
   controller.StepSource(false, cancelled);
   EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::DataBreakpoint);
 }
@@ -1108,7 +1147,7 @@ TEST_F(DapControllerTest, StepOutHonorsCancellationBeforeFirstInstruction)
 
   std::atomic<bool> cancelled{true};
   DAP::DapDebugController controller(System());
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
 }
 
@@ -1146,7 +1185,7 @@ TEST_F(DapControllerTest, StepOutWhenNotSteppingIsNoOp)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
 }
 
@@ -1182,6 +1221,43 @@ TEST_F(DapControllerTest, StepOverBranchSetsTemporaryAndContinues)
   EXPECT_NE(System().GetPowerPC().GetBreakPoints().GetBreakpoint(TEST_ADDRESS + 4), nullptr);
 }
 
+TEST_F(DapControllerTest, CancellingContinuingStepOverClearsOnlyTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(TEST_ADDRESS + 8));
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  ASSERT_TRUE(controller.CancelActiveStep());
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+  EXPECT_NE(breakpoints.GetRegularBreakpoint(TEST_ADDRESS + 8), nullptr);
+}
+
+TEST_F(DapControllerTest, ExternalStopClearsContinuingStepOverTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  System().GetCPU().GetExecutionState().PublishStopped(
+      {.cause = Core::Debug::ExecutionStopCause::Exception, .pc = TEST_ADDRESS});
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+}
+
 TEST_F(DapControllerTest, StepOutRunsUntilReturn)
 {
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
@@ -1194,7 +1270,7 @@ TEST_F(DapControllerTest, StepOutRunsUntilReturn)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -1214,7 +1290,7 @@ TEST_F(DapControllerTest, StepOutStopsAtBreakpointBeforeReturn)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4}});
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled);
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
 
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS + 0x200u);
@@ -1234,7 +1310,8 @@ TEST_F(DapControllerTest, StepOutTimesOutOnNonReturningCode)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::milliseconds(5));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::milliseconds(5)),
+            Core::Debug::PPCStepResult::NotStepped);
 
   // The branch loops back to itself, so the bounded step-out returns with the
   // PC still parked on the branch instead of hanging.
@@ -1255,7 +1332,8 @@ TEST_F(DapControllerTest, StepOutReturnsImmediatelyWhenPcIsOnReturn)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::seconds(1));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -1275,7 +1353,8 @@ TEST_F(DapControllerTest, StepOutStepsOverNestedCall)
 
   DAP::DapDebugController controller(System());
   std::atomic<bool> cancelled{false};
-  controller.StepOut(cancelled, std::chrono::seconds(1));
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
 
   // bl sets LR to TEST_ADDRESS + 4; the callee returns there, so the inner loop
   // ends on the instruction after the call rather than parking inside the
@@ -1366,7 +1445,9 @@ TEST_F(DapControllerTest, GetStopInfoWithWatchpointButNoHitFlagIsStep)
   ppc_state.pc = TEST_ADDRESS;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
 
   EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::Step);
 }
@@ -1494,7 +1575,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
   ppc_state.gpr[3] = 0xdeadbeef;
 
   DAP::DapDebugController controller(System());
-  controller.Restart();
+  ASSERT_TRUE(controller.Restart().has_value());
 
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS);
   EXPECT_EQ(ppc_state.gpr[3], 0u);
@@ -1503,7 +1584,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
 TEST_F(DapControllerTest, TerminateBreaksCpu)
 {
   DAP::DapDebugController controller(System());
-  controller.Terminate();
+  ASSERT_TRUE(controller.Terminate().has_value());
   EXPECT_TRUE(System().GetCPU().IsStepping());
 }
 
@@ -1524,7 +1605,9 @@ TEST_F(DapControllerTest, ClearBreakpointsRemovesCodeAndDataBreakpoints)
   const DAP::SourceBreakpointContext context{.source_name = "0x00003100"};
   controller.UpdateSourceBreakpoints("test:1", context, {{.line = 1}});
   controller.UpdateInstructionBreakpoints({{.address = TEST_ADDRESS + 0x100}});
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
 
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS + 0x100));
@@ -1546,8 +1629,8 @@ TEST_F(DapControllerTest, ClearBreakpointsIsIdempotent)
   DAP::DapDebugController controller(System());
   controller.ClearBreakpoints();
   controller.ClearBreakpoints();
-  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints().empty());
-  EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks().empty());
+  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints()->empty());
+  EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks()->empty());
 }
 
 TEST_F(DapControllerTest, ClearBreakpointsAllowsReinstallAfter)
@@ -1648,6 +1731,25 @@ TEST_F(DapControllerTest, SourcePathsResolveDwarfSourcesToFullPaths)
   DAP::SourceBreakpointContext breakpoint;
   breakpoint.source_path = source_path;
   EXPECT_EQ(controller.ResolveSourceLineBreakpoint(breakpoint, 7), TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, GetSourcePreservesLinesLongerThanReadBuffer)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_path = temp_dir + "/long-line.c";
+  const std::string long_line(5000, 'a');
+  ASSERT_TRUE(File::WriteStringToFile(source_path, long_line + "\nsecond line\n"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile(source_path);
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  const auto source = controller.GetSource(1, 1, 2);
+  ASSERT_TRUE(source.has_value());
+  EXPECT_EQ(source->content, long_line + "\nsecond line");
 }
 
 TEST_F(DapControllerTest, SourcePathsResolveSourcesImportedLater)
@@ -1768,10 +1870,9 @@ TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfMapsResolvableLines)
 
   DAP::DapDebugController controller(System());
   const std::vector<DAP::BreakpointLocation> locations = controller.GetBreakpointLocations(1, 1, 3);
-  ASSERT_EQ(locations.size(), 3u);
+  ASSERT_EQ(locations.size(), 2u);
   EXPECT_EQ(locations[0].line, 1);
   EXPECT_EQ(locations[1].line, 2);
-  EXPECT_EQ(locations[2].line, 3);
 }
 
 TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfSkipsLinesBeforeFirstEntry)
@@ -2414,7 +2515,7 @@ TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
 }
 
 // DESNOTE(jbarber, 2026-07-22): Tests for MMU-level write suppression via
-// `is_freeze` TMemCheck. When a freeze is installed, emulated CPU stores
+// private MemChecks freeze range. When a freeze is installed, emulated CPU stores
 // (through MMU::Write<T>) to the frozen range are silently dropped — the
 // frozen value persists in RAM. HostWrite (debugger/cheat writes) is NOT
 // suppressed because it bypasses the Memcheck path. The field-rate Tick
@@ -2536,12 +2637,7 @@ TEST_F(DapControllerTest, ClearFreezesRemovesAllFreezeMemchecks)
             (std::vector<u8>{0x55, 0x66, 0x77, 0x88}));
 }
 
-// DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
-// which wipes freeze memchecks from the global store. The m_freezes tracking
-// vector must also be cleared so a later RemoveFreeze safely returns false
-// instead of calling MemChecks::Remove at a stale address and deleting an
-// unrelated data watchpoint. Bugbot #77.
-TEST_F(DapControllerTest, SetDataBreakpointsClearsFreezeTracking)
+TEST_F(DapControllerTest, SetDataBreakpointsPreservesFreezeTracking)
 {
   DAP::DapDebugController controller(System());
   auto& memchecks = System().GetPowerPC().GetMemChecks();
@@ -2552,14 +2648,15 @@ TEST_F(DapControllerTest, SetDataBreakpointsClearsFreezeTracking)
   const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
   ASSERT_NE(freeze_id, 0u);
 
-  // SetDataBreakpoints wipes all memchecks (including the freeze) and installs
-  // a data watchpoint at TEST_ADDRESS + 0x100.
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 0x100, .write = true}});
+  // The authoritative watchpoint replacement is independent of freezes.
+  ASSERT_TRUE(controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 0x100, .write = true}})
+                  .has_value());
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
 
-  // RemoveFreeze should return false (freeze tracking was cleared) and must
-  // NOT remove the data watchpoint at TEST_ADDRESS + 0x100.
-  EXPECT_FALSE(controller.RemoveFreeze(freeze_id));
+  EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+  EXPECT_TRUE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(TEST_ADDRESS, 4));
+  EXPECT_TRUE(controller.RemoveFreeze(freeze_id));
+  EXPECT_FALSE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(TEST_ADDRESS, 4));
   EXPECT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
 }
 

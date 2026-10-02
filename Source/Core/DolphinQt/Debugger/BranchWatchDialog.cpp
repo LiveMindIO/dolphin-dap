@@ -1157,7 +1157,7 @@ void BranchWatchDialog::SetBreakpoints(bool break_on_hit, bool log_on_hit) const
   for (const QModelIndex& index : m_index_list_temp)
   {
     const u32 address = m_table_proxy->data(index, UserRole::ClickRole).value<u32>();
-    breakpoints.Add(address, break_on_hit, log_on_hit, {});
+    (void)breakpoints.Add(address, break_on_hit, log_on_hit, {});
   }
   emit Host::GetInstance()->PPCBreakpointsChanged();
 }
@@ -1168,7 +1168,7 @@ void BranchWatchDialog::SetBreakpointMenuActionsIcons() const
   for (auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
        const QModelIndex& index : m_index_list_temp)
   {
-    if (const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(
+    if (const auto bp = breakpoints.GetRegularBreakpoint(
             m_table_proxy->data(index, UserRole::ClickRole).value<u32>()))
     {
       if (bp->break_on_hit && bp->log_on_hit)

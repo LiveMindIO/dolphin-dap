@@ -52,6 +52,7 @@
 #include "Core/Config/WiimoteSettings.h"
 #include "Core/Core.h"
 #include "Core/FreeLookManager.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/GCKeyboard.h"
@@ -65,6 +66,7 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/NetPlayServer.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "Core/WiiUtils.h"
@@ -490,6 +492,14 @@ void MainWindow::CreateComponents()
   connect(m_jit_widget, &JITWidget::SetCodeAddress, m_code_widget, &CodeWidget::OnSetCodeAddress);
   connect(m_watch_widget, &WatchWidget::RequestMemoryBreakpoint, request_memory_breakpoint);
   connect(m_watch_widget, &WatchWidget::ShowMemory, m_memory_widget, &MemoryWidget::SetAddress);
+  connect(m_code_widget, &CodeWidget::RequestWatch, request_watch);
+  connect(m_code_widget, &CodeWidget::RequestMemoryBreakpoint, this,
+          [this](u32 start, u32 end, bool read, bool write) {
+            if (start == end)
+              m_breakpoint_widget->AddAddressMBP(start, read, write);
+            else
+              m_breakpoint_widget->AddRangedMBP(start, end, read, write);
+          });
   connect(m_register_widget, &RegisterWidget::RequestMemoryBreakpoint, request_memory_breakpoint);
   connect(m_register_widget, &RegisterWidget::RequestWatch, request_watch);
   connect(m_register_widget, &RegisterWidget::RequestViewInMemory, request_view_in_memory);
@@ -877,7 +887,23 @@ void MainWindow::Play(const std::optional<std::string>& savestate_path)
   // Otherwise, prompt for a new game.
   if (Core::GetState(m_system) == Core::State::Paused)
   {
-    Core::SetState(m_system, Core::State::Running);
+    auto& cpu = m_system.GetCPU();
+    auto& execution = cpu.GetExecutionState();
+    if (!execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
+      return;
+    const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                    Core::Debug::ExecutionOperationKind::Continue);
+    if (operation)
+    {
+      Core::SetState(m_system, Core::State::Running);
+      if (Core::GetState(m_system) != Core::State::Running)
+      {
+        execution.AbandonStep(*operation);
+        return;
+      }
+      static_cast<void>(execution.PublishContinued(cpu.GetHostExecutionClientId(), *operation,
+                                                   m_system.GetPPCState().pc));
+    }
   }
   else
   {
@@ -905,7 +931,25 @@ void MainWindow::Play(const std::optional<std::string>& savestate_path)
 
 void MainWindow::Pause()
 {
-  Core::SetState(m_system, Core::State::Paused);
+  auto& cpu = m_system.GetCPU();
+  auto& execution = cpu.GetExecutionState();
+  if (!execution.CancelActiveStepAndWait(cpu.GetHostExecutionClientId()))
+    return;
+  const auto operation = execution.BeginOperation(cpu.GetHostExecutionClientId(),
+                                                  Core::Debug::ExecutionOperationKind::Pause);
+  if (operation)
+  {
+    Core::SetState(m_system, Core::State::Paused);
+    if (Core::GetState(m_system) != Core::State::Paused)
+    {
+      execution.AbandonStep(*operation);
+      return;
+    }
+    cpu.Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+               .origin = cpu.GetHostExecutionClientId(),
+               .operation_id = *operation,
+               .pc = m_system.GetPPCState().pc});
+  }
 }
 
 void MainWindow::TogglePause()

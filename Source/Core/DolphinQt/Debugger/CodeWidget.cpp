@@ -4,6 +4,7 @@
 #include "DolphinQt/Debugger/CodeWidget.h"
 
 #include <chrono>
+#include <optional>
 
 #include <fmt/format.h>
 
@@ -22,15 +23,18 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include "Common/Event.h"
 #include "Core/Core.h"
-#include "Core/Debugger/Debugger_SymbolMap.h"
+#include "Core/Debugger/ExecutionState.h"
+#include "Core/Debugger/PPCStack.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "Core/HW/CPU.h"
-#include "Core/PowerPC/MMU.h"
+#include "Core/Host.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "DolphinQt/Debugger/BranchWatchDialog.h"
+#include "DolphinQt/Debugger/DebugVariablesWidget.h"
+#include "DolphinQt/Debugger/SourceViewWidget.h"
 #include "DolphinQt/Host.h"
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
@@ -41,7 +45,11 @@ static const QString BOX_SPLITTER_STYLESHEET = QStringLiteral(
 
 CodeWidget::CodeWidget(QWidget* parent)
     : QDockWidget(parent), m_system(Core::System::GetInstance()),
-      m_ppc_symbol_db(m_system.GetPPCSymbolDB())
+      m_ppc_symbol_db(m_system.GetPPCSymbolDB()),
+      m_execution_observer_id(m_system.GetCPU().GetExecutionState().RegisterClient(
+          [](std::shared_ptr<const Core::Debug::ExecutionEvent>) {
+            Core::QueueHostJob([](Core::System&) { Host_UpdateDisasmDialog(); }, true);
+          }))
 {
   setWindowTitle(tr("Code"));
   setObjectName(QStringLiteral("code"));
@@ -66,12 +74,21 @@ CodeWidget::CodeWidget(QWidget* parent)
     if (!m_lock_btn->isChecked() && Core::GetState(m_system) == Core::State::Paused)
       SetAddress(m_system.GetPPCState().pc, CodeViewWidget::SetAddressUpdate::WithoutUpdate);
     Update();
+    if (m_branch_watch_dialog != nullptr)
+      m_branch_watch_dialog->Update();
   });
 
   connect(&Settings::Instance(), &Settings::DebugModeToggled, this,
           [this](bool enabled) { setHidden(!enabled || !Settings::Instance().IsCodeVisible()); });
 
-  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, &CodeWidget::Update);
+  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this](Core::State state) {
+    if (state == Core::State::Stopping || state == Core::State::Uninitialized)
+    {
+      CancelAndJoinStepWorker();
+      m_source_view->Clear();
+    }
+    Update();
+  });
 
   ConnectWidgets();
 
@@ -83,6 +100,8 @@ CodeWidget::CodeWidget(QWidget* parent)
 
 CodeWidget::~CodeWidget()
 {
+  CancelAndJoinStepWorker();
+  m_system.GetCPU().GetExecutionState().UnregisterClient(m_execution_observer_id);
   auto& settings = Settings::GetQSettings();
 
   settings.setValue(QStringLiteral("codewidget/geometry"), saveGeometry());
@@ -125,8 +144,13 @@ void CodeWidget::CreateWidgets()
 
   auto* right_layout = new QVBoxLayout;
   m_code_view = new CodeViewWidget;
+  m_source_view = new SourceViewWidget(m_ppc_symbol_db);
+  m_code_tabs = new QTabWidget;
+  m_code_tabs->addTab(m_source_view, tr("Source"));
+  m_code_tabs->addTab(m_code_view, tr("Disassembly"));
+  m_code_tabs->setCurrentWidget(m_code_view);
   right_layout->addLayout(top_layout);
-  right_layout->addWidget(m_code_view);
+  right_layout->addWidget(m_code_tabs);
 
   m_box_splitter = new QSplitter(Qt::Vertical);
   m_box_splitter->setStyleSheet(BOX_SPLITTER_STYLESHEET);
@@ -157,9 +181,9 @@ void CodeWidget::CreateWidgets()
   symbols_tab->addTab(m_note_list, tr("Notes"));
   m_search_symbols = add_search_line_edit(tr("Symbols"), symbols_tab);
 
-  // Function calls
-  m_function_calls_list = new QListWidget;
-  m_search_calls = add_search_line_edit(tr("Calls"), m_function_calls_list);
+  // Variables
+  m_variables_widget = new DebugVariablesWidget(m_system);
+  m_box_splitter->addWidget(m_variables_widget);
 
   // Function callers
   m_function_callers_list = new QListWidget;
@@ -203,10 +227,6 @@ void CodeWidget::ConnectWidgets()
   connect(m_search_address, &QLineEdit::returnPressed, this, &CodeWidget::OnSearchAddress);
   connect(m_lock_btn, &QPushButton::toggled, m_code_view, &CodeViewWidget::OnLockAddress);
   connect(m_search_symbols, &QLineEdit::textChanged, this, &CodeWidget::OnSearchSymbols);
-  connect(m_search_calls, &QLineEdit::textChanged, this, [this] {
-    if (const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress()))
-      UpdateFunctionCalls(symbol);
-  });
   connect(m_search_callers, &QLineEdit::textChanged, this, [this] {
     if (const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress()))
       UpdateFunctionCallers(symbol);
@@ -217,12 +237,18 @@ void CodeWidget::ConnectWidgets()
   connect(m_note_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectNote);
   connect(m_symbols_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectSymbol);
   connect(m_callstack_list, &QListWidget::itemPressed, this, &CodeWidget::OnSelectCallstack);
-  connect(m_function_calls_list, &QListWidget::itemPressed, this,
-          &CodeWidget::OnSelectFunctionCalls);
   connect(m_function_callers_list, &QListWidget::itemPressed, this,
           &CodeWidget::OnSelectFunctionCallers);
+  connect(m_variables_widget, &DebugVariablesWidget::RequestWatch, this, &CodeWidget::RequestWatch);
+  connect(m_variables_widget, &DebugVariablesWidget::RequestMemoryBreakpoint, this,
+          &CodeWidget::RequestMemoryBreakpoint);
 
   connect(Host::GetInstance(), &Host::PPCSymbolsChanged, this, &CodeWidget::OnPPCSymbolsChanged);
+  connect(Host::GetInstance(), &Host::PPCBreakpointsChanged, m_source_view,
+          &SourceViewWidget::RefreshBreakpoints);
+  connect(m_source_view, &SourceViewWidget::BreakpointToggleRequested, this, [this](u32 address) {
+    m_system.GetPowerPC().GetBreakPoints().ToggleBreakPoint(address);
+  });
   connect(m_code_view, &CodeViewWidget::UpdateCodeWidget, this, &CodeWidget::Update);
 
   connect(m_code_view, &CodeViewWidget::RequestPPCComparison, this,
@@ -255,8 +281,9 @@ void CodeWidget::OnPPCSymbolsChanged()
   UpdateCallstack();
 
   const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress());
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
+  m_source_view->Clear();
+  NavigateToAddress(m_code_view->GetAddress(), CodeViewWidget::SetAddressUpdate::WithoutUpdate);
 }
 
 void CodeWidget::ActivateSearchAddress()
@@ -283,7 +310,7 @@ void CodeWidget::OnSearchAddress()
   m_search_address->setFont(font);
 
   if (good)
-    m_code_view->SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
+    SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
 
   Update();
 
@@ -306,12 +333,11 @@ void CodeWidget::OnSelectSymbol()
   const u32 address = items[0]->data(Qt::UserRole).toUInt();
   const Common::Symbol* const symbol = m_ppc_symbol_db.GetSymbolFromAddr(address);
 
-  m_code_view->SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
+  SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
   UpdateCallstack();
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
 
-  m_code_view->setFocus();
+  m_code_tabs->currentWidget()->setFocus();
 }
 
 void CodeWidget::OnSelectNote()
@@ -322,7 +348,7 @@ void CodeWidget::OnSelectNote()
 
   const u32 address = items[0]->data(Qt::UserRole).toUInt();
 
-  m_code_view->SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
+  SetAddress(address, CodeViewWidget::SetAddressUpdate::WithUpdate);
 }
 
 void CodeWidget::OnSelectCallstack()
@@ -331,19 +357,7 @@ void CodeWidget::OnSelectCallstack()
   if (items.isEmpty())
     return;
 
-  m_code_view->SetAddress(items[0]->data(Qt::UserRole).toUInt(),
-                          CodeViewWidget::SetAddressUpdate::WithUpdate);
-  Update();
-}
-
-void CodeWidget::OnSelectFunctionCalls()
-{
-  const auto items = m_function_calls_list->selectedItems();
-  if (items.isEmpty())
-    return;
-
-  m_code_view->SetAddress(items[0]->data(Qt::UserRole).toUInt(),
-                          CodeViewWidget::SetAddressUpdate::WithUpdate);
+  SetAddress(items[0]->data(Qt::UserRole).toUInt(), CodeViewWidget::SetAddressUpdate::WithUpdate);
   Update();
 }
 
@@ -353,21 +367,38 @@ void CodeWidget::OnSelectFunctionCallers()
   if (items.isEmpty())
     return;
 
-  m_code_view->SetAddress(items[0]->data(Qt::UserRole).toUInt(),
-                          CodeViewWidget::SetAddressUpdate::WithUpdate);
+  SetAddress(items[0]->data(Qt::UserRole).toUInt(), CodeViewWidget::SetAddressUpdate::WithUpdate);
   Update();
 }
 
 void CodeWidget::SetAddress(u32 address, CodeViewWidget::SetAddressUpdate update)
 {
-  m_code_view->SetAddress(address, update);
+  NavigateToAddress(address, update);
 
   if (update == CodeViewWidget::SetAddressUpdate::WithUpdate ||
       update == CodeViewWidget::SetAddressUpdate::WithDetailedUpdate)
   {
     Settings::Instance().SetCodeVisible(true);
     raise();
-    m_code_view->setFocus();
+    m_code_tabs->currentWidget()->setFocus();
+  }
+}
+
+void CodeWidget::NavigateToAddress(const u32 address, const CodeViewWidget::SetAddressUpdate update)
+{
+  m_code_view->SetAddress(address, update);
+
+  const std::optional<PPCSymbolDB::SourceLine> source = m_ppc_symbol_db.GetSourceLine(address);
+  if (source && m_source_view->ShowSource(source->file_index, source->line))
+  {
+    m_code_tabs->setCurrentWidget(m_source_view);
+    m_source_view->SetCurrentAddress(Core::GetState(m_system) == Core::State::Paused ?
+                                         std::make_optional(m_system.GetPPCState().pc) :
+                                         std::nullopt);
+  }
+  else
+  {
+    m_code_tabs->setCurrentWidget(m_code_view);
   }
 }
 
@@ -381,9 +412,12 @@ void CodeWidget::Update()
   UpdateCallstack();
 
   m_code_view->Update();
-  m_code_view->setFocus();
+  const std::optional<u32> pc = Core::GetState(m_system) == Core::State::Paused ?
+                                    std::make_optional(m_system.GetPPCState().pc) :
+                                    std::nullopt;
+  m_source_view->SetCurrentAddress(pc);
+  m_source_view->RefreshBreakpoints();
 
-  UpdateFunctionCalls(symbol);
   UpdateFunctionCallers(symbol);
 }
 
@@ -394,24 +428,26 @@ void CodeWidget::UpdateCallstack()
   if (Core::GetState(m_system) != Core::State::Paused)
     return;
 
-  std::vector<Dolphin_Debugger::CallstackEntry> stack;
-  if (!Dolphin_Debugger::GetCallstack(Core::CPUThreadGuard{m_system}, stack))
-  {
-    m_callstack_list->addItem(tr("Invalid callstack"));
-    return;
-  }
+  const Core::Debug::StackTrace stack = Core::Debug::GetPPCStackTrace(m_system);
 
   const QString filter = m_search_callstack->text();
 
-  for (const auto& frame : stack)
+  for (const Core::Debug::StackFrame& frame : stack.frames)
   {
-    const QString name = QString::fromStdString(frame.Name.substr(0, frame.Name.length() - 1));
+    std::string label = frame.name;
+    if (frame.source)
+    {
+      const std::string& path = frame.source->file;
+      const std::size_t filename_start = path.find_last_of("/\\");
+      label += fmt::format(" - {}:{}", path.substr(filename_start + 1), frame.source->line);
+    }
+    const QString name = QString::fromStdString(label);
 
     if (!name.contains(filter, Qt::CaseInsensitive))
       continue;
 
     auto* item = new QListWidgetItem(name);
-    item->setData(Qt::UserRole, frame.vAddress);
+    item->setData(Qt::UserRole, frame.address);
     m_callstack_list->addItem(item);
   }
 }
@@ -472,43 +508,6 @@ void CodeWidget::UpdateNotes()
   m_note_list->sortItems();
 }
 
-void CodeWidget::UpdateFunctionCalls(const Common::Symbol* symbol)
-{
-  m_function_calls_list->clear();
-  if (symbol == nullptr)
-    return;
-
-  const QString filter = m_search_calls->text();
-
-  for (const auto& call : symbol->calls)
-  {
-    const u32 addr = call.function;
-    const Common::Symbol* const call_symbol = m_ppc_symbol_db.GetSymbolFromAddr(addr);
-
-    if (call_symbol)
-    {
-      QString name;
-
-      if (!call_symbol->object_name.empty())
-      {
-        name = QString::fromStdString(
-            fmt::format("< {} ({}, {:08x})", call_symbol->name, call_symbol->object_name, addr));
-      }
-      else
-      {
-        name = QString::fromStdString(fmt::format("< {} ({:08x})", call_symbol->name, addr));
-      }
-
-      if (!name.contains(filter, Qt::CaseInsensitive))
-        continue;
-
-      auto* item = new QListWidgetItem(name);
-      item->setData(Qt::UserRole, addr);
-      m_function_calls_list->addItem(item);
-    }
-  }
-}
-
 void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
 {
   m_function_callers_list->clear();
@@ -517,9 +516,9 @@ void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
 
   const QString filter = m_search_callers->text();
 
-  for (const auto& caller : symbol->callers)
+  for (const auto& caller : symbol->calls)
   {
-    const u32 addr = caller.call_address;
+    const u32 addr = caller.function;
     const Common::Symbol* const caller_symbol = m_ppc_symbol_db.GetSymbolFromAddr(addr);
 
     if (caller_symbol)
@@ -548,124 +547,138 @@ void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
 
 void CodeWidget::Step()
 {
-  auto& cpu = m_system.GetCPU();
-
-  if (!cpu.IsStepping())
-    return;
-
-  Common::Event sync_event;
-
-  auto& power_pc = m_system.GetPowerPC();
-  PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  cpu.StepOpcode(&sync_event);
-  sync_event.WaitFor(std::chrono::milliseconds(20));
-  power_pc.SetMode(old_mode);
-  Core::DisplayMessage(tr("Step successful!").toStdString(), 2000);
-  // Will get a UpdateDisasmDialog(), don't update the GUI here.
-
-  // TODO: Step doesn't cause EmulationStateChanged to be emitted, so it has to call this manually.
-  if (m_branch_watch_dialog != nullptr)
-    m_branch_watch_dialog->Update();
+  StartStep(Core::Debug::PPCStepMode::Into);
 }
 
 void CodeWidget::StepOver()
 {
-  auto& cpu = m_system.GetCPU();
-
-  if (!cpu.IsStepping())
-    return;
-
-  const UGeckoInstruction inst = [&] {
-    Core::CPUThreadGuard guard(m_system);
-    return PowerPC::MMU::HostRead_Instruction(guard, m_system.GetPPCState().pc);
-  }();
-
-  if (inst.LK)
-  {
-    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
-    breakpoints.SetTemporary(m_system.GetPPCState().pc + 4);
-    cpu.SetStepping(false);
-    Core::DisplayMessage(tr("Step over in progress...").toStdString(), 2000);
-  }
-  else
-  {
-    Step();
-  }
-}
-
-// Returns true on a rfi, blr or on a bclr that evaluates to true.
-static bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
-{
-  // Is a rfi instruction
-  if (inst.hex == 0x4C000064u)
-    return true;
-  const auto& ppc_state = system.GetPPCState();
-  bool counter = (inst.BO_2 >> 2 & 1) != 0 || (CTR(ppc_state) != 0) != ((inst.BO_2 >> 1 & 1) != 0);
-  bool condition = inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
-  bool isBclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
-  return isBclr && counter && condition && !inst.LK_3;
+  StartStep(Core::Debug::PPCStepMode::Over);
 }
 
 void CodeWidget::StepOut()
 {
-  auto& cpu = m_system.GetCPU();
+  StartStep(Core::Debug::PPCStepMode::Out);
+}
 
+bool CodeWidget::JoinCompletedStepWorker()
+{
+  if (!m_step_thread.joinable())
+    return true;
+  if (!m_step_done.load())
+    return false;
+  m_step_thread.join();
+  return true;
+}
+
+void CodeWidget::CancelAndJoinStepWorker()
+{
+  m_step_cancelled.store(true);
+  if (m_step_thread.joinable())
+  {
+    static_cast<void>(m_system.GetCPU().GetExecutionState().CancelActiveStep(
+        m_system.GetCPU().GetHostExecutionClientId()));
+    m_step_thread.join();
+  }
+  m_step_done.store(true);
+}
+
+void CodeWidget::StartStep(const Core::Debug::PPCStepMode mode)
+{
+  auto& cpu = m_system.GetCPU();
   if (!cpu.IsStepping())
     return;
-
-  // Keep stepping until the next return instruction or timeout after five seconds
-  using clock = std::chrono::steady_clock;
-  clock::time_point timeout = clock::now() + std::chrono::seconds(5);
-
-  auto& power_pc = m_system.GetPowerPC();
+  if (!JoinCompletedStepWorker())
   {
-    auto& ppc_state = power_pc.GetPPCState();
-    Core::CPUThreadGuard guard(m_system);
+    Core::DisplayMessage(tr("Another step is already in progress.").toStdString(), 2000);
+    return;
+  }
 
-    PowerPC::CoreMode old_mode = power_pc.GetMode();
-    power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+  const bool source_step = mode != Core::Debug::PPCStepMode::Out &&
+                           m_code_tabs->currentWidget() == m_source_view &&
+                           m_source_view->HasSource();
+  const Core::Debug::PPCStepGranularity granularity =
+      source_step ? Core::Debug::PPCStepGranularity::SourceRow :
+                    Core::Debug::PPCStepGranularity::Instruction;
+  const Core::Debug::ExecutionOperationKind kind = [&] {
+    if (mode == Core::Debug::PPCStepMode::Out)
+      return Core::Debug::ExecutionOperationKind::StepOut;
+    if (mode == Core::Debug::PPCStepMode::Over)
+      return source_step ? Core::Debug::ExecutionOperationKind::SourceStepOver :
+                           Core::Debug::ExecutionOperationKind::StepOver;
+    return source_step ? Core::Debug::ExecutionOperationKind::SourceStepInto :
+                         Core::Debug::ExecutionOperationKind::StepInto;
+  }();
 
-    // Loop until either the current instruction is a return instruction with no Link flag
-    // or a breakpoint is detected so it can step at the breakpoint. If the PC is currently
-    // on a breakpoint, skip it.
-    UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-    do
+  auto& execution = cpu.GetExecutionState();
+  const auto origin = cpu.GetHostExecutionClientId();
+  m_step_cancelled.store(false);
+  const auto operation = execution.BeginOperation(origin, kind, &m_step_cancelled);
+  if (!operation)
+  {
+    Core::DisplayMessage(tr("Another step is already in progress.").toStdString(), 2000);
+    return;
+  }
+  m_step_done.store(false);
+  if (const auto published =
+          execution.PublishContinued(origin, *operation, m_system.GetPPCState().pc);
+      !published)
+  {
+    execution.AbandonStep(*operation);
+    m_step_done.store(true);
+    Core::DisplayMessage(tr("The step could not be started.").toStdString(), 2000);
+    return;
+  }
+
+  m_step_thread = std::thread([this, mode, granularity, origin, operation = *operation] {
+    Core::Debug::PPCStepOptions options;
+    options.cancelled = &m_step_cancelled;
+    options.instruction_timeout = std::chrono::milliseconds(20);
+    options.timeout = std::chrono::seconds(5);
+    options.instruction_cap = 1000000;
+    options.ignore_current_code_breakpoint = mode == Core::Debug::PPCStepMode::Out;
+    options.temporary_breakpoint_installed = [this, operation](const u32 address) {
+      Core::System* const system = &m_system;
+      auto cleanup = [system, address] {
+        system->GetPowerPC().GetBreakPoints().ClearTemporary(address);
+      };
+      if (!m_system.GetCPU().GetExecutionState().SetActiveStepCleanup(operation, cleanup))
+        cleanup();
+    };
+
+    const Core::Debug::PPCStepResult result =
+        Core::Debug::StepPPC(m_system, mode, granularity, options);
+    auto& worker_execution = m_system.GetCPU().GetExecutionState();
+    if (m_step_cancelled.load())
     {
-      if (WillInstructionReturn(m_system, inst))
+      worker_execution.AbandonStep(operation);
+    }
+    else if (result == Core::Debug::PPCStepResult::Stepped &&
+             worker_execution.IsOperationActive(operation))
+    {
+      const u32 pc = m_system.GetPPCState().pc;
+      if (m_system.GetPowerPC().GetBreakPoints().IsAddressBreakPoint(pc))
       {
-        power_pc.SingleStep();
-        break;
-      }
-
-      if (inst.LK)
-      {
-        // Step over branches
-        u32 next_pc = ppc_state.pc + 4;
-        do
-        {
-          power_pc.SingleStep();
-        } while (ppc_state.pc != next_pc && clock::now() < timeout && !power_pc.CheckBreakPoints());
+        m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
+                                 .origin = origin,
+                                 .operation_id = operation,
+                                 .pc = pc,
+                                 .code_breakpoint_address = pc});
       }
       else
       {
-        power_pc.SingleStep();
+        m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
+                                 .origin = origin,
+                                 .operation_id = operation,
+                                 .pc = pc});
       }
-
-      inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-    } while (clock::now() < timeout && !power_pc.CheckBreakPoints());
-
-    power_pc.SetMode(old_mode);
-  }
-
-  emit Host::GetInstance()->UpdateDisasmDialog();
-
-  if (power_pc.CheckBreakPoints())
-    Core::DisplayMessage(tr("Breakpoint encountered! Step out aborted.").toStdString(), 2000);
-  else if (clock::now() >= timeout)
-    Core::DisplayMessage(tr("Step out timed out!").toStdString(), 2000);
-  else
-    Core::DisplayMessage(tr("Step out successful!").toStdString(), 2000);
+    }
+    else if (result == Core::Debug::PPCStepResult::NotStepped)
+    {
+      worker_execution.AbandonStep(operation);
+    }
+    worker_execution.MarkStepWorkerComplete(operation);
+    m_step_done.store(true);
+  });
 }
 
 void CodeWidget::Skip()
@@ -676,22 +689,59 @@ void CodeWidget::Skip()
 
 void CodeWidget::ShowPC()
 {
-  m_code_view->SetAddress(m_system.GetPPCState().pc, CodeViewWidget::SetAddressUpdate::WithUpdate);
+  SetAddress(m_system.GetPPCState().pc, CodeViewWidget::SetAddressUpdate::WithUpdate);
   Update();
 }
 
 void CodeWidget::SetPC()
 {
-  m_system.GetPPCState().pc = m_code_view->GetAddress();
+  const std::optional<u32> address = GetActiveAddress();
+  if (!address)
+    return;
+  m_system.GetPPCState().pc = *address;
   Update();
 }
 
 void CodeWidget::ToggleBreakpoint()
 {
+  if (m_code_tabs->currentWidget() == m_source_view)
+  {
+    const std::vector<u32> addresses = m_source_view->GetSelectedAddresses();
+    if (addresses.empty())
+      return;
+
+    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
+    const auto snapshot = breakpoints.GetSnapshot();
+    bool removed_existing = false;
+    for (const u32 address : addresses)
+    {
+      if (snapshot->GetRegularBreakpoint(address) != nullptr)
+      {
+        breakpoints.ToggleBreakPoint(address);
+        removed_existing = true;
+      }
+    }
+    if (!removed_existing)
+      breakpoints.ToggleBreakPoint(addresses.front());
+    return;
+  }
   m_code_view->ToggleBreakpoint();
 }
 
 void CodeWidget::AddBreakpoint()
 {
+  if (m_code_tabs->currentWidget() == m_source_view)
+  {
+    if (const std::optional<u32> address = m_source_view->GetSelectedAddress())
+      static_cast<void>(m_system.GetPowerPC().GetBreakPoints().Add(*address));
+    return;
+  }
   m_code_view->AddBreakpoint();
+}
+
+std::optional<u32> CodeWidget::GetActiveAddress() const
+{
+  if (m_code_tabs->currentWidget() == m_source_view)
+    return m_source_view->GetSelectedAddress();
+  return m_code_view->GetAddress();
 }

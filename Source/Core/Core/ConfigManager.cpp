@@ -28,12 +28,12 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Core/Boot/ElfReader.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigLoaders/GameConfigLoader.h"
 #include "Core/Core.h"
-#include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/FifoPlayer/FifoDataFile.h"
@@ -273,7 +273,7 @@ void SConfig::OnESTitleChanged()
   ReloadTextures(system);
 }
 
-void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
+void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard, bool load_debug_elf)
 {
   auto& system = guard.GetSystem();
   if (!Core::IsRunningOrStarting(system))
@@ -281,19 +281,46 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
 
   auto& ppc_symbol_db = system.GetPPCSymbolDB();
 
-  ppc_symbol_db.ClearSourceLineInfo();
+  const bool had_source_line_info = ppc_symbol_db.HasSourceLineInfo();
+  bool symbols_changed = ppc_symbol_db.Clear() || had_source_line_info;
   ppc_symbol_db.SetSourcePaths(SplitString(Config::Get(Config::MAIN_DEBUG_SOURCE_PATHS), ';'));
 
-  bool symbols_changed = false;
-  if (ppc_symbol_db.LoadMapOnBoot(guard))
+  const std::string symbol_map = Config::Get(Config::MAIN_DEBUG_SYMBOL_MAP);
+  if (symbol_map.empty())
+  {
+    if (ppc_symbol_db.LoadMapOnBoot(guard))
+      symbols_changed = true;
+  }
+  else if (ppc_symbol_db.LoadMap(guard, symbol_map))
+  {
     symbols_changed = true;
-  if (Core::Debug::ImportConfiguredDwarfElf(guard, ppc_symbol_db))
+  }
+  else
+  {
+    ERROR_LOG_FMT(SYMBOLS, "Failed to load configured symbol map '{}'", symbol_map);
+  }
+  const std::string elf_file = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+  if (!elf_file.empty() && load_debug_elf)
+  {
+    const ElfReader reader(elf_file);
+    if (reader.IsValid() && reader.GetMachine() == EM_PPC &&
+        reader.LoadSymbols(guard, ppc_symbol_db, PathToFileName(elf_file)))
+    {
+      symbols_changed = true;
+    }
+    else
+    {
+      ERROR_LOG_FMT(SYMBOLS, "Failed to load configured ELF file '{}'", elf_file);
+    }
+  }
+  if (load_debug_elf && Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
+  {
     symbols_changed = true;
-  if (Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
-    symbols_changed = true;
+  }
+  HLE::Reload(system);
+
   if (symbols_changed)
     Host_PPCSymbolsChanged();
-  HLE::Reload(system);
 
   PatchEngine::Reload(system);
   WC24PatchEngine::Reload();
@@ -363,7 +390,7 @@ struct SetGameMetadata
     // Strip the .elf/.dol file extension and directories before the name
     SplitPath(executable.path, nullptr, &config->m_debugger_game_id, nullptr);
 
-    if (Config::Get(Config::MAIN_BOOT_EXECUTABLE_WITH_DEFAULT_DISC))
+    if (executable.boot_with_default_disc)
     {
       const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
       std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDiscForCore(default_iso);

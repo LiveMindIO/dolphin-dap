@@ -159,7 +159,8 @@ TEST_F(ElfReaderTest, ImportsEmbeddedDwarf)
 {
   ElfReader reader(MakeElf());
   auto& system = Core::System::GetInstance();
-  ASSERT_TRUE(reader.LoadIntoMemory(system));
+  system.GetMemory().Memset(DwarfTestFixture::kFunctionAddress, 0x5a, 12);
+  system.GetPPCState().pc = 0x80001000;
 
   Core::CPUThreadGuard guard(system);
   auto& symbols = system.GetPPCSymbolDB();
@@ -168,6 +169,11 @@ TEST_F(ElfReaderTest, ImportsEmbeddedDwarf)
   ASSERT_TRUE(line);
   EXPECT_EQ(line->file, DwarfTestFixture::kCompileUnitName);
   EXPECT_EQ(line->line, 2u);
+
+  std::array<u8, 12> memory;
+  system.GetMemory().CopyFromEmu(memory.data(), DwarfTestFixture::kFunctionAddress, memory.size());
+  EXPECT_TRUE(std::ranges::all_of(memory, [](u8 value) { return value == 0x5a; }));
+  EXPECT_EQ(system.GetPPCState().pc, 0x80001000u);
 }
 
 TEST_F(ElfReaderTest, MalformedOptionalSymbolTableDoesNotSuppressEmbeddedDwarf)

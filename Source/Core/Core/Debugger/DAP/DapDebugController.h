@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -16,7 +18,10 @@
 
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/DAP/DapSource.h"
-#include "Core/Debugger/DWARF/DwarfReader.h"
+#include "Core/Debugger/ExecutionState.h"
+#include "Core/Debugger/PPCStepping.h"
+#include "Core/Debugger/PPCVariables.h"
+#include "Core/PowerPC/BreakPoints.h"
 
 namespace Core
 {
@@ -41,20 +46,8 @@ struct RegisterSnapshot
   u32 xer = 0;
 };
 
-struct DebugValueContext
-{
-  Core::Debug::Dwarf::TypeRef type;
-  u32 address = 0;
-  u32 depth = 0;
-};
-
-struct DebugVariable
-{
-  std::string name;
-  std::string value;
-  std::string type;
-  std::optional<DebugValueContext> children;
-};
+using DebugValueContext = Core::Debug::PPCVariableContext;
+using DebugVariable = Core::Debug::PPCVariable;
 
 enum class StepOverResult
 {
@@ -182,9 +175,23 @@ class DapDebugController
 {
 public:
   explicit DapDebugController(Core::System& system);
+  ~DapDebugController();
 
-  void Continue();
-  void Pause();
+  std::expected<void, std::string> Continue();
+  std::expected<void, std::string> Pause();
+  std::expected<void, std::string> CancelActiveStep();
+  void PauseWithoutEvent();
+  void PublishEntryStop();
+  void SetExecutionEventCallback(Core::Debug::ExecutionState::EventCallback callback);
+  Core::Debug::ExecutionState::ClientId GetExecutionClientId() const
+  {
+    return m_execution_client_id;
+  }
+  std::expected<Core::Debug::ExecutionState::OperationId, std::string>
+  BeginStep(Core::Debug::ExecutionOperationKind kind, std::atomic<bool>* cancellation = nullptr);
+  void PublishStepContinued(Core::Debug::ExecutionState::OperationId operation_id);
+  void CompleteStep(Core::Debug::ExecutionState::OperationId operation_id);
+  void AbandonStep(Core::Debug::ExecutionState::OperationId operation_id);
   // Steps one PPC instruction in interpreter mode. Returns true when the step
   // completed synchronously (the CPUThreadGuard path), was a no-op on an
   // already-stopped core, or the async StepOpcode signal fired within its
@@ -192,31 +199,45 @@ public:
   // thread didn't acknowledge the StepOpcode within the 2s timeout — in that
   // case the PC hasn't advanced and callers must not emit a `stopped`/`step`
   // event (the late completion has no observable state transition for
-  // PollBreakpointStop to catch, so suppressing the stop here is the only
+  // the execution event service to observe, so suppressing the stop here is the only
   // correct response).
   bool StepInto();
-  StepOverResult StepOver();
-  void StepSource(bool step_over, const std::atomic<bool>& cancelled,
-                  std::chrono::milliseconds timeout = std::chrono::seconds(5),
-                  size_t instruction_cap = 1000000);
+  StepOverResult
+  StepOver(std::optional<Core::Debug::ExecutionState::OperationId> operation_id = {});
+  Core::Debug::PPCStepResult StepSource(bool step_over, const std::atomic<bool>& cancelled,
+                                        std::chrono::milliseconds timeout = std::chrono::seconds(5),
+                                        size_t instruction_cap = 1000000);
   // Steps until the current function returns, a breakpoint/watchpoint is hit,
   // cancellation is requested, or `timeout`
   // wall-clock time elapses. The timeout bounds otherwise non-returning code
   // (e.g. an infinite loop) and is injectable so it can be exercised in tests.
-  void StepOut(const std::atomic<bool>& cancelled,
-               std::chrono::milliseconds timeout = std::chrono::seconds(5));
+  Core::Debug::PPCStepResult StepOut(const std::atomic<bool>& cancelled,
+                                     std::chrono::milliseconds timeout = std::chrono::seconds(5));
   void SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
   std::vector<std::optional<u32>>
   UpdateSourceBreakpoints(std::string_view source_key, const SourceBreakpointContext& context,
-                          std::vector<SourceBreakpointSpec> breakpoints);
-  void UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints);
-  void SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
+                          std::vector<SourceBreakpointSpec> breakpoints,
+                          std::string* error = nullptr);
+  bool UpdateInstructionBreakpoints(std::vector<CodeBreakpointRequest> breakpoints,
+                                    std::string* error = nullptr);
+  void SetBreakpointEventCallback(BreakPoints::EventCallback callback);
+  void SetDataBreakpointEventCallback(MemChecks::EventCallback callback);
+  BreakPoints::ClientId GetBreakpointClientId() const { return m_breakpoint_client_id; }
+  MemChecks::ClientId GetMemCheckClientId() const { return m_memcheck_client_id; }
+  void ClearCodeBreakpoints();
+  std::expected<void, std::string>
+  SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints);
   // Evaluates a PPC debugger expression (same syntax as breakpoint conditions).
   std::optional<std::string> EvaluateExpression(std::string_view expression);
 
   RegisterSnapshot GetRegisters();
   std::vector<DebugVariable> GetDebugVariables(bool globals);
   std::vector<DebugVariable> GetDebugVariableChildren(const DebugValueContext& context);
+  std::expected<DebugVariable, std::string> SetDebugVariable(bool globals, std::string_view name,
+                                                             std::string_view value);
+  std::expected<DebugVariable, std::string> SetDebugVariableChild(const DebugValueContext& context,
+                                                                  std::string_view name,
+                                                                  std::string_view value);
   // Writes a register exposed by the `variables` scopes. Returns the new value
   // on success, or nullopt when the scope, name, value, or writability is invalid.
   std::optional<u32> SetRegister(int variables_reference, std::string_view name,
@@ -228,15 +249,13 @@ public:
                                          int end_line);
   std::vector<BreakpointLocation> GetBreakpointLocations(SourceReference source_reference,
                                                          int start_line, int end_line);
-  void Restart();
-  void Terminate();
-  // Clears all code/data breakpoints this controller installed in the global
-  // PPC BreakPoints / MemChecks stores. Called on session teardown so a
-  // disconnecting client doesn't leave the emulated core halting on stale
-  // debugger state. Safe to call multiple times; no-op if never installed.
+  std::expected<void, std::string> Restart();
+  std::expected<void, std::string> Terminate();
+  std::expected<void, std::string> Goto(u32 address);
+  // Clears this controller's owned code and data breakpoints.
   void ClearBreakpoints();
   // Installs a hardware-level write freeze on [address, address+count) via
-  // a `is_freeze` TMemCheck. The emulated CPU's stores to this range are
+  // a private MemChecks freeze range. The emulated CPU's stores to this range are
   // silently dropped at the MMU layer (MMU::Write<T> returns before
   // WriteToHardware). The frozen `value` is written to RAM immediately so
   // reads return the frozen bytes. A lightweight field-rate Tick in
@@ -312,15 +331,17 @@ public:
   std::optional<u32> ResolveSourceLineBreakpoint(const SourceBreakpointContext& context, u32 line);
 
 private:
-  void ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints);
-  void ReapplyCodeBreakpoints();
+  static std::vector<BreakPoints::CodeBreakpoint>
+  ConvertCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints);
 
   Core::System& m_system;
-  std::map<std::string, std::vector<CodeBreakpointRequest>> m_source_breakpoints;
-  std::vector<CodeBreakpointRequest> m_instruction_breakpoints;
+  BreakPoints::ClientId m_breakpoint_client_id;
+  MemChecks::ClientId m_memcheck_client_id;
+  Core::Debug::ExecutionState::ClientId m_execution_client_id;
+  Core::Debug::PPCVariables m_variables;
 
   // DESNOTE(jbarber, 2026-07-22): Freeze state. Each freeze installs a
-  // `is_freeze` TMemCheck in the global MemChecks store (for MMU-level write
+  // private range in the global MemChecks store (for MMU-level write
   // suppression + JIT de-opt) and tracks the (address, count, id) here so
   // RemoveFreeze/ClearFreezes can tear it down. The frozen value itself is
   // owned by RealtimeWatchSampler (which needs it for the field-rate DMA
@@ -331,6 +352,7 @@ private:
     u32 freeze_id = 0;
     u32 address = 0;
     u32 count = 0;
+    MemChecks::FreezeId registry_id = 0;
   };
   std::vector<FreezeEntry> m_freezes;
   u32 m_next_freeze_id = 1;

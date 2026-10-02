@@ -5,10 +5,12 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <queue>
 
 #include "Common/Event.h"
 #include "Common/Functional.h"
+#include "Core/Debugger/ExecutionState.h"
 
 namespace Common
 {
@@ -71,6 +73,8 @@ public:
   //   which enables it to avoid deadlocks but also makes it less safe so it
   //   should not be used by the Host.
   void Break();
+  void BreakWithoutDebugStop();
+  void Break(Core::Debug::ExecutionStopDetails details);
 
   // This should only be called from the CPU thread
   void Continue();
@@ -103,12 +107,21 @@ public:
   // PauseAndLock(), as while the CPU is in the run loop, it won't execute the function.
   void AddCPUThreadJob(Common::MoveOnlyFunction<void()> function);
 
+  Core::Debug::ExecutionState& GetExecutionState() { return m_execution_state; }
+  const Core::Debug::ExecutionState& GetExecutionState() const { return m_execution_state; }
+  Core::Debug::ExecutionState::ClientId GetHostExecutionClientId() const
+  {
+    return m_host_execution_client_id;
+  }
+
 private:
   void FlushStepSyncEventLocked();
   void ExecutePendingJobs(std::unique_lock<std::mutex>& state_lock);
   void StartTimePlayedTimer();
   void RunAdjacentSystems(bool running);
   bool SetStateLocked(State s);
+  void Break(std::optional<Core::Debug::ExecutionStopDetails> details,
+             bool publish_unclassified_stop);
 
   // CPU Thread execution state.
   // Requires m_state_change_lock to modify the value.
@@ -143,5 +156,7 @@ private:
   Common::Event m_time_played_finish_sync;
 
   Core::System& m_system;
+  Core::Debug::ExecutionState m_execution_state;
+  Core::Debug::ExecutionState::ClientId m_host_execution_client_id;
 };
 }  // namespace CPU

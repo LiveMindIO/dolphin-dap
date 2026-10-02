@@ -19,6 +19,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Host.h"
@@ -635,9 +636,10 @@ void PowerPCManager::CheckExternalExceptions()
 
 bool PowerPCManager::CheckBreakPoints()
 {
-  const TBreakPoint* bp = m_breakpoints.GetBreakpoint(m_ppc_state.pc);
+  const auto breakpoint_snapshot = m_breakpoints.GetSnapshot();
+  const TBreakPoint* bp = breakpoint_snapshot->GetBreakpoint(m_ppc_state.pc);
 
-  if (!m_breakpoints.IsBreakingEnabled() || !bp || !bp->is_enabled ||
+  if (!breakpoint_snapshot->breaking_enabled || !bp || !bp->is_enabled ||
       !EvaluateCondition(m_system, bp->condition))
     return false;
 
@@ -660,7 +662,9 @@ bool PowerPCManager::CheckAndHandleBreakPoints()
 {
   if (CheckBreakPoints())
   {
-    m_system.GetCPU().Break();
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
+                             .pc = m_ppc_state.pc,
+                             .code_breakpoint_address = m_ppc_state.pc});
     if (GDBStub::IsActive())
       GDBStub::TakeControl();
     return true;
