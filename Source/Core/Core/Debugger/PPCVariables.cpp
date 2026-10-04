@@ -228,9 +228,11 @@ bool WriteBigEndianValue(const Core::CPUThreadGuard& guard, const u32 address, c
 PPCVariableContext MakeContext(std::shared_ptr<const Dwarf::ParseResult> info,
                                const Dwarf::TypeRef& type, const PPCVariableStorageKind kind,
                                const u32 storage, const u32 depth, const u64 stop_generation,
-                               const std::optional<u32> byte_size, const bool program_static)
+                               const std::optional<u32> byte_size, const bool program_static,
+                               const bool read_only = false)
 {
-  return {std::move(info), type, kind, storage, depth, stop_generation, byte_size, program_static};
+  return {std::move(info), type,      kind,           storage,  depth,
+          stop_generation, byte_size, program_static, read_only};
 }
 
 PPCVariable UnavailableVariable(std::string name, std::string type,
@@ -357,7 +359,8 @@ PPCVariable Materialize(const Core::CPUThreadGuard& guard,
                         std::shared_ptr<const Dwarf::ParseResult> info, std::string name,
                         Dwarf::TypeRef ref, const PPCVariableStorageKind storage_kind,
                         const u32 storage, std::optional<u64> direct_value, const u32 depth,
-                        const u64 stop_generation, const bool program_static)
+                        const u64 stop_generation, const bool program_static,
+                        const bool read_only = false)
 {
   const std::string display_type = TypeName(*info, ref);
   const auto address =
@@ -366,7 +369,7 @@ PPCVariable Materialize(const Core::CPUThreadGuard& guard,
     return UnavailableVariable(std::move(name), display_type, address, TypeSize(*info, ref),
                                program_static);
 
-  bool is_const = false;
+  bool is_const = read_only;
   while (!ref.modifiers.empty() && (ref.modifiers.front() == Dwarf::TypeModifier::Const ||
                                     ref.modifiers.front() == Dwarf::TypeModifier::Volatile))
   {
@@ -440,7 +443,7 @@ PPCVariable Materialize(const Core::CPUThreadGuard& guard,
                                program_static);
   if (type->kind == Dwarf::TypeKind::Typedef)
     return Materialize(guard, info, std::move(name), type->referenced_type, storage_kind, storage,
-                       direct_value, depth + 1, stop_generation, program_static);
+                       direct_value, depth + 1, stop_generation, program_static, is_const);
   if (type->kind == Dwarf::TypeKind::Pointer)
   {
     const std::optional<u64> value = direct_value ? direct_value :
@@ -502,7 +505,7 @@ PPCVariable Materialize(const Core::CPUThreadGuard& guard,
           program_static,
           std::nullopt,
           MakeContext(info, ref, PPCVariableStorageKind::Address, *address, depth + 1,
-                      stop_generation, TypeSize(*info, ref), program_static)};
+                      stop_generation, TypeSize(*info, ref), program_static, is_const)};
 }
 
 enum class ScalarKind
@@ -760,9 +763,10 @@ PPCVariables::GetChildren(const PPCVariableContext& context) const
   if (!context.type.modifiers.empty() ||
       std::holds_alternative<Dwarf::FundamentalTypeRef>(context.type.type))
   {
-    return std::vector<PPCVariable>{Materialize(
-        guard, info, "*", context.type, PPCVariableStorageKind::Address, context.storage,
-        std::nullopt, context.depth, context.stop_generation, context.program_static)};
+    return std::vector<PPCVariable>{
+        Materialize(guard, info, "*", context.type, PPCVariableStorageKind::Address,
+                    context.storage, std::nullopt, context.depth, context.stop_generation,
+                    context.program_static, context.read_only)};
   }
   const auto* user = std::get_if<Dwarf::UserTypeRef>(&context.type.type);
   const auto* type = user ? FindType(*info, user->die_offset) : nullptr;
@@ -770,10 +774,10 @@ PPCVariables::GetChildren(const PPCVariableContext& context) const
     return std::vector<PPCVariable>{};
   if (type->kind == Dwarf::TypeKind::Typedef)
   {
-    return std::vector<PPCVariable>{Materialize(guard, info, "value", type->referenced_type,
-                                                PPCVariableStorageKind::Address, context.storage,
-                                                std::nullopt, context.depth,
-                                                context.stop_generation, context.program_static)};
+    return std::vector<PPCVariable>{
+        Materialize(guard, info, "value", type->referenced_type, PPCVariableStorageKind::Address,
+                    context.storage, std::nullopt, context.depth, context.stop_generation,
+                    context.program_static, context.read_only)};
   }
 
   std::vector<PPCVariable> result;
@@ -805,10 +809,10 @@ PPCVariables::GetChildren(const PPCVariableContext& context) const
         result.push_back(UnavailableVariable(member.name, TypeName(*info, member.type)));
         continue;
       }
-      result.push_back(Materialize(guard, info, member.name, member.type,
-                                   PPCVariableStorageKind::Address,
-                                   context.storage + member.location.value, std::nullopt,
-                                   context.depth, context.stop_generation, context.program_static));
+      result.push_back(
+          Materialize(guard, info, member.name, member.type, PPCVariableStorageKind::Address,
+                      context.storage + member.location.value, std::nullopt, context.depth,
+                      context.stop_generation, context.program_static, context.read_only));
     }
   }
   else if (type->kind == Dwarf::TypeKind::Array && type->array_count)
@@ -829,7 +833,8 @@ PPCVariables::GetChildren(const PPCVariableContext& context) const
       const u32 address = context.storage + static_cast<u32>(offset);
       result.push_back(Materialize(guard, info, fmt::format("[{}]", i), type->referenced_type,
                                    PPCVariableStorageKind::Address, address, std::nullopt,
-                                   context.depth, context.stop_generation, context.program_static));
+                                   context.depth, context.stop_generation, context.program_static,
+                                   context.read_only));
     }
   }
   return result;
@@ -850,6 +855,8 @@ PPCVariables::SetValue(const PPCVariableContext& context, const std::string_view
       return std::unexpected("debug information unavailable");
     if (info != m_system.GetPPCSymbolDB().GetDwarfDebugInfo())
       return std::unexpected("stale variable context");
+    if (context.read_only)
+      return std::unexpected("variable is not writable");
     const auto scalar = WritableType(*info, context.type);
     if (!scalar)
       return std::unexpected("variable is not writable");
@@ -912,7 +919,7 @@ PPCVariables::SetValue(const PPCVariableContext& context, const std::string_view
                           std::nullopt;
   return Materialize(guard, context.debug_info, "", context.type, context.storage_kind,
                      context.storage, direct, context.depth, context.stop_generation,
-                     context.program_static);
+                     context.program_static, context.read_only);
 }
 
 std::expected<PPCVariable, std::string> PPCVariables::SetValue(const PPCVariableScope scope,

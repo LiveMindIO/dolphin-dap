@@ -192,6 +192,148 @@ TEST_F(PPCVariablesTest, RejectsInvalidConstAggregatePointerAndStaleWritesWithou
   EXPECT_EQ(System().GetMemory().Read_U64(address), 0x1122334455667788u);
 }
 
+TEST_F(PPCVariablesTest, ConstTypedefsRemainReadOnly)
+{
+  using namespace Core::Debug::Dwarf;
+  const u32 address = DwarfTestFixture::kTypedDataAddress;
+  ParseResult parsed;
+  Type alias;
+  alias.die_offset = 0x100;
+  alias.kind = TypeKind::Typedef;
+  alias.name = "Integer";
+  alias.referenced_type = TypeRef{FundamentalTypeRef{7}, {}};
+  parsed.types.push_back(alias);
+  alias.die_offset = 0x200;
+  alias.name = "ConstInteger";
+  alias.referenced_type = TypeRef{UserTypeRef{0x100}, {TypeModifier::Const}};
+  parsed.types.push_back(alias);
+  parsed.variables = {
+      {"outer_const",
+       TypeRef{UserTypeRef{0x100}, {TypeModifier::Const}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+      {"inner_const",
+       TypeRef{UserTypeRef{0x200}, {}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+  };
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(std::move(parsed));
+  System().GetMemory().Write_U32(42, address);
+  Core::Debug::PPCVariables variables(System());
+  const auto globals = variables.GetVariables(Core::Debug::PPCVariableScope::Globals);
+  ASSERT_EQ(globals.size(), 2u);
+  for (const auto& variable : globals)
+  {
+    SCOPED_TRACE(variable.name);
+    EXPECT_FALSE(variable.writable);
+    EXPECT_FALSE(variable.write_context);
+    EXPECT_FALSE(variables.SetValue(Core::Debug::PPCVariableScope::Globals, variable.name, "43"));
+  }
+  EXPECT_EQ(System().GetMemory().Read_U32(address), 42u);
+}
+
+TEST_F(PPCVariablesTest, ConstAggregateMembersAndArrayElementsRemainReadOnly)
+{
+  using namespace Core::Debug::Dwarf;
+  auto parsed = DwarfTestFixture::MakeTypedParseResult();
+  const u32 address = DwarfTestFixture::kTypedDataAddress;
+  Type array;
+  array.die_offset = 0x100;
+  array.kind = TypeKind::Array;
+  array.referenced_type = TypeRef{FundamentalTypeRef{7}, {}};
+  array.array_count = 2;
+  array.byte_size = 8;
+  parsed.types.push_back(array);
+  parsed.variables = {
+      {"record",
+       TypeRef{UserTypeRef{DwarfTestFixture::kTypedStructOffset}, {TypeModifier::Const}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+      {"array",
+       TypeRef{UserTypeRef{0x100}, {TypeModifier::Const}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+  };
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(std::move(parsed));
+  System().GetMemory().Write_U64(0x1122334400000000, address);
+  Core::Debug::PPCVariables variables(System());
+  const auto globals = variables.GetVariables(Core::Debug::PPCVariableScope::Globals);
+  ASSERT_EQ(globals.size(), 2u);
+  for (const auto& variable : globals)
+  {
+    SCOPED_TRACE(variable.name);
+    ASSERT_TRUE(variable.children);
+    EXPECT_TRUE(variable.children->read_only);
+    const auto children = variables.GetChildren(*variable.children);
+    ASSERT_TRUE(children);
+    ASSERT_EQ(children->size(), 2u);
+    for (const auto& child : *children)
+    {
+      EXPECT_FALSE(child.writable);
+      EXPECT_FALSE(child.write_context);
+    }
+    auto scalar_context = *variable.children;
+    scalar_context.type = TypeRef{FundamentalTypeRef{7}, {}};
+    EXPECT_FALSE(variables.SetValue(scalar_context, "43"));
+  }
+  EXPECT_EQ(System().GetMemory().Read_U64(address), 0x1122334400000000u);
+}
+
+TEST_F(PPCVariablesTest, ConstPointerStorageDoesNotMakePointeeReadOnly)
+{
+  using namespace Core::Debug::Dwarf;
+  const u32 address = DwarfTestFixture::kTypedDataAddress;
+  const u32 target = address + 0x40;
+  ParseResult parsed;
+  Type alias;
+  alias.die_offset = 0x100;
+  alias.kind = TypeKind::Typedef;
+  alias.referenced_type = TypeRef{FundamentalTypeRef{7}, {TypeModifier::Pointer}};
+  parsed.types.push_back(alias);
+  parsed.variables = {
+      {"const_pointer",
+       TypeRef{FundamentalTypeRef{7}, {TypeModifier::Const, TypeModifier::Pointer}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+      {"const_pointer_alias",
+       TypeRef{UserTypeRef{0x100}, {TypeModifier::Const}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+      {"pointer_to_const",
+       TypeRef{FundamentalTypeRef{7}, {TypeModifier::Pointer, TypeModifier::Const}},
+       {LocationKind::Address, address, 0},
+       VariableKind::Global},
+  };
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(std::move(parsed));
+  System().GetMemory().Write_U32(target, address);
+  System().GetMemory().Write_U32(42, target);
+  Core::Debug::PPCVariables variables(System());
+  const auto globals = variables.GetVariables(Core::Debug::PPCVariableScope::Globals);
+  ASSERT_EQ(globals.size(), 3u);
+  for (size_t i = 0; i < globals.size(); ++i)
+  {
+    SCOPED_TRACE(globals[i].name);
+    EXPECT_EQ(globals[i].writable, i == 2);
+    ASSERT_TRUE(globals[i].children);
+    const auto children = variables.GetChildren(*globals[i].children);
+    ASSERT_TRUE(children);
+    ASSERT_EQ(children->size(), 1u);
+    EXPECT_EQ((*children)[0].writable, i != 2);
+    if (i != 2)
+    {
+      ASSERT_TRUE((*children)[0].write_context);
+      EXPECT_TRUE(variables.SetValue(*(*children)[0].write_context, "43"));
+    }
+    else
+    {
+      EXPECT_FALSE((*children)[0].write_context);
+      EXPECT_FALSE(variables.SetValue(*globals[i].children, "44"));
+    }
+  }
+  EXPECT_EQ(System().GetMemory().Read_U32(address), target);
+  EXPECT_EQ(System().GetMemory().Read_U32(target), 43u);
+}
+
 TEST_F(PPCVariablesTest, RetainsExactDebugInfoAndEnforcesDepthChildAndMemberBounds)
 {
   using namespace Core::Debug::Dwarf;

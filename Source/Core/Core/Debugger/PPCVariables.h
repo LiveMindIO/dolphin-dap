@@ -44,6 +44,8 @@ struct PPCVariableContext
   u64 stop_generation = 0;
   std::optional<u32> byte_size;
   bool program_static = false;
+  // Const aggregate storage stays read-only when expanded, unlike its pointer targets.
+  bool read_only = false;
 };
 
 struct PPCVariable
