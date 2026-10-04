@@ -182,12 +182,14 @@ void ExecutionState::PublishStopped(ExecutionStopDetails details)
       m_active_step->cancellation->store(true);
     }
     if (!details.origin)
-      details.origin =
-          m_active_step ? std::optional<ClientId>(m_active_step->origin) : m_running_origin;
+      details.origin = m_active_step       ? std::optional<ClientId>(m_active_step->origin) :
+                       m_pending_operation ? std::optional<ClientId>(m_pending_operation->origin) :
+                                             m_running_origin;
     if (!details.operation_id)
-      details.operation_id = m_active_step ?
-                                 std::optional<OperationId>(m_active_step->operation_id) :
-                                 m_running_operation;
+      details.operation_id =
+          m_active_step       ? std::optional<OperationId>(m_active_step->operation_id) :
+          m_pending_operation ? std::optional<OperationId>(m_pending_operation->operation_id) :
+                                m_running_operation;
 
     auto event = std::make_shared<ExecutionEvent>();
     event->revision = ++m_revision;
@@ -207,9 +209,9 @@ void ExecutionState::PublishStopped(ExecutionStopDetails details)
     if (m_active_step && m_active_step->cleanup)
       m_active_step->cleanup();
     m_active_step.reset();
-    if (details.operation_id && m_pending_operation &&
-        m_pending_operation->operation_id == details.operation_id)
-      m_pending_operation.reset();
+    // A stop can arrive after the CPU resumes but before PublishContinued. Retire the
+    // pending operation so its late continuation cannot overwrite this stop.
+    m_pending_operation.reset();
     m_running_origin.reset();
     m_running_operation.reset();
     m_stopped = true;

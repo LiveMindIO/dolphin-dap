@@ -479,13 +479,19 @@ BreakPoints::BuildProjection(const std::map<u32, CodeBreakpoint>& legacy,
     if (!condition)
       return std::nullopt;
     const std::string_view stripped = StripWhitespace(*condition);
+    if (!Expression::TryParse(std::string(stripped)))
+      return std::unexpected(fmt::format("invalid breakpoint condition: {}", *condition));
     std::string canonical;
     canonical.reserve(stripped.size());
+    bool in_string = false;
     for (const unsigned char character : stripped)
     {
+      // The expression parser ends strings at the next double quote (no escape syntax).
+      if (character == '"')
+        in_string = !in_string;
       const bool is_ascii_whitespace = character == ' ' || character == '\t' || character == '\n' ||
                                        character == '\r' || character == '\f' || character == '\v';
-      if (!is_ascii_whitespace)
+      if (in_string || !is_ascii_whitespace)
         canonical.push_back(static_cast<char>(character));
     }
     const auto parsed = Expression::TryParse(canonical);
@@ -497,9 +503,14 @@ BreakPoints::BuildProjection(const std::map<u32, CodeBreakpoint>& legacy,
     while (condition.size() >= 2 && condition.front() == '(' && condition.back() == ')')
     {
       size_t depth = 0;
+      bool in_string = false;
       bool encloses_entire_condition = true;
       for (size_t i = 0; i < condition.size(); ++i)
       {
+        if (condition[i] == '"')
+          in_string = !in_string;
+        if (in_string)
+          continue;
         if (condition[i] == '(')
           ++depth;
         else if (condition[i] == ')')
@@ -520,10 +531,15 @@ BreakPoints::BuildProjection(const std::map<u32, CodeBreakpoint>& legacy,
   add_disjuncts = [&](std::string_view condition, std::set<std::string>& disjuncts) {
     condition = strip_outer_parentheses(condition);
     size_t depth = 0;
+    bool in_string = false;
     size_t operand_start = 0;
     bool split = false;
     for (size_t i = 0; i + 1 < condition.size(); ++i)
     {
+      if (condition[i] == '"')
+        in_string = !in_string;
+      if (in_string)
+        continue;
       if (condition[i] == '(')
         ++depth;
       else if (condition[i] == ')')

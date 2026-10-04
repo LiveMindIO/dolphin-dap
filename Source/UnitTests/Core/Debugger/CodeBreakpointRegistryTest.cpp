@@ -150,6 +150,51 @@ TEST_F(CodeBreakpointRegistryTest, EquivalentCanonicalConditionsCanCombineDiffer
   EXPECT_TRUE(effective->log_on_hit);
 }
 
+TEST_F(CodeBreakpointRegistryTest, CanonicalizationPreservesQuotedWhitespaceAndParentheses)
+{
+  const auto client = Register();
+  const std::vector<std::string> conditions = {
+      R"(streq("a b", "ab"))",
+      "streq(\"a\tb\", \"ab\")",
+      R"((streq(") || (", ")||(")))",
+  };
+  for (const auto& condition : conditions)
+  {
+    SCOPED_TRACE(condition);
+    ASSERT_TRUE(Registry().ReplaceClientInstructionBreakpoints(
+        client, {{.address = FIRST_ADDRESS, .condition = condition}}));
+    const auto effective = Registry().GetRegularBreakpoint(FIRST_ADDRESS);
+    ASSERT_NE(effective, nullptr);
+    ASSERT_TRUE(effective->condition);
+    EXPECT_FALSE(EvaluateCondition(Core::System::GetInstance(), effective->condition));
+  }
+}
+
+TEST_F(CodeBreakpointRegistryTest, QuotedWhitespaceDistinguishesIncompatibleConditions)
+{
+  const auto first = Register();
+  const auto second = Register();
+  ASSERT_TRUE(Registry().ReplaceClientInstructionBreakpoints(
+      first, {{.address = FIRST_ADDRESS, .condition = R"(streq("a b", "ab"))"}}));
+  const auto revision = Registry().GetRevision();
+  EXPECT_FALSE(Registry().ReplaceClientInstructionBreakpoints(
+      second, {{.address = FIRST_ADDRESS,
+                .log_on_hit = true,
+                .break_on_hit = false,
+                .condition = R"(streq("ab", "ab"))"}}));
+  EXPECT_EQ(Registry().GetRevision(), revision);
+}
+
+TEST_F(CodeBreakpointRegistryTest, CanonicalizationDoesNotMergeInvalidTokens)
+{
+  const auto client = Register();
+  const auto revision = Registry().GetRevision();
+  EXPECT_FALSE(Registry().ReplaceClientInstructionBreakpoints(
+      client, {{.address = FIRST_ADDRESS, .condition = "r3 r4"}}));
+  EXPECT_EQ(Registry().GetRevision(), revision);
+  EXPECT_FALSE(Registry().IsAddressBreakPoint(FIRST_ADDRESS));
+}
+
 TEST_F(CodeBreakpointRegistryTest, CompatibleConditionsAggregateDeterministicallyAndEvaluate)
 {
   const auto first = Register();

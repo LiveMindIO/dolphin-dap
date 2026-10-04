@@ -45,6 +45,41 @@ TEST(ExecutionStateTest, PublishesOrderedImmutableEventsAndStopGenerations)
   EXPECT_EQ(events[1]->code_breakpoint_address, 0x80002000u);
 }
 
+TEST(ExecutionStateTest, StopBeforeContinuedRetiresPendingResume)
+{
+  ExecutionState state;
+  std::vector<std::shared_ptr<const ExecutionEvent>> events;
+  const auto client = state.RegisterClient(
+      [&](std::shared_ptr<const ExecutionEvent> event) { events.emplace_back(std::move(event)); });
+  const auto operation = state.BeginOperation(client, ExecutionOperationKind::Continue);
+  ASSERT_TRUE(operation);
+
+  // An immediate breakpoint can fire after CPU resume but before continued publication.
+  state.PublishStopped({.cause = ExecutionStopCause::CodeBreakpoint,
+                        .pc = 0x80002000,
+                        .code_breakpoint_address = 0x80002000});
+
+  EXPECT_FALSE(state.PublishContinued(client, *operation, 0x80001000));
+  EXPECT_TRUE(state.IsStopped());
+  EXPECT_FALSE(state.IsOperationActive(*operation));
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events[0]->kind, ExecutionEventKind::Stopped);
+  EXPECT_EQ(events[0]->origin, client);
+  EXPECT_EQ(events[0]->operation_id, *operation);
+  EXPECT_EQ(events[0]->stop_generation, 1u);
+
+  const auto next = state.BeginOperation(client, ExecutionOperationKind::Continue);
+  ASSERT_TRUE(next);
+  EXPECT_FALSE(state.PublishContinued(client, *operation, 0x80001000));
+  EXPECT_TRUE(state.IsOperationActive(*next));
+  EXPECT_TRUE(state.IsStopped());
+  ASSERT_TRUE(state.PublishContinued(client, *next, 0x80002000));
+  EXPECT_FALSE(state.IsStopped());
+  ASSERT_EQ(events.size(), 2u);
+  EXPECT_EQ(events[1]->kind, ExecutionEventKind::Continued);
+  EXPECT_GT(events[1]->revision, events[0]->revision);
+}
+
 TEST(ExecutionStateTest, DataStopCarriesTheAvailableAccessBoundary)
 {
   ExecutionState state;
