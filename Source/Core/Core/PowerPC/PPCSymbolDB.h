@@ -79,6 +79,8 @@ public:
   std::optional<u32> FindSourceFileIndex(std::string_view file_query) const;
   std::optional<u32> GetLineAddressForQuery(std::string_view file_query, u32 line) const;
   std::vector<std::string> GetSourceFiles() const;
+  std::optional<std::string> GetResolvedSourceFile(u32 file_index) const;
+  std::map<u32, std::vector<u32>> GetExactLineAddresses(u32 file_index) const;
   bool HasDenseLineInfoInRange(u32 start, u32 size) const;
   void SetDwarfDebugInfo(Core::Debug::Dwarf::ParseResult info);
   std::shared_ptr<const Core::Debug::Dwarf::ParseResult> GetDwarfDebugInfo() const;

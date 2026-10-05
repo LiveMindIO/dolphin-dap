@@ -3,21 +3,31 @@
 
 #pragma once
 
+#include <atomic>
+#include <optional>
+#include <thread>
+
 #include <QDockWidget>
 #include <QString>
 
 #include "Common/CommonTypes.h"
+#include "Core/Debugger/ExecutionState.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "DolphinQt/Debugger/CodeViewWidget.h"
 
 class BranchWatchDialog;
+class DebugVariablesWidget;
 class QCloseEvent;
+class QLabel;
 class QLineEdit;
 class QShowEvent;
 class QSplitter;
 class QListWidget;
 class QPushButton;
 class QTableWidget;
+class QTabWidget;
 class QToolButton;
+class SourceViewWidget;
 
 namespace Common
 {
@@ -55,14 +65,20 @@ public:
 signals:
   void RequestPPCComparison(u32 address, bool translate_address);
   void ShowMemory(u32 address);
+  void RequestWatch(const QString& name, u32 address);
+  void RequestMemoryBreakpoint(u32 start, u32 end, bool read, bool write);
 
 private:
   void CreateWidgets();
   void ConnectWidgets();
   void UpdateCallstack();
-  void UpdateFunctionCalls(const Common::Symbol* symbol);
   void UpdateFunctionCallers(const Common::Symbol* symbol);
   void UpdateNotes();
+  void NavigateToAddress(u32 address, CodeViewWidget::SetAddressUpdate update);
+  void StartStep(Core::Debug::PPCStepMode mode);
+  bool JoinCompletedStepWorker();
+  void CancelAndJoinStepWorker();
+  std::optional<u32> GetActiveAddress() const;
 
   void OnPPCSymbolsChanged();
   void OnSearchAddress();
@@ -71,13 +87,13 @@ private:
   void OnSelectNote();
   void OnSelectCallstack();
   void OnSelectFunctionCallers();
-  void OnSelectFunctionCalls();
 
   void closeEvent(QCloseEvent*) override;
   void showEvent(QShowEvent* event) override;
 
   Core::System& m_system;
   PPCSymbolDB& m_ppc_symbol_db;
+  Core::Debug::ExecutionState::ClientId m_execution_observer_id;
 
   BranchWatchDialog* m_branch_watch_dialog = nullptr;
   QLineEdit* m_search_address;
@@ -89,13 +105,18 @@ private:
   QLineEdit* m_search_symbols;
   QListWidget* m_symbols_list;
   QListWidget* m_note_list;
-  QLineEdit* m_search_calls;
-  QListWidget* m_function_calls_list;
+  DebugVariablesWidget* m_variables_widget;
   QLineEdit* m_search_callers;
   QListWidget* m_function_callers_list;
   CodeViewWidget* m_code_view;
+  SourceViewWidget* m_source_view;
+  QLabel* m_source_warning;
+  QTabWidget* m_code_tabs;
   QSplitter* m_box_splitter;
   QSplitter* m_code_splitter;
 
   QString m_symbol_filter;
+  std::thread m_step_thread;
+  std::atomic<bool> m_step_cancelled{false};
+  std::atomic<bool> m_step_done{true};
 };

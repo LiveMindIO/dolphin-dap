@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Common/FileUtil.h"
 #include "Common/SymbolDB.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
@@ -78,6 +79,26 @@ TEST_F(PPCSymbolDBLineTest, ClearRemovesSourceLineInfo)
   EXPECT_FALSE(SymbolDB().HasSourceLineInfo());
 }
 
+TEST_F(PPCSymbolDBLineTest, MalformedMapPreservesExistingSymbols)
+{
+  constexpr u32 function_address = 0x00004100;
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  Core::System::GetInstance().GetMemory().CopyToEmu(function_address, code.data(), code.size());
+  Core::CPUThreadGuard guard(Core::System::GetInstance());
+  SymbolDB().AddKnownSymbol(guard, function_address, code.size(), "existing", "existing.o");
+
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  const std::string map_path = temp_dir + "/malformed.map";
+  ASSERT_TRUE(File::WriteStringToFile(map_path, "not a symbol map\n"));
+
+  EXPECT_FALSE(SymbolDB().LoadMap(guard, map_path));
+  ASSERT_NE(SymbolDB().GetSymbolFromAddr(function_address), nullptr);
+  EXPECT_EQ(SymbolDB().GetSymbolFromAddr(function_address)->name, "existing");
+
+  File::DeleteDirRecursively(temp_dir);
+}
+
 TEST_F(PPCSymbolDBLineTest, DwarfDebugInfoUsesSharedImmutableStorage)
 {
   SymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
@@ -135,7 +156,7 @@ TEST_F(PPCSymbolDBLineTest, GetSourceLineDoesNotEscapeContainingFunction)
   EXPECT_FALSE(SymbolDB().GetSourceLine(source_less_function).has_value());
 }
 
-TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNearestPrecedingLine)
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNextExecutableLine)
 {
   const u32 file_index = SymbolDB().AddSourceFile("foo.c");
   SymbolDB().AddLineEntry(0x00004100, file_index, 10);
@@ -143,14 +164,21 @@ TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNearestPrecedingLine)
 
   const std::optional<u32> address = SymbolDB().GetLineAddress("foo.c", 15);
   ASSERT_TRUE(address);
-  EXPECT_EQ(*address, 0x00004100U);
+  EXPECT_EQ(*address, 0x00004110U);
 }
 
-TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptWhenLineBeforeFirstEntry)
+TEST_F(PPCSymbolDBLineTest, GetLineAddressMapsFunctionDeclarationToFirstExecutableLine)
 {
   const u32 file_index = SymbolDB().AddSourceFile("foo.c");
   SymbolDB().AddLineEntry(0x00004100, file_index, 10);
-  EXPECT_FALSE(SymbolDB().GetLineAddress("foo.c", 5).has_value());
+  EXPECT_EQ(SymbolDB().GetLineAddress("foo.c", 5), 0x00004100U);
+}
+
+TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptAfterLastExecutableLine)
+{
+  const u32 file_index = SymbolDB().AddSourceFile("foo.c");
+  SymbolDB().AddLineEntry(0x00004100, file_index, 10);
+  EXPECT_FALSE(SymbolDB().GetLineAddress("foo.c", 11).has_value());
 }
 
 TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)
@@ -158,6 +186,23 @@ TEST_F(PPCSymbolDBLineTest, GetLineAddressReturnsNulloptForUnknownFile)
   const u32 file_index = SymbolDB().AddSourceFile("foo.c");
   SymbolDB().AddLineEntry(0x00004100, file_index, 1);
   EXPECT_FALSE(SymbolDB().GetLineAddress("missing.c", 1).has_value());
+}
+
+TEST_F(PPCSymbolDBLineTest, ExactLineAddressesAreOrderedAndNeverUseNearestLine)
+{
+  const u32 first_file = SymbolDB().AddSourceFile("first.c");
+  const u32 second_file = SymbolDB().AddSourceFile("second.c");
+  SymbolDB().AddLineEntry(0x80001008, first_file, 12);
+  SymbolDB().AddLineEntry(0x80001000, first_file, 12);
+  SymbolDB().AddLineEntry(0x80001010, first_file, 20);
+  SymbolDB().AddLineEntry(0x80002000, second_file, 12);
+
+  const std::map<u32, std::vector<u32>> lines = SymbolDB().GetExactLineAddresses(first_file);
+  EXPECT_EQ(lines.size(), 2U);
+  EXPECT_EQ(lines.at(12), (std::vector<u32>{0x80001000U, 0x80001008U}));
+  EXPECT_EQ(lines.at(20), (std::vector<u32>{0x80001010U}));
+  EXPECT_FALSE(lines.contains(13));
+  EXPECT_TRUE(SymbolDB().GetExactLineAddresses(99).empty());
 }
 
 TEST_F(PPCSymbolDBLineTest, GetLineAddressForQueryMatchesFullEditorPath)

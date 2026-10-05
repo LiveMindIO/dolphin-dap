@@ -75,6 +75,14 @@ struct Member
   std::string name;
   TypeRef type;
   Location location;
+  std::optional<u32> bit_size;
+  std::optional<u32> bit_offset;
+};
+
+struct Enumerator
+{
+  std::string name;
+  s64 value = 0;
 };
 
 enum class TypeKind
@@ -84,6 +92,7 @@ enum class TypeKind
   Typedef,
   Pointer,
   Array,
+  Enumeration,
 };
 
 struct Type
@@ -95,6 +104,8 @@ struct Type
   TypeRef referenced_type;
   std::vector<Member> members;
   std::optional<u32> array_count;
+  std::vector<Enumerator> enumerators;
+  bool enumeration_is_unsigned = false;
 };
 
 enum class VariableKind

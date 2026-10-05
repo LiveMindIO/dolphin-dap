@@ -210,7 +210,8 @@ static void ReadCommand()
   else if (c == 0x03)
   {
     auto& system = Core::System::GetInstance();
-    system.GetCPU().Break();
+    system.GetCPU().Break(
+        {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = system.GetPPCState().pc});
     SendSignal(Signal::Sigtrap);
     s_has_control = true;
     INFO_LOG_FMT(GDB_STUB, "gdb: CPU::Break due to break command");
@@ -874,7 +875,7 @@ static bool AddBreakpoint(BreakpointType type, u32 addr, u32 len)
   if (type == BreakpointType::ExecuteHard || type == BreakpointType::ExecuteSoft)
   {
     auto& breakpoints = Core::System::GetInstance().GetPowerPC().GetBreakPoints();
-    breakpoints.Add(addr);
+    (void)breakpoints.Add(addr);
     INFO_LOG_FMT(GDB_STUB, "gdb: added {} breakpoint: {:08x} bytes at {:08x}",
                  static_cast<int>(type), len, addr);
   }

@@ -237,17 +237,17 @@ std::optional<u32> PPCSymbolDB::GetLineAddressLocked(const u32 file_index, const
   if (m_line_table.empty() || file_index >= m_source_files.size())
     return std::nullopt;
 
-  std::optional<u32> best_address;
+  std::optional<std::pair<u32, u32>> best;
   for (const auto& [address, entry] : m_line_table)
   {
     if (entry.file_index != file_index)
       continue;
     if (entry.line == line)
       return address;
-    if (entry.line < line)
-      best_address = address;
+    if (entry.line > line && (!best || entry.line < best->first))
+      best = std::pair{entry.line, address};
   }
-  return best_address;
+  return best ? std::make_optional(best->second) : std::nullopt;
 }
 
 namespace
@@ -389,6 +389,35 @@ std::vector<std::string> PPCSymbolDB::GetSourceFiles() const
 {
   std::lock_guard lock(m_mutex);
   return m_resolved_source_files;
+}
+
+std::optional<std::string> PPCSymbolDB::GetResolvedSourceFile(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  if (file_index >= m_resolved_source_files.size())
+    return std::nullopt;
+
+  const std::filesystem::path path = StringToPath(m_resolved_source_files[file_index]);
+  std::error_code error;
+  if (!path.is_absolute() || !std::filesystem::is_regular_file(path, error) || error)
+    return std::nullopt;
+  return PathToString(path);
+}
+
+std::map<u32, std::vector<u32>> PPCSymbolDB::GetExactLineAddresses(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  std::map<u32, std::vector<u32>> result;
+  if (file_index >= m_source_files.size())
+    return result;
+
+  // m_line_table is address ordered, so the first address remains the deterministic toggle target.
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (entry.file_index == file_index && entry.line != 0)
+      result[entry.line].push_back(address);
+  }
+  return result;
 }
 
 bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
@@ -1003,6 +1032,12 @@ bool PPCSymbolDB::LoadMap(const Core::CPUThreadGuard& guard, std::string filenam
         ++bad_count;
       }
     }
+  }
+
+  if (good_count == 0)
+  {
+    ERROR_LOG_FMT(SYMBOLS, "No valid symbols found in map file '{}'", filename);
+    return false;
   }
 
   Index(&new_functions);

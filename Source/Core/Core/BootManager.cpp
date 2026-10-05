@@ -22,9 +22,12 @@
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
+#include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Core/Boot/ElfReader.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
@@ -53,8 +56,47 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
 
   SConfig& StartUp = SConfig::GetInstance();
 
+  if (auto* executable = std::get_if<BootParameters::Executable>(&boot->parameters))
+  {
+    // Executable boot metadata depends on this decision, so keep the pre-game-layer value for the
+    // complete boot rather than allowing a newly loaded per-game layer to change it midway.
+    executable->boot_with_default_disc = Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE);
+  }
+
   if (!StartUp.SetPathsAndGameMetadata(system, *boot))
     return false;
+
+  if (auto* disc = std::get_if<BootParameters::Disc>(&boot->parameters))
+  {
+    if (NetPlay::IsNetPlayRunning())
+    {
+      disc->load_debug_elf = false;
+      if (!Config::Get(Config::MAIN_DEBUG_ELF_FILE).empty())
+        WARN_LOG_FMT(BOOT, "Ignoring local debug ELF configuration during NetPlay");
+    }
+    else if (Config::Get(Config::MAIN_DEBUG_REPLACE_DISC_EXECUTABLE))
+    {
+      disc->debug_elf_path = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+      if (!disc->debug_elf_path.empty())
+      {
+        auto reader = std::make_unique<ElfReader>(disc->debug_elf_path);
+        if (!reader->IsPPCExecutable())
+        {
+          PanicAlertFmtT(
+              "The debug ELF \"{0}\" is not a supported executable. Dolphin requires a "
+              "32-bit big-endian PowerPC ELF with an executable load segment containing its entry "
+              "point. Dolphin will boot the original disc executable instead.",
+              disc->debug_elf_path);
+        }
+        else
+        {
+          disc->debug_elf = std::move(reader);
+          disc->replace_executable = true;
+          disc->load_debug_elf = false;
+        }
+      }
+    }
+  }
 
   // Movie settings
   auto& movie = system.GetMovie();
@@ -185,8 +227,9 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
 
   AchievementManager::GetInstance().CloseGame();
 
-  const bool load_ipl = !system.IsWii() && !Config::Get(Config::MAIN_SKIP_IPL) &&
-                        std::holds_alternative<BootParameters::Disc>(boot->parameters);
+  const auto* disc = std::get_if<BootParameters::Disc>(&boot->parameters);
+  const bool load_ipl =
+      !system.IsWii() && !Config::Get(Config::MAIN_SKIP_IPL) && disc && !disc->replace_executable;
   if (load_ipl)
   {
     return Core::Init(

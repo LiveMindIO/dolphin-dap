@@ -72,7 +72,7 @@ struct SConfig
 
   // Triggered when Dolphin loads a title directly
   // Reloads title-specific map files, patches, etc.
-  static void OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard);
+  static void OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard, bool load_debug_elf = true);
 
   // Direct title change from ES (Wii system)
   // Wii titles will still hit OnTitleDirectlyBooted

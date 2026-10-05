@@ -453,4 +453,94 @@ TEST(DwarfReaderTest, ParseDescendsIntoLastParentWithoutSiblingAttribute)
   EXPECT_EQ(result->variables[0].low_pc, DwarfTestFixture::kFunctionAddress);
   EXPECT_EQ(result->variables[0].high_pc, DwarfTestFixture::kFunctionAddress + 4);
 }
+
+TEST(DwarfReaderTest, ParseEnumerationElementsAndBitfieldMetadata)
+{
+  std::vector<u8> bytes;
+  const size_t compile_unit = BeginDie(&bytes, 0x0011);
+  AppendU16(&bytes, 0x0012);
+  const size_t compile_unit_sibling = bytes.size();
+  AppendU32(&bytes, 0);
+  AppendU16(&bytes, 0x0038);
+  AppendString(&bytes, "types.c");
+  FinishDie(&bytes, compile_unit);
+
+  const size_t enumeration = BeginDie(&bytes, 0x0004);
+  AppendU16(&bytes, 0x0038);
+  AppendString(&bytes, "Mode");
+  AppendU16(&bytes, 0x00b6);
+  AppendU32(&bytes, 4);
+  AppendU16(&bytes, 0x00f4);
+  const size_t element_list_size = bytes.size();
+  AppendU32(&bytes, 0);
+  const size_t element_list = bytes.size();
+  AppendU32(&bytes, static_cast<u32>(-1));
+  AppendString(&bytes, "Previous");
+  AppendU32(&bytes, 2);
+  AppendString(&bytes, "Next");
+  PatchU32(&bytes, element_list_size, static_cast<u32>(bytes.size() - element_list));
+  FinishDie(&bytes, enumeration);
+
+  const size_t unsigned_enumeration = BeginDie(&bytes, 0x0004);
+  AppendU16(&bytes, 0x0038);
+  AppendString(&bytes, "ByteMode");
+  AppendU16(&bytes, 0x00b6);
+  AppendU32(&bytes, 1);
+  AppendU16(&bytes, 0x00f4);
+  const size_t unsigned_element_list_size = bytes.size();
+  AppendU32(&bytes, 0);
+  const size_t unsigned_element_list = bytes.size();
+  AppendU32(&bytes, 255);
+  AppendString(&bytes, "Maximum");
+  PatchU32(&bytes, unsigned_element_list_size,
+           static_cast<u32>(bytes.size() - unsigned_element_list));
+  FinishDie(&bytes, unsigned_enumeration);
+
+  const size_t structure = BeginDie(&bytes, 0x0013);
+  AppendU16(&bytes, 0x0012);
+  const size_t structure_sibling = bytes.size();
+  AppendU32(&bytes, 0);
+  AppendU16(&bytes, 0x0038);
+  AppendString(&bytes, "Flags");
+  AppendU16(&bytes, 0x00b6);
+  AppendU32(&bytes, 4);
+  FinishDie(&bytes, structure);
+
+  const size_t member = BeginDie(&bytes, 0x000d);
+  AppendU16(&bytes, 0x0038);
+  AppendString(&bytes, "enabled");
+  AppendU16(&bytes, 0x0055);
+  AppendU16(&bytes, 9);
+  AppendU16(&bytes, 0x0023);
+  AppendU16(&bytes, 6);
+  bytes.push_back(0x04);
+  AppendU32(&bytes, 0);
+  bytes.push_back(0x07);
+  AppendU16(&bytes, 0x00c5);
+  AppendU16(&bytes, 31);
+  AppendU16(&bytes, 0x00d6);
+  AppendU32(&bytes, 1);
+  FinishDie(&bytes, member);
+
+  PatchU32(&bytes, structure_sibling, static_cast<u32>(bytes.size()));
+  PatchU32(&bytes, compile_unit_sibling, static_cast<u32>(bytes.size()));
+
+  const auto result = Core::Debug::Dwarf::Parse(bytes, {});
+  ASSERT_TRUE(result);
+  ASSERT_EQ(result->types.size(), 3U);
+  EXPECT_EQ(result->types[0].kind, Core::Debug::Dwarf::TypeKind::Enumeration);
+  EXPECT_FALSE(result->types[0].enumeration_is_unsigned);
+  ASSERT_EQ(result->types[0].enumerators.size(), 2U);
+  EXPECT_EQ(result->types[0].enumerators[0].name, "Previous");
+  EXPECT_EQ(result->types[0].enumerators[0].value, -1);
+  EXPECT_EQ(result->types[0].enumerators[1].name, "Next");
+  EXPECT_EQ(result->types[0].enumerators[1].value, 2);
+  EXPECT_EQ(result->types[1].kind, Core::Debug::Dwarf::TypeKind::Enumeration);
+  EXPECT_TRUE(result->types[1].enumeration_is_unsigned);
+  ASSERT_EQ(result->types[1].enumerators.size(), 1U);
+  EXPECT_EQ(result->types[1].enumerators[0].value, 255);
+  ASSERT_EQ(result->types[2].members.size(), 1U);
+  EXPECT_EQ(result->types[2].members[0].bit_offset, 31U);
+  EXPECT_EQ(result->types[2].members[0].bit_size, 1U);
+}
 }  // namespace

@@ -46,6 +46,7 @@ enum Tag : u16
   TAG_union_type = 0x0017,
   TAG_inlined_subroutine = 0x001d,
   TAG_entry_point = 0x0003,
+  TAG_enumeration_type = 0x0004,
   TAG_subrange_type = 0x0021,
 };
 
@@ -60,6 +61,9 @@ enum Attribute : u16
   AT_mod_u_d_type = 0x0080 | FORM_BLOCK2,
   AT_subscr_data = 0x00a0 | FORM_BLOCK2,
   AT_byte_size = 0x00b0 | FORM_DATA4,
+  AT_bit_offset = 0x00c0 | FORM_DATA2,
+  AT_bit_size = 0x00d0 | FORM_DATA4,
+  AT_element_list = 0x00f0 | FORM_BLOCK4,
   AT_stmt_list = 0x0100 | FORM_DATA4,
   AT_low_pc = 0x0110 | FORM_ADDR,
   AT_high_pc = 0x0120 | FORM_ADDR,
@@ -210,6 +214,16 @@ public:
     return true;
   }
 
+  bool ReadBlock4(std::span<const u8>* out)
+  {
+    u32 length = 0;
+    if (!ReadU32(&length) || m_data.size() < length)
+      return false;
+    *out = m_data.first(length);
+    m_data = m_data.subspan(length);
+    return true;
+  }
+
 private:
   std::span<const u8> m_data;
   bool m_big_endian;
@@ -225,11 +239,14 @@ struct DieInfo
   u32 stmt_list_offset = 0;
   u32 byte_size = 0;
   u32 start_scope = 0;
+  std::optional<u32> bit_size;
+  std::optional<u32> bit_offset;
   bool has_stmt_list = false;
   std::string name;
   TypeRef type;
   std::span<const u8> location;
   std::span<const u8> subscr_data;
+  std::span<const u8> element_list;
 };
 
 bool ParseModifiedType(std::span<const u8> data, bool big_endian, bool user_type, TypeRef* out)
@@ -339,6 +356,8 @@ bool ParseDie(const u8* die_start, const u8* section_end, bool big_endian, DieIn
         return false;
       if (attr == AT_fund_type)
         info->type.type = FundamentalTypeRef{value};
+      else if (attr == AT_bit_offset)
+        info->bit_offset = value;
       break;
     }
     case FORM_DATA4:
@@ -360,6 +379,8 @@ bool ParseDie(const u8* die_start, const u8* section_end, bool big_endian, DieIn
         info->byte_size = value;
       else if (attr == AT_start_scope)
         info->start_scope = value;
+      else if (attr == AT_bit_size)
+        info->bit_size = value;
       break;
     }
     case FORM_DATA8:
@@ -394,7 +415,12 @@ bool ParseDie(const u8* die_start, const u8* section_end, bool big_endian, DieIn
       break;
     }
     case FORM_BLOCK4:
-      if (!attr_reader.SkipBlock4())
+      if (attr == AT_element_list)
+      {
+        if (!attr_reader.ReadBlock4(&info->element_list))
+          return false;
+      }
+      else if (!attr_reader.SkipBlock4())
         return false;
       break;
     case FORM_STRING:
@@ -489,7 +515,22 @@ bool IsFunctionTag(u16 tag)
 bool IsTypeTag(u16 tag)
 {
   return tag == TAG_structure_type || tag == TAG_union_type || tag == TAG_typedef ||
-         tag == TAG_pointer_type || tag == TAG_array_type;
+         tag == TAG_pointer_type || tag == TAG_array_type || tag == TAG_enumeration_type;
+}
+
+std::vector<Enumerator> ParseElementList(std::span<const u8> data, const bool big_endian)
+{
+  ByteReader reader(data, big_endian);
+  std::vector<Enumerator> result;
+  while (!reader.empty())
+  {
+    s32 value = 0;
+    std::string_view name;
+    if (!reader.ReadS32(&value) || !reader.ReadString(&name))
+      return {};
+    result.push_back({std::string(name), value});
+  }
+  return result;
 }
 
 bool CanHaveChildren(u16 tag)
@@ -652,6 +693,19 @@ std::optional<ParseResult> Parse(std::span<const u8> debug_section,
           type.kind = TypeKind::Typedef;
         else if (child_info.tag == TAG_pointer_type)
           type.kind = TypeKind::Pointer;
+        else if (child_info.tag == TAG_enumeration_type)
+        {
+          type.kind = TypeKind::Enumeration;
+          type.enumerators = ParseElementList(child_info.element_list, big_endian);
+          if (type.byte_size != 0 && type.byte_size < sizeof(s64))
+          {
+            const s64 signed_max = (s64{1} << (type.byte_size * 8 - 1)) - 1;
+            type.enumeration_is_unsigned =
+                std::ranges::any_of(type.enumerators, [signed_max](const Enumerator& enumerator) {
+                  return enumerator.value > signed_max;
+                });
+          }
+        }
         else
         {
           type.kind = TypeKind::Array;
@@ -680,7 +734,8 @@ std::optional<ParseResult> Parse(std::span<const u8> debug_section,
             {
               location = {LocationKind::MemberOffset, 0, 0};
             }
-            type.members.push_back({child_info.name, child_info.type, std::move(location)});
+            type.members.push_back({child_info.name, child_info.type, std::move(location),
+                                    child_info.bit_size, child_info.bit_offset});
           }
           break;
         }

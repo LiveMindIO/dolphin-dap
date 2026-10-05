@@ -45,6 +45,7 @@
 #include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
 #include "Core/DSPEmulator.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FreeLookManager.h"
@@ -66,7 +67,6 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/PatchEngine.h"
-#include "Core/Debugger/DAP/DAP.h"
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -359,7 +359,6 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     State expected = State::Starting;
     s_state.compare_exchange_strong(expected, State::Running);
   }
-
 
   bool debugger_enabled = false;
   {
@@ -919,7 +918,8 @@ void Callback_NewField(Core::System& system)
     if (s_stop_frame_step.load())
     {
       s_frame_step = false;
-      system.GetCPU().Break();
+      system.GetCPU().Break(
+          {.cause = Core::Debug::ExecutionStopCause::Step, .pc = system.GetPPCState().pc});
       NotifyStateChanged(Core::GetState(system));
     }
   }
