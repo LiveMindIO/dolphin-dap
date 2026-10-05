@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <chrono>
 #include <functional>
+#include <optional>
 
 namespace Core
 {
@@ -17,6 +19,7 @@ class DapTransport;
 struct SessionTestHooks
 {
   std::function<void()> async_step_worker_joined;
+  std::optional<std::chrono::milliseconds> step_out_timeout;
 };
 
 void RunSession(DapTransport& transport, Core::System& system,

@@ -1235,6 +1235,40 @@ TEST_F(DapSessionTest, PointerEditResponseHandleSurvivesInvalidation)
   EXPECT_EQ(system.GetMemory().Read_U32(0x5000), 42u);
 }
 
+TEST_F(DapSessionTest, StepOutTimeoutPublishesTerminalStop)
+{
+  m_session_test_hooks.step_out_timeout = std::chrono::milliseconds(0);
+  auto& system = Core::System::GetInstance();
+  system.GetPPCState().pc = CODE_ADDRESS;
+  TestClient client(m_client_fd());
+  Handshake(client);
+  client.Send(R"({"seq":10,"type":"request","command":"stepOut"})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response);
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued);
+  EXPECT_EQ(continued->at("event").to_str(), "continued");
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped);
+  EXPECT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(stopped->at("body").get<picojson::object>().at("reason").to_str(), "step");
+  EXPECT_TRUE(system.GetCPU().IsStepping());
+  EXPECT_TRUE(system.GetCPU().GetExecutionState().IsStopped());
+  EXPECT_FALSE(system.GetCPU().GetExecutionState().GetActiveStepOrigin());
+  EXPECT_EQ(system.GetPPCState().pc, CODE_ADDRESS);
+
+  // Completion must emit exactly one stop and release ownership for the next request.
+  client.Send(R"({"seq":11,"type":"request","command":"pause"})");
+  const auto paused = client.Receive();
+  ASSERT_TRUE(paused);
+  EXPECT_EQ(paused->at("command").to_str(), "pause");
+  EXPECT_TRUE(paused->at("success").get<bool>());
+  const auto pause_stop = client.Receive();
+  ASSERT_TRUE(pause_stop);
+  EXPECT_EQ(pause_stop->at("body").get<picojson::object>().at("reason").to_str(), "pause");
+}
+
 TEST_F(DapSessionTest, SetVariableUpdatesTypedChildAndReturnsType)
 {
   auto& system = Core::System::GetInstance();

@@ -1031,8 +1031,11 @@ private:
       Respond(request->seq, command, picojson::object{});
       m_controller.PublishStepContinued(*operation);
       m_step_out_thread = std::thread([self = shared_from_this(), operation = *operation]() {
+        const auto timeout = self->m_test_hooks && self->m_test_hooks->step_out_timeout ?
+                                 *self->m_test_hooks->step_out_timeout :
+                                 std::chrono::seconds(5);
         const Core::Debug::PPCStepResult result =
-            self->m_controller.StepOut(self->m_step_cancelled);
+            self->m_controller.StepOut(self->m_step_cancelled, timeout);
         self->m_step_out_done.store(true);
         if (self->m_step_cancelled.load())
           self->m_controller.AbandonStep(operation);
@@ -1040,6 +1043,10 @@ private:
           self->m_controller.CompleteStep(operation);
         else if (result == Core::Debug::PPCStepResult::Continuing)
           self->m_controller.PublishStepContinued(operation);
+        else if (self->m_system.GetCPU().IsStepping())
+          // A timeout leaves the interpreter paused. CompleteStep checks ownership so
+          // an external stop or cancellation cannot produce a duplicate stop here.
+          self->m_controller.CompleteStep(operation);
         else
           self->m_controller.AbandonStep(operation);
       });
