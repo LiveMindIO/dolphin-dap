@@ -681,21 +681,11 @@ void CodeWidget::StartStep(const Core::Debug::PPCStepMode mode)
              worker_execution.IsOperationActive(operation))
     {
       const u32 pc = m_system.GetPPCState().pc;
-      if (m_system.GetPowerPC().GetBreakPoints().IsAddressBreakPoint(pc))
-      {
-        m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
-                                 .origin = origin,
-                                 .operation_id = operation,
-                                 .pc = pc,
-                                 .code_breakpoint_address = pc});
-      }
-      else
-      {
-        m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
-                                 .origin = origin,
-                                 .operation_id = operation,
-                                 .pc = pc});
-      }
+      // Actual breakpoint hits already published a stop and retired the operation.
+      m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
+                               .origin = origin,
+                               .operation_id = operation,
+                               .pc = pc});
     }
     else if (result == Core::Debug::PPCStepResult::NotStepped)
     {

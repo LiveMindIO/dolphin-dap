@@ -219,15 +219,8 @@ void DapDebugController::CompleteStep(const Core::Debug::ExecutionState::Operati
   if (!execution.IsOperationActive(operation_id))
     return;
   const u32 pc = m_system.GetPPCState().pc;
-  if (m_system.GetPowerPC().GetBreakPoints().IsAddressBreakPoint(pc))
-  {
-    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::CodeBreakpoint,
-                             .origin = m_execution_client_id,
-                             .operation_id = operation_id,
-                             .pc = pc,
-                             .code_breakpoint_address = pc});
-    return;
-  }
+  // Actual breakpoint hits publish their own stop and retire the operation. A breakpoint
+  // merely existing at the destination does not turn normal step completion into a hit.
   m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
                            .origin = m_execution_client_id,
                            .operation_id = operation_id,
