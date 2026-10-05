@@ -638,6 +638,8 @@ private:
     Respond(request.seq, request.command, picojson::object{});
     m_controller.PublishStepContinued(*operation);
     m_step_out_thread = std::thread([self = shared_from_this(), step_over, operation = *operation] {
+      if (self->m_test_hooks && self->m_test_hooks->async_step_worker_started)
+        self->m_test_hooks->async_step_worker_started();
       const Core::Debug::PPCStepResult result =
           self->m_controller.StepSource(step_over, self->m_step_cancelled);
       self->m_step_out_done.store(true);
@@ -1031,6 +1033,8 @@ private:
       Respond(request->seq, command, picojson::object{});
       m_controller.PublishStepContinued(*operation);
       m_step_out_thread = std::thread([self = shared_from_this(), operation = *operation]() {
+        if (self->m_test_hooks && self->m_test_hooks->async_step_worker_started)
+          self->m_test_hooks->async_step_worker_started();
         const auto timeout = self->m_test_hooks && self->m_test_hooks->step_out_timeout ?
                                  *self->m_test_hooks->step_out_timeout :
                                  std::chrono::seconds(5);

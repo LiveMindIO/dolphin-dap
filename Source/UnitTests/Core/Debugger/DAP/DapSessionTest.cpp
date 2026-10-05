@@ -3,7 +3,7 @@
 
 // End-to-end integration test for the DAP session command loop. A connected
 // socketpair stands in for the client<->adapter socket (no TCP, no network), and
-// RunSession runs on a background thread that declares itself the CPU thread so
+// RunSession and its stepping workers declare themselves CPU threads so
 // the DapDebugController's CPUThreadGuards are lightweight no-ops. This drives the
 // full stack -- framing, JSON parsing, command dispatch, response/event
 // serialization -- against a real (un-booted) Core::System, no ISO required.
@@ -115,7 +115,7 @@ protected:
     system.GetCoreTiming().Init();
 
     // Register/MSR mutation asserts it runs on the CPU thread. Borrow that role
-    // just for setup; the session runs on its own thread that declares itself.
+    // just for setup; the session and its workers declare themselves separately.
     Core::DeclareAsCPUThread();
     system.GetCPU().Init(PowerPC::CPUCore::Interpreter);
     auto& power_pc = system.GetPowerPC();
@@ -133,6 +133,11 @@ protected:
     const std::array<u8, 4> data{{0xde, 0xad, 0xbe, 0xef}};
     memory.CopyToEmu(DATA_ADDRESS, data.data(), data.size());
     Core::UndeclareAsCPUThread();
+
+    // CPUThreadGuard only borrows the CPU-thread role when the global Core state is running.
+    // This fixture never boots that state machine, so workers must declare the role explicitly,
+    // just like the session thread. The thread-local role ends with each worker's lifetime.
+    m_session_test_hooks.async_step_worker_started = [] { Core::DeclareAsCPUThread(); };
 
     ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, m_fds), 0);
     m_server = std::thread([this] {

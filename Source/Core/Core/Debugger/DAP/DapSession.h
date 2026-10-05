@@ -18,6 +18,8 @@ class DapTransport;
 
 struct SessionTestHooks
 {
+  // Bootless fixtures must establish the CPU-thread role on each stepping worker.
+  std::function<void()> async_step_worker_started;
   std::function<void()> async_step_worker_joined;
   std::optional<std::chrono::milliseconds> step_out_timeout;
 };
