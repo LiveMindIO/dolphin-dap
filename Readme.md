@@ -9,12 +9,15 @@ that the dolphin upstream would like, so don't ask me to upstream it.  People wh
 use what's here. If any dedicated individual wants to add the functionality to official dolphin without vibecoding the
 whole thing, I would love it.
 
+For the DAP functionality, setup, and usage, see the [Dolphin DAP documentation](Tools/dap/README.md).
+
 ## Debug Adapter Protocol (DAP) Server
 
 This fork adds a **Debug Adapter Protocol server** that exposes Dolphin's
 PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.). Enable
-it by configuring a DAP port or socket at runtime; it compiles into the
-NoGUI target with no separate binary.
+core debugging with `-C Dolphin.Interface.DebugModeEnabled=True`, configure a DAP
+port or socket, and boot a game to start the listener. A port or socket alone does
+not enable breakpoint checks. The server is included in Dolphin's Qt and NoGUI builds.
 
 For build/run instructions, tests, known limitations, the operations summary,
 and per-operation request/response payload reference, see
