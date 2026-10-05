@@ -1187,6 +1187,123 @@ TEST_F(DapSessionTest, RegisterPointerEditsInvalidateOldPointeeHandles)
   EXPECT_FALSE(external_change->at("success").get<bool>());
 }
 
+enum class PointerMutation
+{
+  WriteMemory,
+  PartialWriteMemory,
+  EvaluateRegister,
+  EvaluateMemory,
+};
+
+class DapMutationInvalidationTest : public DapSessionTest,
+                                    public ::testing::WithParamInterface<PointerMutation>
+{
+};
+
+TEST_P(DapMutationInvalidationTest, MutationInvalidatesOldPointerReadsAndWrites)
+{
+  using namespace Core::Debug::Dwarf;
+  const bool register_pointer = GetParam() == PointerMutation::EvaluateRegister;
+  const bool partial_write = GetParam() == PointerMutation::PartialWriteMemory;
+  auto& system = Core::System::GetInstance();
+  const u32 pointer_address = partial_write ? system.GetMemory().GetRamSizeReal() - 4 : 0x4000;
+  const int scope = register_pointer ? 1002 : 1003;
+  ParseResult info;
+  info.variables.push_back({"pointer", TypeRef{FundamentalTypeRef{7}, {TypeModifier::Pointer}},
+                            register_pointer ? Location{LocationKind::Register, 3, 0} :
+                                               Location{LocationKind::Address, pointer_address, 0},
+                            register_pointer ? VariableKind::Local : VariableKind::Global,
+                            CODE_ADDRESS, CODE_ADDRESS + 4});
+  system.GetPPCSymbolDB().SetDwarfDebugInfo(std::move(info));
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().gpr[3] = 0x5000;
+  system.GetMemory().Write_U32(0x5000, pointer_address);
+  system.GetMemory().Write_U32(42, 0x5000);
+  system.GetMemory().Write_U32(43, 0x6000);
+  TestClient client(m_client_fd());
+  Handshake(client);
+  const auto scope_request = fmt::format(
+      R"({{"seq":10,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      scope);
+  client.Send(scope_request);
+  const auto variables = client.Receive();
+  ASSERT_TRUE(variables);
+  const auto& rows =
+      variables->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(rows.size(), 1U);
+  const int reference =
+      static_cast<int>(rows[0].get<picojson::object>().at("variablesReference").get<double>());
+  const auto expansion_request = fmt::format(
+      R"({{"seq":12,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      reference);
+
+  // Read-only evaluations, including strings naming write functions, retain valid expansions.
+  client.Send(R"json({"seq":11,"type":"request","command":"evaluate","arguments":{
+    "expression":"streq(\"write_u32\", \"write_u32\")"}})json");
+  ASSERT_TRUE(client.Receive());
+  client.Send(expansion_request);
+  const auto unchanged = client.Receive();
+  ASSERT_TRUE(unchanged);
+  ASSERT_TRUE(unchanged->at("success").get<bool>());
+
+  if (register_pointer)
+    client.Send(R"({"seq":13,"type":"request","command":"evaluate","arguments":{
+      "expression":"r3 = 0x6000","context":"repl"}})");
+  else if (GetParam() == PointerMutation::EvaluateMemory)
+    client.Send(R"json({"seq":13,"type":"request","command":"evaluate","arguments":{
+      "expression":"write_u32(0x6000, 0x4000)","context":"repl"}})json");
+  else
+    client.Send(fmt::format(
+        R"({{"seq":13,"type":"request","command":"writeMemory","arguments":{{
+          "memoryReference":"0x{:08x}","data":"{}","allowPartial":false}}}})",
+        pointer_address, partial_write ? "AABgAAECAwQ=" : "AABgAA=="));
+  const auto edited = client.Receive();
+  ASSERT_TRUE(edited);
+  EXPECT_EQ(edited->at("success").get<bool>(), !partial_write);
+  EXPECT_EQ(register_pointer ? system.GetPPCState().gpr[3] :
+                               system.GetMemory().Read_U32(pointer_address),
+            0x6000U);
+  client.Send(expansion_request);
+  const auto stale_read = client.Receive();
+  ASSERT_TRUE(stale_read);
+  EXPECT_FALSE(stale_read->at("success").get<bool>());
+  client.Send(fmt::format(
+      R"({{"seq":14,"type":"request","command":"setVariable","arguments":{{
+        "variablesReference":{},"name":"*","value":"44"}}}})",
+      reference));
+  const auto stale_write = client.Receive();
+  ASSERT_TRUE(stale_write);
+  EXPECT_FALSE(stale_write->at("success").get<bool>());
+  EXPECT_EQ(system.GetMemory().Read_U32(0x5000), 42U);
+  EXPECT_EQ(system.GetMemory().Read_U32(0x6000), 43U);
+
+  client.Send(scope_request);
+  const auto refreshed = client.Receive();
+  ASSERT_TRUE(refreshed);
+  const auto& fresh_rows =
+      refreshed->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(fresh_rows.size(), 1U);
+  const int fresh_reference = static_cast<int>(
+      fresh_rows[0].get<picojson::object>().at("variablesReference").get<double>());
+  EXPECT_NE(fresh_reference, reference);
+  client.Send(fmt::format(
+      R"({{"seq":15,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      fresh_reference));
+  const auto fresh_children = client.Receive();
+  ASSERT_TRUE(fresh_children);
+  ASSERT_TRUE(fresh_children->at("success").get<bool>());
+  const auto& children =
+      fresh_children->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(children.size(), 1U);
+  EXPECT_EQ(children[0].get<picojson::object>().at("value").to_str(), "0x0000002b");
+}
+
+INSTANTIATE_TEST_SUITE_P(MemoryAndExpressions, DapMutationInvalidationTest,
+                         ::testing::Values(PointerMutation::WriteMemory,
+                                           PointerMutation::PartialWriteMemory,
+                                           PointerMutation::EvaluateRegister,
+                                           PointerMutation::EvaluateMemory));
+
 TEST_F(DapSessionTest, PointerEditResponseHandleSurvivesInvalidation)
 {
   using namespace Core::Debug::Dwarf;

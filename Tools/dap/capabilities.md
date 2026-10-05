@@ -283,7 +283,11 @@ generally use raw hexadecimal; supported writable scalars can be edited with
 lists, arbitrary DWARF expressions, bit fields, inheritance, dynamic arrays, and
 unwinding locals for older frames are not implemented. Expansion references are
 invalidated by resume, stepping, restart, terminate, and value edits through the
-GUI or any DAP client. Re-request scope variables after an edit rather than reusing
+GUI or any DAP client, including `writeMemory` (even a partial write reported as
+an error) and `evaluate` expressions containing assignments or memory-write
+functions. Such expressions conservatively invalidate references even if a
+conditional branch skips the mutation; read-only evaluations retain references.
+Re-request scope variables after an edit rather than reusing
 old expansion references. A new expansion reference returned by `setVariable`
 remains valid until a subsequent edit or execution change.
 

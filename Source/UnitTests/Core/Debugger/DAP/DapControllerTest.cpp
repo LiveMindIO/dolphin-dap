@@ -961,6 +961,78 @@ TEST_F(DapControllerTest, EvaluateExpressionWritesBackToRegisters)
   EXPECT_EQ(ppc_state.gpr[3], 42u);
 }
 
+TEST_F(DapControllerTest, MutatingExpressionsNotifyOtherDebuggersButReadsDoNot)
+{
+  DAP::DapDebugController writer(System());
+  DAP::DapDebugController observer(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  observer.SetExecutionEventCallback([&](auto event) { events.push_back(std::move(event)); });
+  System().GetPPCState().gpr[3] = 1;
+  EXPECT_TRUE(writer.EvaluateExpression("r3 == 1"));
+  EXPECT_TRUE(writer.EvaluateExpression("streq(\"write_u32\", \"write_u32\")"));
+  EXPECT_FALSE(writer.EvaluateExpression("("));
+  EXPECT_TRUE(events.empty());
+
+  EXPECT_TRUE(writer.EvaluateExpression("r3 = r3 + 1"));
+  EXPECT_EQ(System().GetPPCState().gpr[3], 2U);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[0]->origin, writer.GetExecutionClientId());
+  EXPECT_TRUE(writer.EvaluateExpression("1 + write_u32(42, 0x3100)"));
+  EXPECT_EQ(System().GetMemory().Read_U32(TEST_ADDRESS), 42U);
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events[1]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[1]->origin, writer.GetExecutionClientId());
+  EXPECT_TRUE(writer.EvaluateExpression("read_u32(0x3100) == 42"));
+  EXPECT_EQ(events.size(), 2U);
+}
+
+TEST_F(DapControllerTest, MemoryWritesNotifyOtherDebuggersOfActualWrittenRange)
+{
+  DAP::DapDebugController writer(System());
+  DAP::DapDebugController observer(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  observer.SetExecutionEventCallback([&](auto event) { events.push_back(std::move(event)); });
+  const std::array<u8, 4> payload{1, 2, 3, 4};
+  EXPECT_EQ(writer.WriteMemory(TEST_ADDRESS, payload), 4U);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[0]->origin, writer.GetExecutionClientId());
+  EXPECT_EQ(events[0]->data_address, TEST_ADDRESS);
+  EXPECT_EQ(events[0]->data_size, 4U);
+
+  const u32 end_address = System().GetMemory().GetRamSizeReal() - 2;
+  EXPECT_EQ(writer.WriteMemory(end_address, payload), 2U);
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events[1]->data_address, end_address);
+  EXPECT_EQ(events[1]->data_size, 2U);
+  EXPECT_EQ(writer.WriteMemory(INVALID_ADDRESS, payload), 0U);
+  EXPECT_EQ(writer.WriteMemory(TEST_ADDRESS, {}), 0U);
+  EXPECT_EQ(events.size(), 2U);
+}
+
+TEST_F(DapControllerTest, ExpressionMutationDetectionUsesParsedNodes)
+{
+  const std::array<std::pair<std::string_view, bool>, 9> cases{{
+      {"r3 == 1", false},
+      {"streq(\"write_u32\", \"r3 = 1\")", false},
+      {"read_u32(0x3100)", false},
+      {"r3 = 1", true},
+      {"1 + (r3 = 1)", true},
+      {"0 && write_u8(1, 0x3100)", true},
+      {"read_u32(write_u32(0x3100, 0x4000))", true},
+      {"write_f64(1.5, 0x3100)", true},
+      {"-(r3 = 1)", true},
+  }};
+  for (const auto& [text, expected] : cases)
+  {
+    SCOPED_TRACE(text);
+    const auto expression = Expression::TryParse(text);
+    ASSERT_TRUE(expression);
+    EXPECT_EQ(expression->MayWriteState(), expected);
+  }
+}
+
 TEST_F(DapControllerTest, StepIntoAdvancesPc)
 {
   const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};

@@ -490,8 +490,13 @@ std::optional<std::string> DapDebugController::EvaluateExpression(const std::str
   if (!parsed)
     return std::nullopt;
 
-  Core::CPUThreadGuard guard(m_system);
-  const double value = parsed->Evaluate(m_system);
+  double value;
+  {
+    Core::CPUThreadGuard guard(m_system);
+    value = parsed->Evaluate(m_system);
+  }
+  if (parsed->MayWriteState())
+    m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id);
   if (value == std::trunc(value) && value >= 0 && value <= 0xffffffff)
     return fmt::format("0x{:08x}", static_cast<u32>(value));
 
@@ -1080,25 +1085,31 @@ std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> dat
   {
     return 0;
   }
-  Core::CPUThreadGuard guard(m_system);
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
-
   std::size_t written = 0;
-  for (const u8 byte : data)
   {
-    const u32 addr = address + static_cast<u32>(written);
-    if (!accessors->IsValidAddress(guard, addr))
-      break;
-    accessors->WriteU8(guard, addr, byte);
-    ++written;
+    Core::CPUThreadGuard guard(m_system);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+
+    for (const u8 byte : data)
+    {
+      const u32 addr = address + static_cast<u32>(written);
+      if (!accessors->IsValidAddress(guard, addr))
+        break;
+      accessors->WriteU8(guard, addr, byte);
+      ++written;
+    }
+    // DESNOTE(jbarber, 2026-07-21): MMU::WriteToHardware copies bytes into RAM
+    // with no icbi/JIT hook, so writes that patch code leave the L1 iCache and
+    // JIT block cache pointing at stale bytes. Invalidate every cacheline we
+    // touched so interpreter and JIT fetch paths both see the new bytes the
+    // next time control reaches this address. Without this, an injected
+    // detour or code patch can be silently ignored.
+    InvalidateCodeRange(address, written);
   }
-  // DESNOTE(jbarber, 2026-07-21): MMU::WriteToHardware copies bytes into RAM
-  // with no icbi/JIT hook, so writes that patch code leave the L1 iCache and
-  // JIT block cache pointing at stale bytes. Invalidate every cacheline we
-  // touched so interpreter and JIT fetch paths both see the new bytes the
-  // next time control reaches this address. Without this, an injected
-  // detour or code patch can be silently ignored.
-  InvalidateCodeRange(address, written);
+  // Notify every debugger even when a caller rejects an already-partially-written request.
+  if (written != 0)
+    m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id, address,
+                                                               static_cast<u32>(written));
   return written;
 }
 
