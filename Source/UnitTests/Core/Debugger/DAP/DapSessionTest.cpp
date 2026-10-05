@@ -1101,6 +1101,140 @@ TEST_F(DapSessionTest, SetVariableUpdatesRegisterAndReturnsFormattedValue)
   (void)client.Receive();
 }
 
+TEST_F(DapSessionTest, RegisterPointerEditsInvalidateOldPointeeHandles)
+{
+  using namespace Core::Debug::Dwarf;
+  auto& system = Core::System::GetInstance();
+  ParseResult info;
+  info.variables.push_back({"pointer",
+                            TypeRef{FundamentalTypeRef{7}, {TypeModifier::Pointer}},
+                            {LocationKind::Register, 3, 0},
+                            VariableKind::Local,
+                            CODE_ADDRESS,
+                            CODE_ADDRESS + 4});
+  system.GetPPCSymbolDB().SetDwarfDebugInfo(std::move(info));
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().gpr[3] = 0x4000;
+  system.GetMemory().Write_U32(42, 0x4000);
+  system.GetMemory().Write_U32(43, 0x5000);
+  TestClient client(m_client_fd());
+  Handshake(client);
+
+  client.Send(R"({"seq":10,"type":"request","command":"variables",
+                  "arguments":{"variablesReference":1002}})");
+  const auto locals_response = client.Receive();
+  ASSERT_TRUE(locals_response);
+  const auto& locals =
+      locals_response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(locals.size(), 1u);
+  const int reference =
+      static_cast<int>(locals[0].get<picojson::object>().at("variablesReference").get<double>());
+
+  client.Send(R"({"seq":11,"type":"request","command":"setVariable",
+                  "arguments":{"variablesReference":1000,"name":"r3","value":"0x00005000"}})");
+  const auto edited = client.Receive();
+  ASSERT_TRUE(edited);
+  ASSERT_TRUE(edited->at("success").get<bool>());
+
+  client.Send(fmt::format(
+      R"({{"seq":12,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      reference));
+  const auto stale_read = client.Receive();
+  ASSERT_TRUE(stale_read);
+  EXPECT_FALSE(stale_read->at("success").get<bool>());
+  client.Send(fmt::format(
+      R"({{"seq":13,"type":"request","command":"setVariable","arguments":{{"variablesReference":{},"name":"*","value":"44"}}}})",
+      reference));
+  const auto stale_write = client.Receive();
+  ASSERT_TRUE(stale_write);
+  EXPECT_FALSE(stale_write->at("success").get<bool>());
+  EXPECT_EQ(system.GetMemory().Read_U32(0x4000), 42u);
+  EXPECT_EQ(system.GetMemory().Read_U32(0x5000), 43u);
+
+  client.Send(R"({"seq":14,"type":"request","command":"variables",
+                  "arguments":{"variablesReference":1002}})");
+  const auto refreshed = client.Receive();
+  ASSERT_TRUE(refreshed);
+  const auto& refreshed_locals =
+      refreshed->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(refreshed_locals.size(), 1u);
+  const int new_reference = static_cast<int>(
+      refreshed_locals[0].get<picojson::object>().at("variablesReference").get<double>());
+  EXPECT_NE(new_reference, reference);
+  client.Send(fmt::format(
+      R"({{"seq":15,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      new_reference));
+  const auto children_response = client.Receive();
+  ASSERT_TRUE(children_response);
+  ASSERT_TRUE(children_response->at("success").get<bool>());
+  const auto& children =
+      children_response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(children.size(), 1u);
+  EXPECT_EQ(children[0].get<picojson::object>().at("value").to_str(), "0x0000002b");
+
+  // A GUI or second DAP client's value-change event must invalidate this session too.
+  system.GetCPU().GetExecutionState().PublishValuesChanged();
+  client.Send(fmt::format(
+      R"({{"seq":16,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      new_reference));
+  const auto external_change = client.Receive();
+  ASSERT_TRUE(external_change);
+  EXPECT_FALSE(external_change->at("success").get<bool>());
+}
+
+TEST_F(DapSessionTest, PointerEditResponseHandleSurvivesInvalidation)
+{
+  using namespace Core::Debug::Dwarf;
+  auto& system = Core::System::GetInstance();
+  ParseResult info;
+  info.variables.push_back({"pointer",
+                            TypeRef{FundamentalTypeRef{7}, {TypeModifier::Pointer}},
+                            {LocationKind::Address, 0x4000, 0},
+                            VariableKind::Global});
+  system.GetPPCSymbolDB().SetDwarfDebugInfo(std::move(info));
+  system.GetMemory().Write_U32(0x5000, 0x4000);
+  system.GetMemory().Write_U32(42, 0x5000);
+  system.GetMemory().Write_U32(43, 0x6000);
+  TestClient client(m_client_fd());
+  Handshake(client);
+  client.Send(R"({"seq":10,"type":"request","command":"variables",
+                  "arguments":{"variablesReference":1003}})");
+  const auto globals_response = client.Receive();
+  ASSERT_TRUE(globals_response);
+  const auto& globals =
+      globals_response->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(globals.size(), 1u);
+  const int old_reference =
+      static_cast<int>(globals[0].get<picojson::object>().at("variablesReference").get<double>());
+
+  client.Send(R"({"seq":11,"type":"request","command":"setVariable",
+                  "arguments":{"variablesReference":1003,"name":"pointer","value":"0x6000"}})");
+  const auto edited = client.Receive();
+  ASSERT_TRUE(edited);
+  ASSERT_TRUE(edited->at("success").get<bool>());
+  const int new_reference = static_cast<int>(
+      edited->at("body").get<picojson::object>().at("variablesReference").get<double>());
+  EXPECT_NE(new_reference, old_reference);
+  client.Send(fmt::format(
+      R"({{"seq":12,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      old_reference));
+  const auto stale = client.Receive();
+  ASSERT_TRUE(stale);
+  EXPECT_FALSE(stale->at("success").get<bool>());
+  client.Send(fmt::format(
+      R"({{"seq":13,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      new_reference));
+  const auto fresh = client.Receive();
+  ASSERT_TRUE(fresh);
+  ASSERT_TRUE(fresh->at("success").get<bool>());
+  const auto& children =
+      fresh->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_EQ(children.size(), 1u);
+  EXPECT_EQ(children[0].get<picojson::object>().at("value").to_str(), "0x0000002b");
+  EXPECT_EQ(system.GetMemory().Read_U32(0x4000), 0x6000u);
+  EXPECT_EQ(system.GetMemory().Read_U32(0x5000), 42u);
+}
+
 TEST_F(DapSessionTest, SetVariableUpdatesTypedChildAndReturnsType)
 {
   auto& system = Core::System::GetInstance();
@@ -1137,9 +1271,32 @@ TEST_F(DapSessionTest, SetVariableUpdatesTypedChildAndReturnsType)
   client.Send(fmt::format(
       R"({{"seq":5,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
       children_reference));
-  const auto reused_after_typed_write = client.Receive();
-  ASSERT_TRUE(reused_after_typed_write.has_value());
-  EXPECT_TRUE(reused_after_typed_write->at("success").get<bool>());
+  const auto stale_after_typed_write = client.Receive();
+  ASSERT_TRUE(stale_after_typed_write.has_value());
+  EXPECT_FALSE(stale_after_typed_write->at("success").get<bool>());
+
+  // A value edit invalidates DAP snapshots; the client can reacquire live children.
+  client.Send(R"({"seq":50,"type":"request","command":"variables",
+                  "arguments":{"variablesReference":1003}})");
+  const auto refreshed_globals_response = client.Receive();
+  ASSERT_TRUE(refreshed_globals_response);
+  const auto& refreshed_globals = refreshed_globals_response->at("body")
+                                      .get<picojson::object>()
+                                      .at("variables")
+                                      .get<picojson::array>();
+  ASSERT_FALSE(refreshed_globals.empty());
+  const int refreshed_reference = static_cast<int>(
+      refreshed_globals[0].get<picojson::object>().at("variablesReference").get<double>());
+  client.Send(fmt::format(
+      R"({{"seq":51,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
+      refreshed_reference));
+  const auto refreshed_children = client.Receive();
+  ASSERT_TRUE(refreshed_children);
+  ASSERT_TRUE(refreshed_children->at("success").get<bool>());
+  const auto& children =
+      refreshed_children->at("body").get<picojson::object>().at("variables").get<picojson::array>();
+  ASSERT_FALSE(children.empty());
+  EXPECT_EQ(children[0].get<picojson::object>().at("value").to_str(), "0xaabbccdd");
 
   client.Send(R"({
     "seq": 6, "type": "request", "command": "setVariable",
@@ -1151,10 +1308,10 @@ TEST_F(DapSessionTest, SetVariableUpdatesTypedChildAndReturnsType)
 
   client.Send(fmt::format(
       R"({{"seq":7,"type":"request","command":"variables","arguments":{{"variablesReference":{}}}}})",
-      children_reference));
-  const auto reused_after_register_write = client.Receive();
-  ASSERT_TRUE(reused_after_register_write.has_value());
-  EXPECT_TRUE(reused_after_register_write->at("success").get<bool>());
+      refreshed_reference));
+  const auto stale_after_register_write = client.Receive();
+  ASSERT_TRUE(stale_after_register_write.has_value());
+  EXPECT_FALSE(stale_after_register_write->at("success").get<bool>());
 
   client.Send(R"({"seq": 8, "type": "request", "command": "disconnect"})");
   (void)client.Receive();

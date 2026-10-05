@@ -277,11 +277,15 @@ disassembly pseudo-source.
 1.1 debug information is loaded. `variables` can expand supported typedefs,
 pointers, fixed-size arrays, structures, and unions to at most 32 levels and 1000
 children. It resolves absolute, supported PPC-register (`r0`-`r31`, `lr`, `ctr`, or `xer`),
-base-register-plus-constant, and constant member-offset locations. Values are
-read-only raw hexadecimal; location
+base-register-plus-constant, and constant member-offset locations. Scalar displays
+generally use raw hexadecimal; supported writable scalars can be edited with
+`setVariable`. Location
 lists, arbitrary DWARF expressions, bit fields, inheritance, dynamic arrays, and
 unwinding locals for older frames are not implemented. Expansion references are
-invalidated by resume, stepping, restart, terminate, or a new `scopes` request.
+invalidated by resume, stepping, restart, terminate, and value edits through the
+GUI or any DAP client. Re-request scope variables after an edit rather than reusing
+old expansion references. A new expansion reference returned by `setVariable`
+remains valid until a subsequent edit or execution change.
 
 ## `evaluate`
 

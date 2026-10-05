@@ -401,9 +401,9 @@ private:
     {
       return;
     }
+    m_invalidate_debug_values.store(true);
     if (event->kind == Core::Debug::ExecutionEventKind::ValuesChanged)
       return;
-    m_invalidate_debug_values.store(true);
     if (event->kind == Core::Debug::ExecutionEventKind::Continued)
     {
       picojson::object body;
@@ -720,6 +720,7 @@ private:
 
   void PollAsyncStepAndEvents()
   {
+    ApplyDebugValueInvalidation();
     auto core_scan_lock = DapMemoryEngine::TryLockCoreScan();
     if (!core_scan_lock.owns_lock())
     {
@@ -746,8 +747,6 @@ private:
       return;
     }
 
-    if (m_invalidate_debug_values.exchange(false))
-      ClearDebugValueHandles();
     FlushEvents();
   }
 
@@ -839,6 +838,7 @@ private:
     if (!request)
       return;
 
+    ApplyDebugValueInvalidation();
     const std::string& command = request->command;
 
     if (command == "disconnect")
@@ -1928,6 +1928,7 @@ private:
         RespondError(request.seq, "setVariable", "invalid setVariable arguments");
         return;
       }
+      ApplyDebugValueInvalidation();
       picojson::object body;
       body.emplace("value", fmt::format("0x{:08x}", *value));
       Respond(request.seq, "setVariable", std::move(body));
@@ -1952,6 +1953,8 @@ private:
       return;
     }
 
+    // Retire handles affected by this edit before allocating the response's new handle.
+    ApplyDebugValueInvalidation();
     picojson::object body = MakeDebugVariable(std::move(*result));
     body.erase("name");
     Respond(request.seq, "setVariable", std::move(body));
@@ -2511,6 +2514,12 @@ private:
   }
 
   void ClearDebugValueHandles() { m_debug_value_handles.clear(); }
+
+  void ApplyDebugValueInvalidation()
+  {
+    if (m_invalidate_debug_values.exchange(false))
+      ClearDebugValueHandles();
+  }
 
   picojson::object MakeScopes(const int frame_id)
   {
