@@ -1749,6 +1749,51 @@ TEST_F(DapSessionTest, StepCommandsRespondAndEmitStopped)
   (void)client.Receive();
 }
 
+class DapInstructionStepBreakpointTest : public DapSessionTest,
+                                         public ::testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(DapInstructionStepBreakpointTest, DestinationBreakpointReportsHitId)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+  client.Send(R"({"seq":20,"type":"request","command":"setInstructionBreakpoints","arguments":{
+    "breakpoints":[{"instructionReference":"0x00003104"}]}})");
+  const auto breakpoint_response = client.Receive();
+  ASSERT_TRUE(breakpoint_response);
+  ASSERT_TRUE(breakpoint_response->at("success").get<bool>());
+  const auto& breakpoint = breakpoint_response->at("body")
+                               .get<picojson::object>()
+                               .at("breakpoints")
+                               .get<picojson::array>()[0]
+                               .get<picojson::object>();
+  ASSERT_TRUE(breakpoint.at("verified").get<bool>());
+  const double expected_id = breakpoint.at("id").get<double>();
+  auto& system = Core::System::GetInstance();
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().npc = CODE_ADDRESS + 4;
+  client.Send(
+      GetParam() ?
+          R"({"seq":21,"type":"request","command":"next","arguments":{"threadId":1,"granularity":"instruction"}})" :
+          R"({"seq":21,"type":"request","command":"stepIn","arguments":{"threadId":1,"granularity":"instruction"}})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response);
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped);
+  ASSERT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(system.GetPPCState().pc, CODE_ADDRESS + 4);
+  const auto& body = stopped->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("reason").to_str(), "breakpoint");
+  ASSERT_TRUE(body.contains("hitBreakpointIds"));
+  const auto& ids = body.at("hitBreakpointIds").get<picojson::array>();
+  ASSERT_EQ(ids.size(), 1U);
+  EXPECT_EQ(ids[0].get<double>(), expected_id);
+}
+
+INSTANTIATE_TEST_SUITE_P(IntoAndOver, DapInstructionStepBreakpointTest, ::testing::Bool());
+
 TEST_F(DapSessionTest, DuplicateNextPreservesContinuingStepOver)
 {
   TestClient client(m_client_fd());

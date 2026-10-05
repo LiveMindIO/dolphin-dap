@@ -4,10 +4,12 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "Common/ScopeGuard.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/PPCStepping.h"
@@ -68,6 +70,64 @@ TEST_F(PPCSteppingTest, InstructionIntoAdvancesOneOpcode)
                                  Core::Debug::PPCStepGranularity::Instruction),
             Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+}
+
+TEST_F(PPCSteppingTest, AcknowledgedInstructionStepPublishesDestinationBreakpoint)
+{
+  auto& system = System();
+  system.GetMemory().CopyToEmu(TEST_ADDRESS, NOP.data(), NOP.size());
+  system.GetPPCState().pc = TEST_ADDRESS;
+  ASSERT_TRUE(system.GetPowerPC().GetBreakPoints().Add(TEST_ADDRESS + 4));
+  auto& cpu = system.GetCPU();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto observer = cpu.GetExecutionState().RegisterClient(
+      [&](auto event) { events.push_back(std::move(event)); });
+  Common::ScopeGuard unregister{[&] { cpu.GetExecutionState().UnregisterClient(observer); }};
+  std::thread cpu_thread([&] {
+    Core::DeclareAsCPUThread();
+    cpu.Run();
+    Core::UndeclareAsCPUThread();
+  });
+  Common::ScopeGuard stop_cpu_thread{[&] {
+    cpu.Stop();
+    cpu_thread.join();
+    Core::DeclareAsCPUThread();
+  }};
+  Core::UndeclareAsCPUThread();
+
+  ASSERT_EQ(Core::Debug::StepPPC(system, Core::Debug::PPCStepMode::Into,
+                                 Core::Debug::PPCStepGranularity::Instruction),
+            Core::Debug::PPCStepResult::Stepped);
+  EXPECT_EQ(system.GetPPCState().pc, TEST_ADDRESS + 4);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(events[0]->code_breakpoint_address, TEST_ADDRESS + 4);
+}
+
+TEST_F(PPCSteppingTest, InstructionStepPreservesInterveningExternalStop)
+{
+  auto& system = System();
+  system.GetMemory().CopyToEmu(TEST_ADDRESS, NOP.data(), NOP.size());
+  system.GetPPCState().pc = TEST_ADDRESS;
+  system.GetPPCState().downcount = 0;
+  ASSERT_TRUE(system.GetPowerPC().GetBreakPoints().Add(TEST_ADDRESS + 4));
+  auto& execution = system.GetCPU().GetExecutionState();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto observer =
+      execution.RegisterClient([&](auto event) { events.push_back(std::move(event)); });
+  Common::ScopeGuard unregister{[&] { execution.UnregisterClient(observer); }};
+  auto* event_type = system.GetCoreTiming().RegisterEvent(
+      "ExternalStopDuringInstruction", [&](Core::System&, u64, s64) {
+        execution.PublishStopped(
+            {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = TEST_ADDRESS});
+      });
+  system.GetCoreTiming().ScheduleEvent(0, event_type);
+
+  ASSERT_EQ(Core::Debug::StepPPC(system, Core::Debug::PPCStepMode::Into,
+                                 Core::Debug::PPCStepGranularity::Instruction),
+            Core::Debug::PPCStepResult::Stepped);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->stop_cause, Core::Debug::ExecutionStopCause::UserPause);
 }
 
 TEST_F(PPCSteppingTest, InstructionOverContinuesToTemporaryReturnBreakpoint)

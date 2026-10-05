@@ -49,6 +49,15 @@ PPCStepResult StepInstructionInto(Core::System& system, const PPCStepOptions& op
     return PPCStepResult::Stepped;
 
   auto& power_pc = system.GetPowerPC();
+  const u64 stop_generation = cpu.GetExecutionState().GetStopGeneration();
+  const auto check_destination_breakpoint = [&] {
+    // A single opcode doesn't check its destination. Evaluate the actual predicate once,
+    // but don't overwrite an intervening data breakpoint, external stop, or cancellation.
+    if (!IsCancelled(options) && cpu.GetExecutionState().GetStopGeneration() == stop_generation)
+    {
+      power_pc.CheckAndHandleBreakPoints();
+    }
+  };
   if (Core::IsCPUThread())
   {
     Core::CPUThreadGuard guard(system);
@@ -56,6 +65,7 @@ PPCStepResult StepInstructionInto(Core::System& system, const PPCStepOptions& op
     power_pc.SetMode(PowerPC::CoreMode::Interpreter);
     power_pc.SingleStep();
     power_pc.SetMode(old_mode);
+    check_destination_breakpoint();
     return PPCStepResult::Stepped;
   }
 
@@ -65,6 +75,11 @@ PPCStepResult StepInstructionInto(Core::System& system, const PPCStepOptions& op
   cpu.StepOpcode(&sync_event);
   const bool completed = sync_event.WaitFor(options.instruction_timeout);
   power_pc.SetMode(old_mode);
+  if (completed)
+  {
+    Core::CPUThreadGuard guard(system);
+    check_destination_breakpoint();
+  }
   return completed ? PPCStepResult::Stepped : PPCStepResult::NotStepped;
 }
 
