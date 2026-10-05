@@ -40,6 +40,7 @@ public:
 
 signals:
   void BreakpointToggleRequested(u32 address);
+  void SourceLineMismatch(const QString& path, u32 line, int source_line_count);
 
 protected:
   void resizeEvent(QResizeEvent* event) override;
@@ -64,7 +65,7 @@ private:
   void HandleGutterClick(QMouseEvent* event);
   void UpdateGutterWidth();
   void UpdateGutter(const QRect& rect, int dy);
-  void SelectLine(u32 line);
+  bool SelectLine(u32 line);
   std::optional<u32> ResolveLine(u32 line) const;
   std::optional<u32> AddressForLine(u32 line) const;
   std::vector<u32> AddressesForLine(u32 line) const;

@@ -86,6 +86,7 @@ CodeWidget::CodeWidget(QWidget* parent)
     {
       CancelAndJoinStepWorker();
       m_source_view->Clear();
+      m_source_warning->hide();
     }
     Update();
   });
@@ -149,7 +150,13 @@ void CodeWidget::CreateWidgets()
   m_code_tabs->addTab(m_source_view, tr("Source"));
   m_code_tabs->addTab(m_code_view, tr("Disassembly"));
   m_code_tabs->setCurrentWidget(m_code_view);
+  m_source_warning = new QLabel;
+  m_source_warning->setObjectName(QStringLiteral("source_mismatch_warning"));
+  m_source_warning->setTextFormat(Qt::PlainText);
+  m_source_warning->setWordWrap(true);
+  m_source_warning->hide();
   right_layout->addLayout(top_layout);
+  right_layout->addWidget(m_source_warning);
   right_layout->addWidget(m_code_tabs);
 
   m_box_splitter = new QSplitter(Qt::Vertical);
@@ -216,6 +223,18 @@ void CodeWidget::CreateWidgets()
 
 void CodeWidget::ConnectWidgets()
 {
+  connect(m_source_view, &SourceViewWidget::SourceLineMismatch, this,
+          [this](const QString& path, u32 line, int source_line_count) {
+            m_source_warning->setText(
+                tr("Warning: DWARF source mismatch. %1 references line %2, but the source file "
+                   "has only %3 lines. Showing disassembly. Rebuild the ELF from the current "
+                   "source files.")
+                    .arg(path)
+                    .arg(line)
+                    .arg(source_line_count));
+            m_source_warning->show();
+            m_code_tabs->setCurrentWidget(m_code_view);
+          });
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
   connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
           [this](Qt::ColorScheme colorScheme) {
@@ -386,6 +405,7 @@ void CodeWidget::SetAddress(u32 address, CodeViewWidget::SetAddressUpdate update
 
 void CodeWidget::NavigateToAddress(const u32 address, const CodeViewWidget::SetAddressUpdate update)
 {
+  m_source_warning->hide();
   m_code_view->SetAddress(address, update);
 
   const std::optional<PPCSymbolDB::SourceLine> source = m_ppc_symbol_db.GetSourceLine(address);

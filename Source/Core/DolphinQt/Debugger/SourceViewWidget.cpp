@@ -243,11 +243,6 @@ bool SourceViewWidget::ShowSource(const u32 file_index, const u32 line)
 
     m_highlighter.reset();
     setPlainText(QString::fromUtf8(contents));
-    if (line == 0 || line > static_cast<u32>(blockCount()))
-    {
-      Clear();
-      return false;
-    }
     if (size <= MAX_HIGHLIGHTED_SOURCE_SIZE)
       m_highlighter = std::make_unique<CppSyntaxHighlighter>(document());
 
@@ -256,7 +251,8 @@ bool SourceViewWidget::ShowSource(const u32 file_index, const u32 line)
   }
 
   m_line_addresses = line_addresses;
-  SelectLine(line);
+  if (!SelectLine(line))
+    return false;
   RefreshBreakpoints();
   return true;
 }
@@ -372,7 +368,8 @@ void SourceViewWidget::HandleGutterClick(QMouseEvent* event)
   const u32 line = static_cast<u32>(cursor.blockNumber() + 1);
   if (const std::optional<u32> address = AddressForLine(line))
   {
-    SelectLine(*ResolveLine(line));
+    if (!SelectLine(*ResolveLine(line)))
+      return;
     const std::vector<u32> addresses = AddressesForLine(line);
     const auto snapshot = Core::System::GetInstance().GetPowerPC().GetBreakPoints().GetSnapshot();
     bool removed_existing = false;
@@ -404,10 +401,14 @@ void SourceViewWidget::UpdateGutter(const QRect& rect, const int dy)
     UpdateGutterWidth();
 }
 
-void SourceViewWidget::SelectLine(const u32 line)
+bool SourceViewWidget::SelectLine(const u32 line)
 {
   if (line == 0 || line > static_cast<u32>(blockCount()))
-    return;
+  {
+    emit SourceLineMismatch(QString::fromStdString(m_path), line, blockCount());
+    Clear();
+    return false;
+  }
   QTextCursor cursor(document()->findBlockByNumber(static_cast<int>(line - 1)));
   setTextCursor(cursor);
   centerCursor();
@@ -420,6 +421,7 @@ void SourceViewWidget::SelectLine(const u32 line)
   selection.format.setProperty(QTextFormat::FullWidthSelection, true);
   selections.push_back(selection);
   setExtraSelections(selections);
+  return true;
 }
 
 std::optional<u32> SourceViewWidget::AddressForLine(const u32 line) const

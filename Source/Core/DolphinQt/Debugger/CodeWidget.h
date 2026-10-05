@@ -18,6 +18,7 @@
 class BranchWatchDialog;
 class DebugVariablesWidget;
 class QCloseEvent;
+class QLabel;
 class QLineEdit;
 class QShowEvent;
 class QSplitter;
@@ -109,6 +110,7 @@ private:
   QListWidget* m_function_callers_list;
   CodeViewWidget* m_code_view;
   SourceViewWidget* m_source_view;
+  QLabel* m_source_warning;
   QTabWidget* m_code_tabs;
   QSplitter* m_box_splitter;
   QSplitter* m_code_splitter;
