@@ -668,11 +668,16 @@ void CodeWidget::StartStep(const Core::Debug::PPCStepMode mode)
     const Core::Debug::PPCStepResult result =
         Core::Debug::StepPPC(m_system, mode, granularity, options);
     auto& worker_execution = m_system.GetCPU().GetExecutionState();
+    // Step-out times out synchronously with the CPU still paused. Unlike an instruction
+    // acknowledgement timeout, it has no pending opcode that could complete after this stop.
+    const bool step_out_timed_out = mode == Core::Debug::PPCStepMode::Out &&
+                                    result == Core::Debug::PPCStepResult::NotStepped &&
+                                    m_system.GetCPU().IsStepping();
     if (m_step_cancelled.load())
     {
       worker_execution.AbandonStep(operation);
     }
-    else if (result == Core::Debug::PPCStepResult::Stepped &&
+    else if ((result == Core::Debug::PPCStepResult::Stepped || step_out_timed_out) &&
              worker_execution.IsOperationActive(operation))
     {
       const u32 pc = m_system.GetPPCState().pc;
