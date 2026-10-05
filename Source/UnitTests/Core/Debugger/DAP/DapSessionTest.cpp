@@ -1623,6 +1623,73 @@ TEST_F(DapSessionTest, RangedDataStopCorrelatesInteriorAccessWithBreakpointId)
   (void)client.Receive();
 }
 
+class DapDataBreakpointIdTest : public DapSessionTest, public ::testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(DapDataBreakpointIdTest, ReplacedRangeHitUsesCurrentBreakpointId)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+  const bool shift_start = GetParam();
+  client.Send(shift_start ?
+                  R"({"seq":20,"type":"request","command":"setDataBreakpoints","arguments":{
+            "breakpoints":[{"dataId":"0x00004000","accessType":"write","length":16}]}})" :
+                  R"({"seq":20,"type":"request","command":"setDataBreakpoints","arguments":{
+            "breakpoints":[{"dataId":"0x00004000","accessType":"write","length":4}]}})");
+  const auto first = client.Receive();
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(first->at("success").get<bool>());
+  const double old_id = first->at("body")
+                            .get<picojson::object>()
+                            .at("breakpoints")
+                            .get<picojson::array>()[0]
+                            .get<picojson::object>()
+                            .at("id")
+                            .get<double>();
+  client.Send(shift_start ?
+                  R"({"seq":21,"type":"request","command":"setDataBreakpoints","arguments":{
+            "breakpoints":[{"dataId":"0x00004004","accessType":"write","length":4}]}})" :
+                  R"({"seq":21,"type":"request","command":"setDataBreakpoints","arguments":{
+            "breakpoints":[{"dataId":"0x00004000","accessType":"write","length":16}]}})");
+  const auto second = client.Receive();
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(second->at("success").get<bool>());
+  const double current_id = second->at("body")
+                                .get<picojson::object>()
+                                .at("breakpoints")
+                                .get<picojson::array>()[0]
+                                .get<picojson::object>()
+                                .at("id")
+                                .get<double>();
+  ASSERT_NE(old_id, current_id);
+
+  // A real guest store must correlate with the replacement range, not a historical overlap.
+  auto& system = Core::System::GetInstance();
+  system.GetMemory().Write_U32(0x90640000, CODE_ADDRESS);  // stw r3, 0(r4)
+  system.GetPPCState().pc = CODE_ADDRESS;
+  system.GetPPCState().npc = CODE_ADDRESS + 4;
+  system.GetPPCState().gpr[3] = 42;
+  system.GetPPCState().gpr[4] = shift_start ? DATA_ADDRESS + 4 : DATA_ADDRESS;
+  client.Send(R"({"seq":22,"type":"request","command":"stepIn","arguments":{"threadId":1}})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response);
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued);
+  ASSERT_EQ(continued->at("event").to_str(), "continued");
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped);
+  ASSERT_EQ(stopped->at("event").to_str(), "stopped");
+  const auto& body = stopped->at("body").get<picojson::object>();
+  ASSERT_EQ(body.at("reason").to_str(), "data breakpoint");
+  const auto& ids = body.at("hitBreakpointIds").get<picojson::array>();
+  ASSERT_EQ(ids.size(), 1U);
+  EXPECT_EQ(ids[0].get<double>(), current_id);
+}
+
+INSTANTIATE_TEST_SUITE_P(ShiftedAndResized, DapDataBreakpointIdTest, ::testing::Bool());
+
 TEST_F(DapSessionTest, StackTraceWithUnknownThreadFails)
 {
   TestClient client(m_client_fd());

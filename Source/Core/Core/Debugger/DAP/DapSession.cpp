@@ -451,8 +451,8 @@ private:
     std::optional<int> hit_id;
     if (event->code_breakpoint_address)
       hit_id = LookupBreakpointId(*event->code_breakpoint_address);
-    else if (event->watchpoint_start)
-      hit_id = LookupDataBreakpointId(*event->watchpoint_start);
+    else if (event->watchpoint_start && event->watchpoint_end)
+      hit_id = LookupDataBreakpointId(*event->watchpoint_start, *event->watchpoint_end);
     if (hit_id)
     {
       picojson::array hit_ids;
@@ -694,15 +694,11 @@ private:
     return id;
   }
 
-  std::optional<int> LookupDataBreakpointId(u32 address)
+  std::optional<int> LookupDataBreakpointId(u32 start_address, u32 end_address)
   {
     std::lock_guard lock(m_bp_id_mutex);
-    for (const auto& [range, id] : m_data_bp_id_by_range)
-    {
-      if (range.first <= address && address <= range.second)
-        return id;
-    }
-    return std::nullopt;
+    const auto it = m_data_bp_id_by_range.find({start_address, end_address});
+    return it == m_data_bp_id_by_range.end() ? std::nullopt : std::optional<int>(it->second);
   }
 
   // DESNOTE(jbarber, 2026-07-21): Removed the per-set `ClearBreakpointIds`
