@@ -23,6 +23,7 @@
 #include "Common/FileUtil.h"
 #include "Common/ScopeGuard.h"
 #include "Common/SymbolDB.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
@@ -1265,6 +1266,93 @@ TEST_F(DapControllerTest, InstructionStepEvaluatesDestinationConditionOnlyOnce)
   EXPECT_EQ(stops[0]->code_breakpoint_address, TEST_ADDRESS + 4);
   EXPECT_EQ(System().GetPPCState().gpr[3], 1U);
 }
+
+enum class StepOverReturnBreakpoint
+{
+  None,
+  Enabled,
+  Disabled,
+  FalseCondition,
+  TrueCondition,
+  LogOnly,
+};
+
+class DapTemporaryStepTest : public DapControllerTest,
+                             public ::testing::WithParamInterface<StepOverReturnBreakpoint>
+{
+protected:
+  void SetUp() override
+  {
+    Config::Init();
+    Config::Set(Config::LayerType::CurrentRun, Config::MAIN_ENABLE_DEBUGGING, true);
+    DapControllerTest::SetUp();
+  }
+  void TearDown() override
+  {
+    DapControllerTest::TearDown();
+    Config::Shutdown();
+  }
+};
+
+TEST_P(DapTemporaryStepTest, InterpreterReturnDistinguishesTemporaryAndUserHits)
+{
+  auto& system = System();
+  system.GetMemory().Write_U32(0x48000041, TEST_ADDRESS);
+  system.GetMemory().Write_U32(0x4e800020, TEST_ADDRESS + 0x40);
+  auto& state = system.GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.gpr[3] = 0;
+  DAP::DapDebugController controller(system);
+  const auto destination = GetParam();
+  if (destination != StepOverReturnBreakpoint::None)
+  {
+    TBreakPoint breakpoint;
+    breakpoint.address = TEST_ADDRESS + 4;
+    breakpoint.is_enabled = destination != StepOverReturnBreakpoint::Disabled;
+    breakpoint.break_on_hit = destination != StepOverReturnBreakpoint::LogOnly;
+    breakpoint.log_on_hit = destination == StepOverReturnBreakpoint::LogOnly;
+    if (destination == StepOverReturnBreakpoint::FalseCondition)
+      breakpoint.condition = Expression::TryParse("(r3 = r3 + 1) == 2");
+    if (destination == StepOverReturnBreakpoint::TrueCondition ||
+        destination == StepOverReturnBreakpoint::LogOnly)
+      breakpoint.condition = Expression::TryParse("r3 = r3 + 1");
+    ASSERT_TRUE(system.GetPowerPC().GetBreakPoints().Add(std::move(breakpoint)));
+  }
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(), DAP::StepOverResult::Continuing);
+  auto& power_pc = system.GetPowerPC();
+  const auto old_mode = power_pc.GetMode();
+  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+  Common::ScopeGuard restore_mode{[&] { power_pc.SetMode(old_mode); }};
+  power_pc.RunLoop();
+  controller.CompleteStep(*operation);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 4);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->operation_id, *operation);
+  const bool real_hit = destination == StepOverReturnBreakpoint::Enabled ||
+                        destination == StepOverReturnBreakpoint::TrueCondition;
+  EXPECT_EQ(stops[0]->stop_cause, real_hit ? Core::Debug::ExecutionStopCause::CodeBreakpoint :
+                                             Core::Debug::ExecutionStopCause::Step);
+  EXPECT_EQ(stops[0]->code_breakpoint_address,
+            real_hit ? std::optional<u32>(TEST_ADDRESS + 4) : std::nullopt);
+  const bool evaluated = destination == StepOverReturnBreakpoint::FalseCondition ||
+                         destination == StepOverReturnBreakpoint::TrueCondition ||
+                         destination == StepOverReturnBreakpoint::LogOnly;
+  EXPECT_EQ(state.gpr[3], evaluated ? 1U : 0U);
+  EXPECT_FALSE(power_pc.GetBreakPoints().GetSnapshot()->temporary_breakpoint);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ReturnSites, DapTemporaryStepTest,
+    ::testing::Values(StepOverReturnBreakpoint::None, StepOverReturnBreakpoint::Enabled,
+                      StepOverReturnBreakpoint::Disabled, StepOverReturnBreakpoint::FalseCondition,
+                      StepOverReturnBreakpoint::TrueCondition, StepOverReturnBreakpoint::LogOnly));
 
 TEST_F(DapControllerTest, StepOutEvaluatesReturnDestinationConditionOnlyOnce)
 {

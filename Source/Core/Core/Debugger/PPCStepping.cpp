@@ -151,12 +151,9 @@ PPCStepResult StepSourceRow(Core::System& system, const PPCStepMode mode,
       hit_breakpoint = true;
       return;
     }
-    if (!hit_breakpoint && power_pc.CheckBreakPoints())
+    if (!hit_breakpoint && power_pc.CheckAndHandleBreakPoints())
     {
       hit_breakpoint = true;
-      const u32 pc = state.pc;
-      system.GetCPU().Break(
-          {.cause = ExecutionStopCause::CodeBreakpoint, .pc = pc, .code_breakpoint_address = pc});
     }
   };
   const auto step_logical = [&] {
@@ -221,11 +218,9 @@ PPCStepResult StepOut(Core::System& system, const PPCStepOptions& options)
     }
     if (power_pc.DidSteppingMemcheckHit())
       return false;
-    if ((!stepped && options.ignore_current_code_breakpoint) || !power_pc.CheckBreakPoints())
+    if ((!stepped && options.ignore_current_code_breakpoint) ||
+        !power_pc.CheckAndHandleBreakPoints())
       return true;
-    const u32 pc = state.pc;
-    system.GetCPU().Break(
-        {.cause = ExecutionStopCause::CodeBreakpoint, .pc = pc, .code_breakpoint_address = pc});
     return false;
   };
   const auto step_one = [&] {

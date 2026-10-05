@@ -27,7 +27,9 @@
 
 #include "../DWARF/DwarfTestFixture.h"
 #include "Common/CommonTypes.h"
+#include "Common/ScopeGuard.h"
 #include "Common/SymbolDB.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapFraming.h"
@@ -1910,6 +1912,83 @@ TEST_P(DapInstructionStepBreakpointTest, DestinationBreakpointReportsHitId)
 }
 
 INSTANTIATE_TEST_SUITE_P(IntoAndOver, DapInstructionStepBreakpointTest, ::testing::Bool());
+
+class DapTemporaryStepSocketTest : public DapSessionTest, public ::testing::WithParamInterface<int>
+{
+protected:
+  void SetUp() override
+  {
+    Config::Init();
+    Config::Set(Config::LayerType::CurrentRun, Config::MAIN_ENABLE_DEBUGGING, true);
+    DapSessionTest::SetUp();
+  }
+  void TearDown() override
+  {
+    DapSessionTest::TearDown();
+    Config::Shutdown();
+  }
+};
+
+TEST_P(DapTemporaryStepSocketTest, NextReportsOnlyGenuineUserBreakpointHits)
+{
+  TestClient client(m_client_fd());
+  Handshake(client);
+  std::optional<double> expected_id;
+  if (GetParam() != 0)
+  {
+    client.Send(fmt::format(
+        R"({{"seq":20,"type":"request","command":"setInstructionBreakpoints","arguments":{{
+          "breakpoints":[{{"instructionReference":"0x00003104","condition":"{}"}}]}}}})",
+        GetParam() == 1 ? "0" : "1"));
+    const auto breakpoint_response = client.Receive();
+    ASSERT_TRUE(breakpoint_response);
+    ASSERT_TRUE(breakpoint_response->at("success").get<bool>());
+    const auto& breakpoint = breakpoint_response->at("body")
+                                 .get<picojson::object>()
+                                 .at("breakpoints")
+                                 .get<picojson::array>()[0]
+                                 .get<picojson::object>();
+    ASSERT_TRUE(breakpoint.at("verified").get<bool>());
+    expected_id = breakpoint.at("id").get<double>();
+  }
+  auto& system = Core::System::GetInstance();
+  system.GetMemory().Write_U32(0x48000041, CODE_ADDRESS);
+  system.GetMemory().Write_U32(0x4e800020, CODE_ADDRESS + 0x40);
+  system.GetPPCState().pc = CODE_ADDRESS;
+  client.Send(R"({"seq":21,"type":"request","command":"next","arguments":{
+    "threadId":1,"granularity":"instruction"}})");
+  const auto response = client.Receive();
+  ASSERT_TRUE(response);
+  ASSERT_TRUE(response->at("success").get<bool>());
+  const auto continued = client.Receive();
+  ASSERT_TRUE(continued);
+  ASSERT_EQ(continued->at("event").to_str(), "continued");
+  Core::DeclareAsCPUThread();
+  Common::ScopeGuard undeclare{[] { Core::UndeclareAsCPUThread(); }};
+  auto& power_pc = system.GetPowerPC();
+  const auto old_mode = power_pc.GetMode();
+  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+  Common::ScopeGuard restore_mode{[&] { power_pc.SetMode(old_mode); }};
+  power_pc.RunLoop();
+  const auto stopped = client.Receive();
+  ASSERT_TRUE(stopped);
+  ASSERT_EQ(stopped->at("event").to_str(), "stopped");
+  EXPECT_EQ(system.GetPPCState().pc, CODE_ADDRESS + 4);
+  const auto& body = stopped->at("body").get<picojson::object>();
+  EXPECT_EQ(body.at("reason").to_str(), GetParam() == 2 ? "breakpoint" : "step");
+  if (GetParam() == 2)
+  {
+    ASSERT_TRUE(body.contains("hitBreakpointIds"));
+    const auto& ids = body.at("hitBreakpointIds").get<picojson::array>();
+    ASSERT_EQ(ids.size(), 1U);
+    EXPECT_EQ(ids[0].get<double>(), *expected_id);
+  }
+  else
+    EXPECT_FALSE(body.contains("hitBreakpointIds"));
+}
+
+INSTANTIATE_TEST_SUITE_P(NoFalseAndTrueUserBreakpoint, DapTemporaryStepSocketTest,
+                         ::testing::Values(0, 1, 2));
 
 TEST_F(DapSessionTest, StepOutReturnReportsDestinationBreakpointId)
 {
