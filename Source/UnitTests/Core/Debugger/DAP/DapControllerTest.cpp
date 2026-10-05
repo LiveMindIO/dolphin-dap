@@ -1344,6 +1344,60 @@ INSTANTIATE_TEST_SUITE_P(Breakpoints, DapStepOutCompletionTest,
                                            NonBreakingDestination::LogOnly,
                                            NonBreakingDestination::BreakingDisabled));
 
+class DapSourceInterruptionTest : public DapControllerTest,
+                                  public ::testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(DapSourceInterruptionTest, DestinationPredicateDoesNotRunAfterInterruption)
+{
+  auto& system = System();
+  system.GetMemory().Write_U32(0x60000000, TEST_ADDRESS);
+  auto& state = system.GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.downcount = 0;
+  state.gpr[3] = 0;
+  const auto file = system.GetPPCSymbolDB().AddSourceFile("interrupted.c");
+  system.GetPPCSymbolDB().AddLineEntry(TEST_ADDRESS, file, 1);
+  system.GetPPCSymbolDB().AddLineEntry(TEST_ADDRESS + 4, file, 1);
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(system);
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4, .condition = "r3 = r3 + 1"}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::SourceStepInto, &cancelled);
+  ASSERT_TRUE(operation);
+  bool interrupted = false;
+  auto* event_type =
+      system.GetCoreTiming().RegisterEvent("InterruptSourceStep", [&](Core::System&, u64, s64) {
+        interrupted = true;
+        if (GetParam())
+          cancelled.store(true);
+        else
+          system.GetCPU().GetExecutionState().PublishStopped(
+              {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = TEST_ADDRESS});
+      });
+  system.GetCoreTiming().ScheduleEvent(0, event_type);
+  controller.StepSource(false, cancelled);
+  ASSERT_TRUE(interrupted);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 4);
+  EXPECT_EQ(state.gpr[3], 0U);
+  if (GetParam())
+    EXPECT_TRUE(stops.empty());
+  else
+  {
+    controller.CompleteStep(*operation);
+    ASSERT_EQ(stops.size(), 1U);
+    EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::UserPause);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationAndPause, DapSourceInterruptionTest, ::testing::Bool());
+
 TEST_F(DapControllerTest, SourceStepWithoutLineInfoFallsBackToOneInstruction)
 {
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};

@@ -140,10 +140,17 @@ PPCStepResult StepSourceRow(Core::System& system, const PPCStepMode mode,
            clock::now() < deadline && !hit_breakpoint;
   };
   const auto step_one = [&] {
+    const u64 stop_generation = cpu.GetExecutionState().GetStopGeneration();
     power_pc.SingleStep();
     power_pc.SetSteppingMemchecksEnabled(true);
     ++instruction_count;
     hit_breakpoint = power_pc.DidSteppingMemcheckHit();
+    if (IsCancelled(options) || cpu.GetExecutionState().GetStopGeneration() != stop_generation)
+    {
+      // Stop the row loop before evaluating a destination predicate after an interruption.
+      hit_breakpoint = true;
+      return;
+    }
     if (!hit_breakpoint && power_pc.CheckBreakPoints())
     {
       hit_breakpoint = true;
