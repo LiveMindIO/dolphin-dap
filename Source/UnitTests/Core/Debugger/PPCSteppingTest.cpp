@@ -270,6 +270,62 @@ TEST_F(PPCSteppingTest, InstructionOutCanIgnoreCodeBreakpointAtCurrentPc)
   EXPECT_EQ(state.pc, TEST_ADDRESS + 0x100);
 }
 
+class PPCStepOutInterruptionTest : public PPCSteppingTest,
+                                   public ::testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(PPCStepOutInterruptionTest, ReturnDoesNotEvaluateDestinationAfterInterruption)
+{
+  auto& system = System();
+  system.GetMemory().Write_U32(0x4e800020, TEST_ADDRESS);
+  auto& state = system.GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.downcount = 0;
+  state.gpr[3] = 0;
+  LR(state) = TEST_ADDRESS + 0x100;
+  TBreakPoint breakpoint;
+  breakpoint.address = TEST_ADDRESS + 0x100;
+  breakpoint.is_enabled = true;
+  breakpoint.break_on_hit = true;
+  breakpoint.condition = Expression::TryParse("r3 = r3 + 1");
+  ASSERT_TRUE(system.GetPowerPC().GetBreakPoints().Add(std::move(breakpoint)));
+  auto& execution = system.GetCPU().GetExecutionState();
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  const auto observer =
+      execution.RegisterClient([&](auto event) { events.push_back(std::move(event)); });
+  Common::ScopeGuard unregister{[&] { execution.UnregisterClient(observer); }};
+  std::atomic<bool> cancelled{false};
+  bool interrupted = false;
+  auto* event_type =
+      system.GetCoreTiming().RegisterEvent("InterruptDuringReturn", [&](Core::System&, u64, s64) {
+        interrupted = true;
+        if (GetParam())
+          cancelled.store(true);
+        else
+          execution.PublishStopped(
+              {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = TEST_ADDRESS});
+      });
+  system.GetCoreTiming().ScheduleEvent(0, event_type);
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+  Core::Debug::StepPPC(system, Core::Debug::PPCStepMode::Out,
+                       Core::Debug::PPCStepGranularity::Instruction, options);
+  ASSERT_TRUE(interrupted);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 0x100);
+  EXPECT_EQ(state.gpr[3], 0U);
+  if (GetParam())
+    EXPECT_TRUE(events.empty());
+  else
+  {
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0]->stop_cause, Core::Debug::ExecutionStopCause::UserPause);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationAndExternalStop, PPCStepOutInterruptionTest,
+                         ::testing::Bool());
+
 TEST_F(PPCSteppingTest, StepOutCancellationIsNotReportedAsCompletion)
 {
   System().GetMemory().CopyToEmu(TEST_ADDRESS, NOP.data(), NOP.size());

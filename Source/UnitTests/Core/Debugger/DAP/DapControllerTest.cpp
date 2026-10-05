@@ -1266,6 +1266,84 @@ TEST_F(DapControllerTest, InstructionStepEvaluatesDestinationConditionOnlyOnce)
   EXPECT_EQ(System().GetPPCState().gpr[3], 1U);
 }
 
+TEST_F(DapControllerTest, StepOutEvaluatesReturnDestinationConditionOnlyOnce)
+{
+  System().GetMemory().Write_U32(0x4e800020, TEST_ADDRESS);
+  auto& state = System().GetPPCState();
+  state.pc = TEST_ADDRESS;
+  LR(state) = TEST_ADDRESS + 0x100;
+  state.gpr[3] = 0;
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 0x100, .condition = "r3 = r3 + 1"}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOut, &cancelled);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
+  controller.CompleteStep(*operation);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 0x100);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(stops[0]->code_breakpoint_address, TEST_ADDRESS + 0x100);
+  EXPECT_EQ(stops[0]->operation_id, *operation);
+  EXPECT_EQ(state.gpr[3], 1U);
+}
+
+class DapStepOutCompletionTest : public DapControllerTest,
+                                 public ::testing::WithParamInterface<NonBreakingDestination>
+{
+};
+
+TEST_P(DapStepOutCompletionTest, NonBreakingReturnDestinationRetainsStepCause)
+{
+  System().GetMemory().Write_U32(0x4e800020, TEST_ADDRESS);
+  auto& state = System().GetPPCState();
+  state.pc = TEST_ADDRESS;
+  LR(state) = TEST_ADDRESS + 0x100;
+  TBreakPoint breakpoint;
+  breakpoint.address = TEST_ADDRESS + 0x100;
+  breakpoint.is_enabled = GetParam() != NonBreakingDestination::Disabled;
+  breakpoint.break_on_hit = true;
+  if (GetParam() == NonBreakingDestination::FalseCondition)
+    breakpoint.condition = Expression::TryParse("0");
+  if (GetParam() == NonBreakingDestination::LogOnly)
+  {
+    breakpoint.break_on_hit = false;
+    breakpoint.log_on_hit = true;
+  }
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(std::move(breakpoint)));
+  breakpoints.EnableBreaking(GetParam() != NonBreakingDestination::BreakingDisabled);
+  Common::ScopeGuard restore_breaking{[&] { breakpoints.EnableBreaking(true); }};
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOut, &cancelled);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::Step);
+  EXPECT_FALSE(stops[0]->code_breakpoint_address);
+  EXPECT_EQ(stops[0]->pc, TEST_ADDRESS + 0x100);
+}
+
+INSTANTIATE_TEST_SUITE_P(Breakpoints, DapStepOutCompletionTest,
+                         ::testing::Values(NonBreakingDestination::Disabled,
+                                           NonBreakingDestination::FalseCondition,
+                                           NonBreakingDestination::LogOnly,
+                                           NonBreakingDestination::BreakingDisabled));
+
 TEST_F(DapControllerTest, SourceStepWithoutLineInfoFallsBackToOneInstruction)
 {
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};

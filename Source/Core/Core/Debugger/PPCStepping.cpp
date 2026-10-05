@@ -232,7 +232,15 @@ PPCStepResult StepOut(Core::System& system, const PPCStepOptions& options)
   {
     if (WillInstructionReturn(system, instruction))
     {
+      const u64 stop_generation = cpu.GetExecutionState().GetStopGeneration();
       step_one();
+      // The return destination is not visited by can_continue(). Check its real predicate
+      // once, without replacing a stop raised by the instruction or external cancellation.
+      if (!IsCancelled(options) && !power_pc.DidSteppingMemcheckHit() &&
+          cpu.GetExecutionState().GetStopGeneration() == stop_generation)
+      {
+        power_pc.CheckAndHandleBreakPoints();
+      }
       break;
     }
 
