@@ -39,7 +39,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_tag_only_publication_waits_for_both_platforms(self):
         publish = self.workflow["jobs"]["publish"]
-        self.assertEqual(set(publish["needs"]), {"windows", "linux"})
+        self.assertEqual(set(publish["needs"]), {"windows", "linux", "linux-packages", "macos"})
         self.assertEqual(publish["if"], "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')")
         self.assertEqual(publish["steps"][0]["with"]["pattern"], "release-*")
         self.assertIn("sha256sum --check", publish["steps"][1]["run"])
@@ -54,7 +54,7 @@ class WorkflowTests(unittest.TestCase):
                     self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
 
     def test_release_artifacts_do_not_include_staging_directories(self):
-        for platform in ("windows", "linux"):
+        for platform in ("windows",):
             steps = self.workflow["jobs"][platform]["steps"]
             artifacts = [s for s in steps if s.get("with", {}).get("name", "").startswith("release-")]
             self.assertEqual(len(artifacts), 1)
@@ -63,6 +63,25 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(paths), 2)
             self.assertTrue(all("*" not in path for path in paths))
             self.assertEqual(paths[1], paths[0] + ".sha256")
+
+    def test_linux_package_formats_are_gated(self):
+        job = self.workflow["jobs"]["linux-packages"]
+        self.assertEqual(set(job["strategy"]["matrix"]["format"]),
+                         {"deb", "rpm", "appimage", "gpkg", "arch", "flatpak"})
+        self.assertEqual(job["needs"], "linux")
+        self.assertEqual(job["strategy"]["fail-fast"], "false")
+        publish = self.workflow["jobs"]["publish"]["steps"][-1]["run"]
+        for extension in (".deb", ".rpm", ".AppImage", ".gpkg.tar", ".pkg.tar.zst", ".flatpak"):
+            self.assertIn(extension, publish)
+
+    def test_macos_architectures_and_dmg_gate(self):
+        job = self.workflow["jobs"]["macos"]
+        self.assertEqual({entry["arch"] for entry in job["strategy"]["matrix"]["include"]},
+                         {"arm64", "x86_64"})
+        self.assertTrue(any("unit tests" in step["name"] for step in job["steps"]))
+        publish = self.workflow["jobs"]["publish"]["steps"][-1]["run"]
+        self.assertIn("dolphin-dap-macos-arm64.dmg", publish)
+        self.assertIn("dolphin-dap-macos-x86_64.dmg", publish)
 
 
 @unittest.skipUnless(yaml and os.name == "posix" and shutil.which("pwsh"),

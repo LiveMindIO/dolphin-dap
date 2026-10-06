@@ -1,0 +1,16 @@
+# Binary packaging after compilation/tests in an Arch Linux container.
+pkgname=dolphin-dap
+pkgver=${PACKAGE_VERSION:?}
+pkgrel=1
+pkgdesc='Dolphin emulator with source debugging and DAP'
+arch=('x86_64')
+url='https://github.com/LiveMindIO/dolphin-dap'
+license=('GPL-2.0-or-later')
+depends=('qt6-base' 'qt6-svg' 'libevdev' 'systemd-libs' 'libxrandr' 'libxi'
+         'bluez-libs' 'alsa-lib' 'libpulse' 'mesa' 'libusb' 'gcc-libs' 'glibc')
+conflicts=('dolphin-emu')
+provides=('dolphin-emu')
+options=('!debug' '!strip')
+package() {
+  cp -a /work/stage/usr "$pkgdir/"
+}

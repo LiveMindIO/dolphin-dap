@@ -17,16 +17,18 @@ The [GitHub Actions workflow](.github/workflows/build.yml) builds and tests Wind
 and Linux x64 in both Release and Debug configurations on pull requests and pushes.
 Release packages are available as Actions artifacts. Pushing any tag also creates a
 GitHub Release for that tag (or adds assets to an existing release), but only after
-all Windows and Linux builds and tests pass. The tagged commit must contain the workflow.
+all Windows/Linux builds, tests and Linux packaging jobs pass. The tagged commit must contain the workflow.
 See the [CI guide](Tools/ci/README.md) for upstream recipe provenance and release details.
 
 Extract the entire ZIP before running `Dolphin.exe` for the Qt source debugger or
 `DolphinNoGUI.exe` for an editor-managed DAP session. The ZIP includes Qt plugins,
 MSVC runtime DLLs, translations, game-system resources, and license files; the executables
-are not standalone files. On Linux, extract `dolphin-dap-linux-x64.tar.gz` and follow its
-README to install the Ubuntu 24.04 runtime libraries, then run `dolphin-emu` or use
-`dolphin-emu-nogui` in your editor. The Linux archive is not a universal Linux bundle.
-Both platform packages include SHA-256 checksum files. The official Dolphin auto-updater is disabled in these builds
+are not standalone files. Linux downloads include Ubuntu 24.04 DEB, Fedora 44 RPM,
+Arch Linux, Gentoo GPKG, AppImage and Flatpak packages. See the [CI guide](Tools/ci/README.md)
+for installation, supported environments and Flatpak debugger permissions.
+macOS downloads are DMGs for Apple Silicon and Intel, requiring macOS 14 or newer.
+They are ad-hoc signed but not notarized; see the included README for first launch.
+Every package includes a SHA-256 checksum file. The official Dolphin auto-updater is disabled in these builds
 so it cannot replace the fork with an upstream binary. Game images and debug ELFs are
 not included; see the [Qt guide](Tools/dap/qt-source-debugging.md) or
 [DAP server guide](Tools/dap/README.md) to configure your own files.

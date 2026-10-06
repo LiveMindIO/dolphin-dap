@@ -156,25 +156,118 @@ jobs:
             build/**/Testing/Temporary/
           if-no-files-found: warn
 
-      - name: Package Linux release
-        if: matrix.configuration == 'Release'
-        run: bash Tools/ci/package-linux.sh build release
+  linux-packages:
+    name: Linux x64 package (${{ matrix.format }})
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [deb, rpm, appimage, gpkg, arch, flatpak]
+    steps:
+      - name: Check out source and dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
 
-      - name: Upload Linux release bundle
-        if: matrix.configuration == 'Release'
+      - name: Build, test, package and install in target distribution
+        if: matrix.format != 'flatpak'
+        env:
+          PACKAGE_FORMAT: ${{ matrix.format }}
+        run: bash Tools/ci/linux-packages/container-build.sh "$PACKAGE_FORMAT" release
+
+      - name: Install Flatpak tools
+        if: matrix.format == 'flatpak'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder python3-yaml
+
+      - name: Build, test and install Flatpak
+        if: matrix.format == 'flatpak'
+        run: |
+          bash Tools/ci/linux-packages/build-flatpak.sh release
+          (cd release && sha256sum dolphin-dap-linux-x86_64.flatpak > dolphin-dap-linux-x86_64.flatpak.sha256)
+
+      - name: Upload validated Linux package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-linux-x64
+          name: release-linux-${{ matrix.format }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    env:
+      GTEST_OUTPUT: xml:${{ github.workspace }}/test-results/macos.xml
+    steps:
+      - name: Check out source and dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install macOS build dependencies
+        run: brew install cmake ninja qt gettext
+
+      - name: Configure macOS
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$BUILD_ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix gettext)" \
+            -DENABLE_QT=ON -DENABLE_NOGUI=ON -DENABLE_TESTS=ON \
+            -DENABLE_AUTOUPDATE=OFF -DDISTRIBUTOR=LiveMindIO -DUSE_SYSTEM_LIBS=OFF \
+            -DENABLE_LLVM=OFF -DENCODE_FRAMEDUMPS=OFF -DMACOS_CODE_SIGNING=OFF
+
+      - name: Build and run unit tests
+        run: |
+          mkdir -p test-results
+          cmake --build build --parallel 3
+          cmake --build build --parallel 3 --target unittests
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-test-results-${{ matrix.arch }}
           path: |
-            release/dolphin-dap-linux-x64.tar.gz
-            release/dolphin-dap-linux-x64.tar.gz.sha256
+            test-results/
+            build/**/Testing/Temporary/
+          if-no-files-found: warn
+
+      - name: Package and validate DMG
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: bash Tools/ci/package-macos.sh build release "$BUILD_ARCH"
+
+      - name: Upload macOS disk image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: release/*
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: Publish all platform releases
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [windows, linux]
+    needs: [windows, linux, linux-packages, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -194,7 +287,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          for asset in dolphin-dap-windows-x64.zip dolphin-dap-linux-x64.tar.gz; do
+          for asset in dolphin-dap-windows-x64.zip \
+            dolphin-dap-ubuntu24.04-amd64.deb dolphin-dap-fedora44-x86_64.rpm \
+            dolphin-dap-linux-x86_64.AppImage dolphin-dap-gentoo-amd64.gpkg.tar \
+            dolphin-dap-archlinux-x86_64.pkg.tar.zst dolphin-dap-linux-x86_64.flatpak \
+            dolphin-dap-macos-arm64.dmg dolphin-dap-macos-x86_64.dmg; do
             test -s "release/$asset"
             (cd release && sha256sum --check "$asset.sha256")
           done
