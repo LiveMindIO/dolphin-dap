@@ -11,17 +11,22 @@ whole thing, I would love it.
 
 For the DAP functionality, setup, and usage, see the [Dolphin DAP documentation](Tools/dap/README.md).
 
-## Windows release downloads
+## Builds, tests, and release downloads
 
-Pushing any tag to this fork runs the [Windows release workflow](.github/workflows/windows-release.yml).
-After a successful Windows x64 build, it creates a GitHub Release for the tag (or adds assets
-to an existing release) with `dolphin-dap-windows-x64.zip` and a SHA-256 checksum file.
-The tagged commit must contain the workflow. Failed builds do not publish assets.
+The [GitHub Actions workflow](.github/workflows/build.yml) builds and tests Windows x64
+and Linux x64 in both Release and Debug configurations on pull requests and pushes.
+Release packages are available as Actions artifacts. Pushing any tag also creates a
+GitHub Release for that tag (or adds assets to an existing release), but only after
+all Windows and Linux builds and tests pass. The tagged commit must contain the workflow.
+See the [CI guide](Tools/ci/README.md) for upstream recipe provenance and release details.
 
 Extract the entire ZIP before running `Dolphin.exe` for the Qt source debugger or
 `DolphinNoGUI.exe` for an editor-managed DAP session. The ZIP includes Qt plugins,
 MSVC runtime DLLs, translations, game-system resources, and license files; the executables
-are not standalone files. The official Dolphin auto-updater is disabled in these builds
+are not standalone files. On Linux, extract `dolphin-dap-linux-x64.tar.gz` and follow its
+README to install the Ubuntu 24.04 runtime libraries, then run `dolphin-emu` or use
+`dolphin-emu-nogui` in your editor. The Linux archive is not a universal Linux bundle.
+Both platform packages include SHA-256 checksum files. The official Dolphin auto-updater is disabled in these builds
 so it cannot replace the fork with an upstream binary. Game images and debug ELFs are
 not included; see the [Qt guide](Tools/dap/qt-source-debugging.md) or
 [DAP server guide](Tools/dap/README.md) to configure your own files.

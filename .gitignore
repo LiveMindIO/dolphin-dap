@@ -11,6 +11,8 @@ Source/Core/Common/scmrev.h
 /[Bb]uild*/
 /[Bb]inary*/
 /obj/
+/release/
+/test-results/
 # Accidental in-source CMake at repo root (prefer: cmake -B build ...)
 /CMakeCache.txt
 /CMakeFiles/

@@ -1,0 +1,200 @@
+name: Build, test, and release
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+    tags: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Never cancel an in-progress tag release.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  windows:
+    name: Windows x64 (${{ matrix.configuration }})
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOLPHIN_DISTRIBUTOR: LiveMindIO
+    steps:
+      - name: Check out source and dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        with:
+          vs-version: '[17.0,18.0)'
+          msbuild-architecture: x64
+
+      - name: Build Qt and NoGUI executables
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+        run: >-
+          msbuild Source/dolphin-emu.sln
+          /m:2 /nologo /verbosity:minimal
+          '/t:Dolphin;DolphinNoGUI'
+          /p:Configuration=$env:BUILD_CONFIGURATION /p:Platform=x64
+          /p:AutoUpdate=false
+
+      - name: Build and run unit tests
+        timeout-minutes: 30
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+          GTEST_OUTPUT: xml:${{ github.workspace }}/test-results/windows.xml
+        run: |
+          New-Item -ItemType Directory -Path test-results -Force | Out-Null
+          msbuild Source/UnitTests/UnitTests.vcxproj /m:2 /nologo /verbosity:minimal `
+            /p:Configuration=$env:BUILD_CONFIGURATION /p:Platform=x64 `
+            /p:AutoUpdate=false /p:RunUnitTests=true
+          if ($LASTEXITCODE -ne 0) { throw 'Windows unit tests failed' }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-test-results-${{ matrix.configuration }}
+          path: test-results/
+          if-no-files-found: warn
+
+      - name: Package Windows release
+        if: matrix.configuration == 'Release'
+        run: ./Tools/ci/package-windows.ps1
+
+      - name: Upload Windows release bundle
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows-x64
+          path: |
+            release/dolphin-dap-windows-x64.zip
+            release/dolphin-dap-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux x64 (${{ matrix.configuration }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      GTEST_OUTPUT: xml:${{ github.workspace }}/test-results/linux.xml
+    steps:
+      - name: Check out source and dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config gettext python3-yaml \
+            qt6-base-dev qt6-base-private-dev libqt6svg6-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
+            libevdev-dev libudev-dev libxrandr-dev libxi-dev libbluetooth-dev \
+            libasound2-dev libpulse-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libusb-1.0-0-dev
+
+      - name: Configure CMake/Ninja
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          fastlog=OFF
+          if [ "$BUILD_CONFIGURATION" = Debug ]; then fastlog=ON; fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_CONFIGURATION" -DFASTLOG="$fastlog" \
+            -DENABLE_QT=ON -DENABLE_NOGUI=ON -DENABLE_TESTS=ON \
+            -DENABLE_AUTOUPDATE=OFF -DDISTRIBUTOR=LiveMindIO \
+            -DLINUX_LOCAL_DEV=ON -DUSE_SYSTEM_LIBS=OFF -DENABLE_LLVM=OFF
+
+      - name: Test CI packaging and Windows source lists
+        run: python3 -m unittest discover -s Tools/ci/tests -v
+
+      - name: Build Qt and NoGUI executables
+        run: cmake --build build --parallel 2
+
+      - name: Build and run unit tests
+        timeout-minutes: 30
+        run: |
+          mkdir -p test-results
+          cmake --build build --parallel 2 --target unittests
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-test-results-${{ matrix.configuration }}
+          path: |
+            test-results/
+            build/**/Testing/Temporary/
+          if-no-files-found: warn
+
+      - name: Package Linux release
+        if: matrix.configuration == 'Release'
+        run: bash Tools/ci/package-linux.sh build release
+
+      - name: Upload Linux release bundle
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-linux-x64
+          path: |
+            release/dolphin-dap-linux-x64.tar.gz
+            release/dolphin-dap-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish all platform releases
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested release bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+
+      - name: Create release if needed and upload all platforms
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for asset in dolphin-dap-windows-x64.zip dolphin-dap-linux-x64.tar.gz; do
+            test -s "release/$asset"
+            (cd release && sha256sum --check "$asset.sha256")
+          done
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber

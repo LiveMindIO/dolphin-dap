@@ -30,6 +30,7 @@
     <ClInclude Include="Core\DSP\DSPTestText.h" />
     <ClInclude Include="Core\DSP\HermesBinary.h" />
     <ClInclude Include="Core\DSP\HermesText.h" />
+    <ClInclude Include="Core\Debugger\DWARF\DwarfTestFixture.h" />
     <ClInclude Include="Core\IOS\ES\TestBinaryData.h" />
     <ClInclude Include="Core\PowerPC\TestValues.h" />
     <ClInclude Include="Core\StubJit.h" />
@@ -62,6 +63,26 @@
     <ClCompile Include="Common\SwapTest.cpp" />
     <ClCompile Include="Common\WorkQueueThreadTest.cpp" />
     <ClCompile Include="Core\CoreTimingTest.cpp" />
+    <ClCompile Include="Core\Boot\ElfReaderTest.cpp" />
+    <ClCompile Include="Core\ConfigLoaders\GameConfigLoaderTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapFramingTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapJsonTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapProtocolTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapControllerTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapMemoryEngineTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapServerTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\DapSessionTest.cpp" />
+    <ClCompile Include="Core\Debugger\DAP\RealtimeWatchTest.cpp" />
+    <ClCompile Include="Core\Debugger\DWARF\DwarfReaderTest.cpp" />
+    <ClCompile Include="Core\Debugger\DWARF\PPCSymbolDBLineTest.cpp" />
+    <ClCompile Include="Core\Debugger\Entrypoints\EntrypointsImportTest.cpp" />
+    <ClCompile Include="Core\Debugger\CodeBreakpointRegistryTest.cpp" />
+    <ClCompile Include="Core\Debugger\ExecutionStateTest.cpp" />
+    <ClCompile Include="Core\Debugger\MemoryBreakpointRegistryTest.cpp" />
+    <ClCompile Include="Core\Debugger\PPCStackTest.cpp" />
+    <ClCompile Include="Core\Debugger\PPCSteppingTest.cpp" />
+    <ClCompile Include="Core\Debugger\PPCVariablesTest.cpp" />
+    <ClCompile Include="UICommon\CommandLineParseTest.cpp" />
     <ClCompile Include="Core\DSP\DSPAcceleratorTest.cpp" />
     <ClCompile Include="Core\DSP\DSPAssemblyTest.cpp" />
     <ClCompile Include="Core\DSP\DSPTestBinary.cpp" />
@@ -106,6 +127,7 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(ExternalsDir)Bochs_disasm\exports.props" />
+  <Import Project="$(ExternalsDir)cpp-optparse\exports.props" />
   <Import Project="$(ExternalsDir)fmt\exports.props" />
   <Import Project="$(ExternalsDir)glslang\exports.props" />
   <Import Project="$(ExternalsDir)picojson\exports.props" />
