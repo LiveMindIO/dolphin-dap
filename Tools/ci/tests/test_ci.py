@@ -1,6 +1,7 @@
 """Local checks for release packaging and native Windows debugger build coverage."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -64,6 +65,28 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(paths[1], paths[0] + ".sha256")
 
 
+@unittest.skipUnless(yaml and os.name == "posix" and shutil.which("pwsh"),
+                     "requires PyYAML and PowerShell on POSIX")
+class WindowsConfigureTests(unittest.TestCase):
+    def test_powershell_expands_cmake_configuration(self):
+        workflow = yaml.load((ROOT / ".github/workflows/build.yml").read_text(),
+                             Loader=yaml.BaseLoader)
+        script = next(step["run"] for step in workflow["jobs"]["windows"]["steps"]
+                      if step["name"] == "Configure Windows CMake")
+        with tempfile.TemporaryDirectory() as directory:
+            cmake = Path(directory) / "cmake"
+            cmake.write_text("#!/usr/bin/python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+            cmake.chmod(0o755)
+            for configuration, fastlog in (("Release", "OFF"), ("Debug", "ON")):
+                env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
+                           BUILD_CONFIGURATION=configuration)
+                result = subprocess.run(["pwsh", "-NoProfile", "-Command", script],
+                                        env=env, capture_output=True, text=True, check=True)
+                args = json.loads(result.stdout)
+                self.assertIn("-DCMAKE_CONFIGURATION_TYPES=" + configuration, args)
+                self.assertIn("-DFASTLOG=" + fastlog, args)
+
+
 class WindowsProjectTests(unittest.TestCase):
     def test_debugger_sources_match_cmake(self):
         cmake = (ROOT / "Source/Core/Core/CMakeLists.txt").read_text()
@@ -104,7 +127,7 @@ class WindowsPackageTests(unittest.TestCase):
         self.output = self.root / "build/Binaries"
         for filename in ("Dolphin.exe", "DolphinNoGUI.exe", "qt.conf", "COPYING",
                          "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Svg.dll",
-                         "Sys/resource.txt", "Languages/de.mo", "LICENSES/test.txt",
+                         "Sys/resource.txt", "Languages/de/dolphin-emu.mo", "LICENSES/test.txt",
                          "QtPlugins/platforms/qwindows.dll"):
             path = self.output / filename
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +163,7 @@ class WindowsPackageTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as bundle:
             for filename in ("Dolphin.exe", "DolphinNoGUI.exe", "qt.conf", "COPYING",
                              "Qt6Widgets.dll", "QtPlugins/platforms/qwindows.dll",
-                             "Sys/resource.txt", "Languages/de.mo", "LICENSES/test.txt",
+                             "Sys/resource.txt", "Languages/de/dolphin-emu.mo", "LICENSES/test.txt",
                              "vcruntime140.dll", "msvcp140.dll"):
                 self.assertIn(filename, bundle.namelist())
             self.assertNotIn("DolphinD.exe", bundle.namelist())
@@ -185,7 +208,7 @@ class LinuxPackageTests(unittest.TestCase):
             path = self.build / "Binaries" / name
             path.write_text("#!/bin/sh\necho test-version\n")
             path.chmod(0o755)
-        self.translation = self.build / "Source/Core/DolphinQt/de/dolphin-emu.mo"
+        self.translation = self.build / "Binaries/Languages/de/dolphin-emu.mo"
         self.translation.parent.mkdir(parents=True)
         self.translation.write_bytes(b"compiled translation")
         self.mockbin = self.root / "mockbin"
@@ -208,7 +231,7 @@ class LinuxPackageTests(unittest.TestCase):
         with tarfile.open(archive) as bundle:
             prefix = "dolphin-dap-linux-x64/"
             for name in ("dolphin-emu", "dolphin-emu-nogui", "Sys/resource.txt",
-                         "Languages/de.mo", "COPYING", "LICENSES/test.txt",
+                         "Languages/de/dolphin-emu.mo", "COPYING", "LICENSES/test.txt",
                          "README.txt", "shared-libraries.txt"):
                 self.assertIn(prefix + name, bundle.getnames())
             self.assertTrue(bundle.getmember(prefix + "dolphin-emu").mode & 0o111)

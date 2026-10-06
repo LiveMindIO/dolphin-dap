@@ -28,12 +28,13 @@ cp -a "$root/Data/Sys" "$stage/Sys"
 cp -a "$root/LICENSES" "$stage/LICENSES"
 cp "$root/COPYING" "$stage/"
 
-# The Qt translation loader checks Languages/<lang>.mo beside the executable first.
+# The Qt translation loader checks Languages/<lang>/dolphin-emu.mo beside the executable.
 translations=0
-for translation in "$build"/Source/Core/DolphinQt/*/dolphin-emu.mo; do
+for translation in "$build"/Binaries/Languages/*/dolphin-emu.mo; do
   [[ -f "$translation" ]] || continue
   language=$(basename "$(dirname "$translation")")
-  cp "$translation" "$stage/Languages/$language.mo"
+  mkdir -p "$stage/Languages/$language"
+  cp "$translation" "$stage/Languages/$language/dolphin-emu.mo"
   translations=$((translations + 1))
 done
 if [[ "$translations" -eq 0 ]]; then
