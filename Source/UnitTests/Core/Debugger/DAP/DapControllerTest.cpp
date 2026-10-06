@@ -11,6 +11,7 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -2137,12 +2138,13 @@ TEST_F(DapControllerTest, SourcePathsResolveDwarfSourcesToFullPaths)
 
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
-  EXPECT_EQ(sources[0].path, source_path);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
   EXPECT_EQ(sources[0].source_reference, 1u);
 
   const DAP::StackTraceResult trace = controller.GetStackTrace();
   ASSERT_EQ(trace.frames.size(), 1u);
-  EXPECT_EQ(trace.frames[0].source_file, source_path);
+  EXPECT_EQ(trace.frames[0].source_file,
+            std::filesystem::path(source_path).lexically_normal().generic_string());
   EXPECT_TRUE(controller.GetSource(1, 1, 1).has_value());
 
   DAP::SourceBreakpointContext breakpoint;
@@ -2187,7 +2189,7 @@ TEST_F(DapControllerTest, SourcePathsResolveSourcesImportedLater)
   DAP::DapDebugController controller(System());
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
-  EXPECT_EQ(sources[0].path, source_path);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
 }
 
 TEST_F(DapControllerTest, SourcePathsPreferTheFirstMatchingRoot)
@@ -2210,7 +2212,8 @@ TEST_F(DapControllerTest, SourcePathsPreferTheFirstMatchingRoot)
   symbol_db.SetSourcePaths({"", first_root, second_root});
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
-  EXPECT_EQ(sources[0].path, first_root + "/duplicate.c");
+  EXPECT_EQ(sources[0].path,
+            std::filesystem::path(first_root + "/duplicate.c").lexically_normal().generic_string());
   EXPECT_EQ(sources[0].source_reference, 1u);
 }
 
@@ -2255,7 +2258,7 @@ TEST_F(DapControllerTest, SourcePathsResolveWindowsStyleDwarfPaths)
   symbol_db.SetSourcePaths({source_root});
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
-  EXPECT_EQ(sources[0].path, source_path);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
 }
 
 TEST_F(DapControllerTest, GetStackTraceUsesNearestPrecedingDwarfLine)
