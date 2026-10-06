@@ -190,8 +190,10 @@ TEST_F(PPCSteppingTest, MappedSourceStepStopsAtFirstUnmappedDestinationWithoutTi
   const u32 file = symbols.AddSourceFile("caller.c");
   symbols.AddLineEntry(TEST_ADDRESS, file, 1);
   Core::CPUThreadGuard guard(System());
-  symbols.AddKnownSymbol(guard, TEST_ADDRESS, caller.size(), "caller", "caller.c");
-  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, source_less_callee.size(), "callee", "asm.o");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS, static_cast<u32>(caller.size()), "caller",
+                         "caller.c");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, static_cast<u32>(source_less_callee.size()),
+                         "callee", "asm.o");
   System().GetPPCState().pc = TEST_ADDRESS;
   Core::Debug::PPCStepOptions options;
   options.timeout = std::chrono::hours(1);

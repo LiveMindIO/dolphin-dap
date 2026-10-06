@@ -1131,8 +1131,9 @@ TEST_F(DapControllerTest, SourceStepIntoStopsAtSourceLessCallee)
   symbols.AddLineEntry(TEST_ADDRESS, file, 1);
   symbols.AddLineEntry(TEST_ADDRESS + 4, file, 2);
   Core::CPUThreadGuard guard(System());
-  symbols.AddKnownSymbol(guard, TEST_ADDRESS, caller.size(), "caller", "step.c");
-  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, callee.size(), "callee", "asm.o");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS, static_cast<u32>(caller.size()), "caller", "step.c");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, static_cast<u32>(callee.size()), "callee",
+                         "asm.o");
   System().GetPPCState().pc = TEST_ADDRESS;
 
   std::atomic<bool> cancelled{false};

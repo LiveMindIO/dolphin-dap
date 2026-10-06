@@ -85,7 +85,8 @@ TEST_F(PPCSymbolDBLineTest, MalformedMapPreservesExistingSymbols)
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
   Core::System::GetInstance().GetMemory().CopyToEmu(function_address, code.data(), code.size());
   Core::CPUThreadGuard guard(Core::System::GetInstance());
-  SymbolDB().AddKnownSymbol(guard, function_address, code.size(), "existing", "existing.o");
+  SymbolDB().AddKnownSymbol(guard, function_address, static_cast<u32>(code.size()), "existing",
+                            "existing.o");
 
   const std::string temp_dir = File::CreateTempDir();
   ASSERT_FALSE(temp_dir.empty());
@@ -149,8 +150,10 @@ TEST_F(PPCSymbolDBLineTest, GetSourceLineDoesNotEscapeContainingFunction)
   Core::System::GetInstance().GetMemory().CopyToEmu(first_function, code.data(), code.size());
   Core::System::GetInstance().GetMemory().CopyToEmu(source_less_function, code.data(), code.size());
   Core::CPUThreadGuard guard(Core::System::GetInstance());
-  SymbolDB().AddKnownSymbol(guard, first_function, code.size(), "with_source", "foo.c");
-  SymbolDB().AddKnownSymbol(guard, source_less_function, code.size(), "without_source", "asm.o");
+  SymbolDB().AddKnownSymbol(guard, first_function, static_cast<u32>(code.size()), "with_source",
+                            "foo.c");
+  SymbolDB().AddKnownSymbol(guard, source_less_function, static_cast<u32>(code.size()),
+                            "without_source", "asm.o");
 
   EXPECT_TRUE(SymbolDB().GetSourceLine(first_function + 4).has_value());
   EXPECT_FALSE(SymbolDB().GetSourceLine(source_less_function).has_value());

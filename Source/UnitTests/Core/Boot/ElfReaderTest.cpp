@@ -86,7 +86,7 @@ std::vector<u8> MakeElf(ElfMachine machine = EM_PPC)
   Write32(bytes, PROGRAM_HEADER_OFFSET + 4, TEXT_OFFSET);
   Write32(bytes, PROGRAM_HEADER_OFFSET + 8, DwarfTestFixture::kFunctionAddress);
   Write32(bytes, PROGRAM_HEADER_OFFSET + 12, DwarfTestFixture::kFunctionAddress);
-  Write32(bytes, PROGRAM_HEADER_OFFSET + 16, TEXT.size());
+  Write32(bytes, PROGRAM_HEADER_OFFSET + 16, static_cast<u32>(TEXT.size()));
   Write32(bytes, PROGRAM_HEADER_OFFSET + 20, 12);
   Write32(bytes, PROGRAM_HEADER_OFFSET + 24, PF_R | PF_X);
   Write32(bytes, PROGRAM_HEADER_OFFSET + 28, 4);
@@ -98,13 +98,13 @@ std::vector<u8> MakeElf(ElfMachine machine = EM_PPC)
 
   WriteSection(bytes, SECTION_HEADERS_OFFSET + sizeof(Elf32_Shdr), 1, SHT_PROGBITS,
                SHF_ALLOC | SHF_EXECINSTR, DwarfTestFixture::kFunctionAddress, TEXT_OFFSET,
-               TEXT.size(), 4);
+               static_cast<u32>(TEXT.size()), 4);
   WriteSection(bytes, SECTION_HEADERS_OFFSET + 2 * sizeof(Elf32_Shdr), 7, SHT_PROGBITS, 0, 0,
-               DEBUG_OFFSET, DwarfTestFixture::kDebugSection.size(), 1);
+               DEBUG_OFFSET, static_cast<u32>(DwarfTestFixture::kDebugSection.size()), 1);
   WriteSection(bytes, SECTION_HEADERS_OFFSET + 3 * sizeof(Elf32_Shdr), 14, SHT_PROGBITS, 0, 0,
-               LINE_OFFSET, DwarfTestFixture::kLineSection.size(), 1);
+               LINE_OFFSET, static_cast<u32>(DwarfTestFixture::kLineSection.size()), 1);
   WriteSection(bytes, SECTION_HEADERS_OFFSET + 4 * sizeof(Elf32_Shdr), 20, SHT_STRTAB, 0, 0,
-               NAMES_OFFSET, SECTION_NAMES.size(), 1);
+               NAMES_OFFSET, static_cast<u32>(SECTION_NAMES.size()), 1);
   const size_t symtab_header = SECTION_HEADERS_OFFSET + 5 * sizeof(Elf32_Shdr);
   WriteSection(bytes, symtab_header, 30, SHT_SYMTAB, 0, 0, 0, 0, 4);
   Write32(bytes, symtab_header + 24, 4);
