@@ -3,6 +3,8 @@
 set -euo pipefail
 case "${1:?format}" in
   deb)
+    # Ubuntu's minimal Docker image otherwise strips installed translations.
+    printf 'path-include=/usr/share/locale/*\n' > /etc/dpkg/dpkg.cfg.d/zz-dolphin-dap-test
     apt-get update
     apt-get install -y --no-install-recommends /release/*.deb
     ;;
@@ -13,7 +15,7 @@ case "${1:?format}" in
     ;;
   appimage)
     apt-get update
-    apt-get install -y --no-install-recommends libgl1 libegl1 libfuse2t64
+    apt-get install -y --no-install-recommends libgl1 libegl1 libopengl0 libfuse2t64
     export QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1
     /release/dolphin-dap-linux-x86_64.AppImage --version
     /release/dolphin-dap-linux-x86_64.AppImage --nogui --version

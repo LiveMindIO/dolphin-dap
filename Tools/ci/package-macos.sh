@@ -43,8 +43,9 @@ mkdir -p "$mountpoint"
 hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$archive"
 mounted="$mountpoint/Dolphin DAP.app"
 codesign --verify --deep --strict "$mounted"
-for binary in DolphinQt dolphin-emu-nogui dolphin-tool; do
+for binary in DolphinQt dolphin-emu-nogui; do
   "$mounted/Contents/MacOS/$binary" --version
 done
+"$mounted/Contents/MacOS/dolphin-tool" convert --help
 hdiutil detach "$mountpoint"
 (cd "$destination" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")

@@ -46,7 +46,7 @@ SHA-256 checksum, and uploads:
 | `.deb` | Ubuntu 24.04 amd64 | `sudo apt install ./dolphin-dap-ubuntu24.04-amd64.deb` |
 | `.rpm` | Fedora 44 x86_64 | `sudo dnf install ./dolphin-dap-fedora44-x86_64.rpm` |
 | `.AppImage` | Ubuntu 24.04 baseline, glibc 2.39 or newer | Make executable with `chmod +x`, then run |
-| `.gpkg.tar` | Gentoo amd64 desktop/systemd, glibc | Install through Portage; see below |
+| `.gpkg.tar` | Gentoo amd64 desktop/systemd profile, glibc | Install through Portage; see below |
 | `.pkg.tar.zst` | Current Arch Linux x86_64 | `sudo pacman -U ./dolphin-dap-archlinux-x86_64.pkg.tar.zst` |
 | `.flatpak` | KDE 6.10 runtime, x86_64 | `flatpak install --user ./dolphin-dap-linux-x86_64.flatpak` |
 
@@ -63,7 +63,8 @@ baseline manageable; emulation and source/DAP debugging remain enabled.
 
 The AppImage bundles Qt and non-baseline libraries using checksum-verified
 linuxdeploy tools. It is **not compatible with every Linux distribution**: older
-glibc and musl-based systems are outside its scope. FUSE is needed for ordinary
+glibc and musl-based systems are outside its scope. Host OpenGL/EGL libraries and
+drivers remain required (on Ubuntu: `libgl1 libegl1 libopengl0`). FUSE is needed for ordinary
 execution; `APPIMAGE_EXTRACT_AND_RUN=1 ./dolphin-dap-linux-x86_64.AppImage` is an
 alternative. Add `--nogui` before Dolphin arguments to launch NoGUI.
 Rolling packaging-tool downloads are hash-checked; updating them requires

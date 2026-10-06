@@ -7,7 +7,7 @@ arch=('x86_64')
 url='https://github.com/LiveMindIO/dolphin-dap'
 license=('GPL-2.0-or-later')
 depends=('qt6-base' 'qt6-svg' 'libevdev' 'systemd-libs' 'libxrandr' 'libxi'
-         'bluez-libs' 'alsa-lib' 'libpulse' 'mesa' 'libusb' 'gcc-libs' 'glibc')
+         'bluez-libs' 'alsa-lib' 'libpulse' 'mesa' 'libusb' 'gcc-libs' 'glibc' 'zlib-ng')
 conflicts=('dolphin-emu')
 provides=('dolphin-emu')
 options=('!debug' '!strip')

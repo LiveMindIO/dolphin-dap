@@ -26,11 +26,15 @@ case "$format" in
     ;;
   gpkg)
     emerge-webrsync
+    # Desktop defaults keep Qt/ALSA/PulseAudio USE dependencies consistent, while
+    # the minimal image avoids preinstalled desktop packages from an older tree.
+    eselect profile set default/linux/amd64/23.0/desktop/systemd
     # Use generic x86-64 code rather than optimizations for the ephemeral CI host.
     cat >> /etc/portage/make.conf <<'EOF'
 CFLAGS="-O2 -pipe -march=x86-64 -mtune=generic"
 CXXFLAGS="${CFLAGS}"
 BINPKG_FORMAT="gpkg"
+USE="X gui widgets opengl vulkan"
 EOF
     export MAKEOPTS="-j$jobs"
     emerge --getbinpkg --usepkg --autounmask=n dev-vcs/git dev-build/cmake dev-build/ninja dev-util/pkgconf \

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-side entrypoint. Containers receive source read-only and an isolated work volume.
 set -euo pipefail
+main() {
 format=${1:?package format required}
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 destination=$(realpath -m "${2:-$root/release}")
@@ -9,7 +10,7 @@ case "$format" in
   appimage) image=ubuntu:24.04; asset=dolphin-dap-linux-x86_64.AppImage ;;
   rpm) image=fedora:44; asset=dolphin-dap-fedora44-x86_64.rpm ;;
   arch) image=archlinux:base-devel; asset=dolphin-dap-archlinux-x86_64.pkg.tar.zst ;;
-  gpkg) image=gentoo/stage3:amd64-desktop-systemd; asset=dolphin-dap-gentoo-amd64.gpkg.tar ;;
+  gpkg) image=gentoo/stage3:amd64-systemd; asset=dolphin-dap-gentoo-amd64.gpkg.tar ;;
   *) echo "Unsupported format: $format" >&2; exit 2 ;;
 esac
 mkdir -p "$destination"
@@ -36,3 +37,5 @@ if [[ "$format" != gpkg ]]; then
 fi
 test -s "$destination/$asset"
 (cd "$destination" && sha256sum "$asset" > "$asset.sha256")
+}
+main "$@"
