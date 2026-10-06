@@ -5,7 +5,7 @@ $output = Join-Path $root 'build/Binaries'
 
 # Deploy the app-local release CRT rather than requiring a separate installer.
 $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-$vs = & $vswhere -latest -version '[17.0,18.0)' -products '*' `
+$vs = & $vswhere -latest -version '[18.0,19.0)' -products '*' `
   -requires Microsoft.Component.MSBuild -property installationPath
 if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'Visual Studio installation not found' }
 $redist = Get-ChildItem "$vs/VC/Redist/MSVC" -Directory |
@@ -13,7 +13,9 @@ $redist = Get-ChildItem "$vs/VC/Redist/MSVC" -Directory |
   Sort-Object { [version]$_.Name } -Descending |
   Select-Object -First 1
 if (!$redist) { throw 'MSVC redistributable directory not found' }
-$crt = Join-Path $redist.FullName 'x64/Microsoft.VC143.CRT'
+$crt = Get-ChildItem (Join-Path $redist.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' |
+  Select-Object -First 1 -ExpandProperty FullName
+if (!$crt) { throw 'MSVC x64 CRT directory not found' }
 Copy-Item "$crt/*.dll" $output
 
 foreach ($path in @(

@@ -18,7 +18,7 @@ concurrency:
 jobs:
   windows:
     name: Windows x64 (${{ matrix.configuration }})
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -40,7 +40,7 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
         with:
-          vs-version: '[17.0,18.0)'
+          vs-version: '[18.0,19.0)'
           msbuild-architecture: x64
 
       - name: Configure Windows CMake
@@ -48,7 +48,7 @@ jobs:
           BUILD_CONFIGURATION: ${{ matrix.configuration }}
         run: |
           $fastlog = if ($env:BUILD_CONFIGURATION -eq 'Debug') { 'ON' } else { 'OFF' }
-          cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 `
+          cmake -S . -B build -G 'Visual Studio 18 2026' -A x64 `
             "-DCMAKE_CONFIGURATION_TYPES=$env:BUILD_CONFIGURATION" "-DFASTLOG=$fastlog" `
             -DENABLE_QT=ON -DENABLE_NOGUI=ON -DENABLE_TESTS=ON `
             -DENABLE_AUTOUPDATE=OFF -DDISTRIBUTOR=LiveMindIO `

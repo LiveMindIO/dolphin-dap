@@ -97,7 +97,8 @@ class WindowsProjectTests(unittest.TestCase):
                 self.assertTrue((ROOT / "Source/Core/Core" / source).is_file())
         workflow = (ROOT / ".github/workflows/build.yml").read_text()
         self.assertNotIn("dolphin-emu.sln", workflow)
-        self.assertIn("Visual Studio 17 2022", workflow)
+        self.assertIn("Visual Studio 18 2026", workflow)
+        self.assertIn("windows-2025-vs2026", workflow)
 
     def test_debugger_tests_match_cmake(self):
         cmake = (ROOT / "Source/UnitTests/Core/CMakeLists.txt").read_text()

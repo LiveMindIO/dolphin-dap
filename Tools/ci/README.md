@@ -10,13 +10,13 @@ The recipes adapt upstream's Buildbot factories and
 [Ubuntu builder dependencies](https://github.com/dolphin-emu/sadm/blob/1b682df75adebc5d93d4abd0db5f965f18ae71ed/containers/ubuntu-lts-builder/Dockerfile) from
 [`dolphin-emu/sadm`, revision `1b682df75ade`](https://github.com/dolphin-emu/sadm/blob/1b682df75adebc5d93d4abd0db5f965f18ae71ed/roles/buildbot/etc/master.cfg):
 
-- Windows uses CMake with the Visual Studio 2022 generator and the `unittests`
+- Windows uses CMake with the Visual Studio 2026 generator and the `unittests`
   target, following upstream's CMake path after removal of the native projects.
   Both platforms share the same debugger source lists. POSIX-only socket tests retain
   their existing Windows guards; they run in the Linux job.
 - Linux uses CMake/Ninja, with `FASTLOG=ON` for Debug and the `unittests` target.
   Dependencies follow upstream's Ubuntu 24.04 builder. Configuration is explicit
-  to select GitHub's available compiler versions rather than upstream's VS 2026 preset.
+  to apply the fork's distribution and auto-update settings on both platforms.
 - Distribution identity is `LiveMindIO`. Upstream automatic updates are disabled.
   Upstream's Buildbot workers, signing credentials, website notifications, FifoCI,
   and Flatpak publishing infrastructure are not used.
@@ -64,4 +64,4 @@ discovery; they check archive contents, permissions, checksums, and failures, no
 whether Dolphin actually runs. PowerShell packaging tests run if `pwsh` is available
 on the Linux host; otherwise they are skipped.
 CI additionally smoke-tests the real staged binaries. Windows compilation and
-PowerShell packaging require a Windows runner with Visual Studio 2022.
+PowerShell packaging require the `windows-2025-vs2026` runner with Visual Studio 2026.
