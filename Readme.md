@@ -11,6 +11,21 @@ whole thing, I would love it.
 
 For the DAP functionality, setup, and usage, see the [Dolphin DAP documentation](Tools/dap/README.md).
 
+## Windows release downloads
+
+Pushing any tag to this fork runs the [Windows release workflow](.github/workflows/windows-release.yml).
+After a successful Windows x64 build, it creates a GitHub Release for the tag (or adds assets
+to an existing release) with `dolphin-dap-windows-x64.zip` and a SHA-256 checksum file.
+The tagged commit must contain the workflow. Failed builds do not publish assets.
+
+Extract the entire ZIP before running `Dolphin.exe` for the Qt source debugger or
+`DolphinNoGUI.exe` for an editor-managed DAP session. The ZIP includes Qt plugins,
+MSVC runtime DLLs, translations, game-system resources, and license files; the executables
+are not standalone files. The official Dolphin auto-updater is disabled in these builds
+so it cannot replace the fork with an upstream binary. Game images and debug ELFs are
+not included; see the [Qt guide](Tools/dap/qt-source-debugging.md) or
+[DAP server guide](Tools/dap/README.md) to configure your own files.
+
 ## Debug Adapter Protocol (DAP) Server
 
 This fork adds a **Debug Adapter Protocol server** that exposes Dolphin's
