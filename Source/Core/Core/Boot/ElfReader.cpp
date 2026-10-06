@@ -4,10 +4,9 @@
 #include "Core/Boot/ElfReader.h"
 
 #include <cstring>
+#include <span>
 #include <string>
 #include <utility>
-
-#include <span>
 
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
@@ -79,28 +78,28 @@ static bool IsRangeValid(size_t offset, size_t size, size_t container_size)
 
 ElfReader::ElfReader(std::vector<u8> buffer) : BootExecutableReader(std::move(buffer))
 {
-  Initialize(m_bytes.data());
+  m_is_valid = Initialize();
 }
 
 ElfReader::ElfReader(File::IOFile file) : BootExecutableReader(std::move(file))
 {
-  Initialize(m_bytes.data());
+  m_is_valid = Initialize();
 }
 
 ElfReader::ElfReader(const std::string& filename) : BootExecutableReader(filename)
 {
-  Initialize(m_bytes.data());
+  m_is_valid = Initialize();
 }
 
 ElfReader::~ElfReader() = default;
 
-void ElfReader::Initialize(u8* ptr)
+bool ElfReader::Initialize()
 {
-  if (!ptr || m_bytes.size() < sizeof(Elf32_Ehdr))
-    return;
+  if (m_bytes.size() < sizeof(Elf32_Ehdr))
+    return false;
 
-  base = reinterpret_cast<char*>(ptr);
-  header = reinterpret_cast<Elf32_Ehdr*>(ptr);
+  base = reinterpret_cast<char*>(m_bytes.data());
+  header = reinterpret_cast<Elf32_Ehdr*>(m_bytes.data());
 
   const u8* ident = header->e_ident;
   if (ident[EI_MAG0] != ELFMAG0 || ident[EI_MAG1] != ELFMAG1 || ident[EI_MAG2] != ELFMAG2 ||
@@ -108,7 +107,7 @@ void ElfReader::Initialize(u8* ptr)
       ident[EI_VERSION] != EV_CURRENT)
   {
     header = nullptr;
-    return;
+    return false;
   }
 
   byteswapHeader(*header);
@@ -124,7 +123,7 @@ void ElfReader::Initialize(u8* ptr)
       (header->e_shstrndx != SHN_UNDEF && header->e_shstrndx >= header->e_shnum))
   {
     header = nullptr;
-    return;
+    return false;
   }
 
   segments = reinterpret_cast<Elf32_Phdr*>(base + header->e_phoff);
@@ -140,7 +139,7 @@ void ElfReader::Initialize(u8* ptr)
       header = nullptr;
       segments = nullptr;
       sections = nullptr;
-      return;
+      return false;
     }
   }
 
@@ -154,13 +153,13 @@ void ElfReader::Initialize(u8* ptr)
       header = nullptr;
       segments = nullptr;
       sections = nullptr;
-      return;
+      return false;
     }
   }
   entryPoint = header->e_entry;
 
   bRelocate = (header->e_type != ET_EXEC);
-  m_is_valid = true;
+  return true;
 }
 
 const char* ElfReader::GetSectionName(int section) const
@@ -283,17 +282,23 @@ bool ElfReader::LoadIntoMemory(Core::System& system, bool only_in_mem1) const
   {
     Elf32_Phdr* p = segments + i;
 
-    INFO_LOG_FMT(BOOT, "Type: {} Vaddr: {:08x} Filesz: {} Memsz: {}", p->p_type, p->p_vaddr,
-                 p->p_filesz, p->p_memsz);
+    INFO_LOG_FMT(BOOT, "Type: {} Vaddr: {:08x} Paddr: {:08x} Filesz: {} Memsz: {}", p->p_type,
+                 p->p_vaddr, p->p_paddr, p->p_filesz, p->p_memsz);
 
     if (p->p_type == PT_LOAD)
     {
-      u32 writeAddr = p->p_vaddr;
+      // Check LMA (paddr) first - some are nonsense, so fall back to VMA (vaddr) if invalid
+      u32 writeAddr = p->p_paddr;
+      if (writeAddr)
+        writeAddr |= 0x80000000;  // map to virtual address
+      else
+        writeAddr = p->p_vaddr;  // LMA is empty, fall back to VMA
+
       const u8* src = GetSegmentPtr(i);
       u32 srcSize = p->p_filesz;
       u32 dstSize = p->p_memsz;
 
-      const u64 physical_address = p->p_vaddr & 0x3fffffff;
+      const u64 physical_address = writeAddr & 0x3fffffff;
       if (only_in_mem1 && physical_address + p->p_memsz > memory.GetRamSizeReal())
         continue;
 

@@ -1,7 +1,7 @@
-# MSBuild's Qt deployment targets supply DLLs/plugins, Sys, translations, and licenses.
+# CMake's Qt deployment targets supply DLLs/plugins, Sys, translations, and licenses.
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot/../..").Path
-$output = Join-Path $root 'Binary/x64'
+$output = Join-Path $root 'build/Binaries'
 
 # Deploy the app-local release CRT rather than requiring a separate installer.
 $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"

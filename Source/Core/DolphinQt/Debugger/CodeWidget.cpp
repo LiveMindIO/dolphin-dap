@@ -49,7 +49,8 @@ CodeWidget::CodeWidget(QWidget* parent)
       m_execution_observer_id(m_system.GetCPU().GetExecutionState().RegisterClient(
           [](std::shared_ptr<const Core::Debug::ExecutionEvent>) {
             Core::QueueHostJob([](Core::System&) { Host_UpdateDisasmDialog(); }, true);
-          }))
+          })),
+      m_show_demangled_names(Settings::Instance().IsShowDemangledNames())
 {
   setWindowTitle(tr("Code"));
   setObjectName(QStringLiteral("code"));
@@ -90,6 +91,9 @@ CodeWidget::CodeWidget(QWidget* parent)
     }
     Update();
   });
+
+  connect(&Settings::Instance(), &Settings::ShowDemangledNamesChanged, this,
+          &CodeWidget::OnShowDemangledNamesChanged);
 
   ConnectWidgets();
 
@@ -293,6 +297,16 @@ void CodeWidget::OnSetCodeAddress(u32 address)
   SetAddress(address, CodeViewWidget::SetAddressUpdate::WithDetailedUpdate);
 }
 
+void CodeWidget::OnShowDemangledNamesChanged()
+{
+  m_show_demangled_names = Settings::Instance().IsShowDemangledNames();
+  UpdateSymbols();
+  if (const Common::Symbol* symbol = m_ppc_symbol_db.GetSymbolFromAddr(m_code_view->GetAddress()))
+  {
+    UpdateFunctionCallers(symbol);
+  }
+}
+
 void CodeWidget::OnPPCSymbolsChanged()
 {
   UpdateSymbols();
@@ -480,7 +494,7 @@ void CodeWidget::UpdateSymbols()
   m_symbols_list->clear();
 
   m_ppc_symbol_db.ForEachSymbol([&](const Common::Symbol& symbol) {
-    QString name = QString::fromStdString(symbol.name);
+    QString name = QString::fromStdString(GetSymbolDisplayName(&symbol));
 
     // If the symbol has an object name, add it to the entry name.
     if (!symbol.object_name.empty())
@@ -544,15 +558,16 @@ void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
     if (caller_symbol)
     {
       QString name;
+      const std::string& symbol_name = GetSymbolDisplayName(caller_symbol);
 
       if (!caller_symbol->object_name.empty())
       {
-        name = QString::fromStdString(fmt::format("< {} ({}, {:08x})", caller_symbol->name,
-                                                  caller_symbol->object_name, addr));
+        name = QString::fromStdString(
+            fmt::format("< {} ({}, {:08x})", symbol_name, caller_symbol->object_name, addr));
       }
       else
       {
-        name = QString::fromStdString(fmt::format("< {} ({:08x})", caller_symbol->name, addr));
+        name = QString::fromStdString(fmt::format("< {} ({:08x})", symbol_name, addr));
       }
 
       if (!name.contains(filter, Qt::CaseInsensitive))
@@ -563,6 +578,13 @@ void CodeWidget::UpdateFunctionCallers(const Common::Symbol* symbol)
       m_function_callers_list->addItem(item);
     }
   }
+}
+
+// Gets the name of this symbol based on the option for whether or not to show
+// demangled names.
+const std::string& CodeWidget::GetSymbolDisplayName(const Common::Symbol* symbol) const
+{
+  return symbol->GetDisplayName(m_show_demangled_names);
 }
 
 void CodeWidget::Step()

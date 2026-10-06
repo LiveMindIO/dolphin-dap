@@ -61,7 +61,7 @@ public:
   bool DidRelocate() const { return bRelocate; }
 
 private:
-  void Initialize(u8* bytes);
+  bool Initialize();
 
   char* base = nullptr;
 

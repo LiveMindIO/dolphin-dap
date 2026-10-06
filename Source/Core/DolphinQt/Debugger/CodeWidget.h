@@ -80,6 +80,7 @@ private:
   void CancelAndJoinStepWorker();
   std::optional<u32> GetActiveAddress() const;
 
+  void OnShowDemangledNamesChanged();
   void OnPPCSymbolsChanged();
   void OnSearchAddress();
   void OnSearchSymbols();
@@ -91,9 +92,12 @@ private:
   void closeEvent(QCloseEvent*) override;
   void showEvent(QShowEvent* event) override;
 
+  const std::string& GetSymbolDisplayName(const Common::Symbol* symbol) const;
+
   Core::System& m_system;
   PPCSymbolDB& m_ppc_symbol_db;
   Core::Debug::ExecutionState::ClientId m_execution_observer_id;
+  bool m_show_demangled_names;
 
   BranchWatchDialog* m_branch_watch_dialog = nullptr;
   QLineEdit* m_search_address;

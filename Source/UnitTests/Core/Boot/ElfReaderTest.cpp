@@ -155,6 +155,22 @@ TEST_F(ElfReaderTest, LoadsExecutableSegmentAndZeroFillsBss)
       std::all_of(loaded.begin() + TEXT.size(), loaded.end(), [](u8 value) { return value == 0; }));
 }
 
+TEST_F(ElfReaderTest, Mem1FilterUsesPhysicalLoadAddress)
+{
+  auto bytes = MakeElf(EM_ARM);
+  Write32(bytes, PROGRAM_HEADER_OFFSET + 8, 0x90001000);
+  Write32(bytes, PROGRAM_HEADER_OFFSET + 12, 0x00001000);
+  ElfReader reader(std::move(bytes));
+  ASSERT_TRUE(reader.IsValid());
+
+  auto& system = Core::System::GetInstance();
+  system.GetMemory().Memset(0x80001000, 0xff, TEXT.size());
+  ASSERT_TRUE(reader.LoadIntoMemory(system, true));
+  std::array<u8, TEXT.size()> loaded;
+  system.GetMemory().CopyFromEmu(loaded.data(), 0x80001000, loaded.size());
+  EXPECT_EQ(loaded, TEXT);
+}
+
 TEST_F(ElfReaderTest, ImportsEmbeddedDwarf)
 {
   ElfReader reader(MakeElf());

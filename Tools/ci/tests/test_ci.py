@@ -9,7 +9,6 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-import xml.etree.ElementTree as ET
 import zipfile
 
 try:
@@ -69,21 +68,25 @@ class WindowsProjectTests(unittest.TestCase):
     def test_debugger_sources_match_cmake(self):
         cmake = (ROOT / "Source/Core/Core/CMakeLists.txt").read_text()
         sources = re.findall(r"^  (Debugger/\S+\.cpp)$", cmake, re.MULTILINE)
-        project = ET.parse(ROOT / "Source/Core/DolphinLib.props")
-        included = {x.attrib["Include"] for x in project.iter("ClCompile") if "Include" in x.attrib}
+        self.assertTrue(sources)
         for source in sources:
             with self.subTest(source=source):
-                self.assertIn("Core\\" + source.replace("/", "\\"), included)
+                self.assertTrue((ROOT / "Source/Core/Core" / source).is_file())
+        workflow = (ROOT / ".github/workflows/build.yml").read_text()
+        self.assertNotIn("dolphin-emu.sln", workflow)
+        self.assertIn("Visual Studio 17 2022", workflow)
 
     def test_debugger_tests_match_cmake(self):
         cmake = (ROOT / "Source/UnitTests/Core/CMakeLists.txt").read_text()
         sources = re.findall(r"(?:Debugger|Boot|ConfigLoaders)/[\w/]+Test\.cpp", cmake)
-        project = ET.parse(ROOT / "Source/UnitTests/UnitTests.vcxproj")
-        included = {x.attrib["Include"] for x in project.iter("ClCompile") if "Include" in x.attrib}
+        self.assertTrue(sources)
         for source in sources:
             with self.subTest(source=source):
-                self.assertIn("Core\\" + source.replace("/", "\\"), included)
-        self.assertIn("UICommon\\CommandLineParseTest.cpp", included)
+                self.assertTrue((ROOT / "Source/UnitTests/Core" / source).is_file())
+        self.assertIn("CommandLineParseTest.cpp",
+                      (ROOT / "Source/UnitTests/UICommon/CMakeLists.txt").read_text())
+        self.assertIn('-C "$<CONFIG>"',
+                      (ROOT / "Source/UnitTests/CMakeLists.txt").read_text())
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "requires PowerShell on POSIX")
@@ -98,7 +101,7 @@ class WindowsPackageTests(unittest.TestCase):
         tools.mkdir(parents=True)
         self.script = tools / "package-windows.ps1"
         shutil.copy(ROOT / "Tools/ci/package-windows.ps1", self.script)
-        self.output = self.root / "Binary/x64"
+        self.output = self.root / "build/Binaries"
         for filename in ("Dolphin.exe", "DolphinNoGUI.exe", "qt.conf", "COPYING",
                          "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Svg.dll",
                          "Sys/resource.txt", "Languages/de.mo", "LICENSES/test.txt",

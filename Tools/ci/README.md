@@ -10,13 +10,13 @@ The recipes adapt upstream's Buildbot factories and
 [Ubuntu builder dependencies](https://github.com/dolphin-emu/sadm/blob/1b682df75adebc5d93d4abd0db5f965f18ae71ed/containers/ubuntu-lts-builder/Dockerfile) from
 [`dolphin-emu/sadm`, revision `1b682df75ade`](https://github.com/dolphin-emu/sadm/blob/1b682df75adebc5d93d4abd0db5f965f18ae71ed/roles/buildbot/etc/master.cfg):
 
-- Windows uses the native Visual Studio solution and the `RunUnitTests=true`
-  MSBuild target, like upstream's solution-based path. The Windows project source
-  lists include the fork's debugger code and tests. POSIX-only socket tests retain
+- Windows uses CMake with the Visual Studio 2022 generator and the `unittests`
+  target, following upstream's CMake path after removal of the native projects.
+  Both platforms share the same debugger source lists. POSIX-only socket tests retain
   their existing Windows guards; they run in the Linux job.
 - Linux uses CMake/Ninja, with `FASTLOG=ON` for Debug and the `unittests` target.
-  Dependencies follow upstream's Ubuntu 24.04 builder. This fork predates upstream's
-  CMake presets, so the equivalent configuration is explicit in the workflow.
+  Dependencies follow upstream's Ubuntu 24.04 builder. Configuration is explicit
+  to select GitHub's available compiler versions rather than upstream's VS 2026 preset.
 - Distribution identity is `LiveMindIO`. Upstream automatic updates are disabled.
   Upstream's Buildbot workers, signing credentials, website notifications, FifoCI,
   and Flatpak publishing infrastructure are not used.

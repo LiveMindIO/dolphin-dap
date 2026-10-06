@@ -6,7 +6,7 @@ matching source checkout. Compile the files you want to inspect without optimiza
 
 ## Build and start Qt Dolphin
 
-Install the [platform build prerequisites](../../Readme.md#building-for-linux-and-macos),
+Install the [platform build prerequisites](../../Readme.md#building),
 including Qt development packages. From the Dolphin repository root on Linux:
 
 ```sh
@@ -22,7 +22,7 @@ ln -s ../../Data/Sys build/Binaries/Sys
 
 Skip the `ln` command if `build/Binaries/Sys` already exists. Enabling Qt explicitly
 also works when your build directory was previously configured with Qt disabled.
-On Windows, follow the [Windows build instructions](../../Readme.md#building-for-windows)
+On Windows, follow the [Windows build instructions](https://github.com/dolphin-emu/dolphin/wiki/Building-for-Windows)
 and start your built `Dolphin.exe` with the same three `-C` overrides on one line.
 Qt Dolphin does not take a `--platform` argument.
 

@@ -47,6 +47,8 @@ add_library(common
   Crypto/HMAC.h
   Crypto/SHA1.cpp
   Crypto/SHA1.h
+  CWDemangler.cpp
+  CWDemangler.h
   Debug/MemoryPatches.cpp
   Debug/MemoryPatches.h
   Debug/Threads.h
@@ -99,6 +101,8 @@ add_library(common
   Lazy.h
   LinearDiskCache.h
   UnixUtil.h
+  LocaleUtil.cpp
+  LocaleUtil.h
   Logging/ConsoleListener.h
   Logging/Log.h
   Logging/LogManager.cpp

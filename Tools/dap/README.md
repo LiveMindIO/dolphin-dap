@@ -20,8 +20,8 @@ To debug in Dolphin's own Qt interface without an editor or DAP client, use the
 
 ## Running the server
 
-Install the [platform build prerequisites](../../Readme.md#building-for-linux-and-macos)
-first; Windows builds have [separate instructions](../../Readme.md#building-for-windows).
+Install the [platform build prerequisites](../../Readme.md#building)
+first; Windows builds have [separate instructions](https://github.com/dolphin-emu/dolphin/wiki/Building-for-Windows).
 For a local Linux NoGUI build, run:
 
 ```bash
