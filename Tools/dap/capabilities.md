@@ -1,7 +1,7 @@
 # DAP Server Capabilities
 
-Operations supported by the Dolphin DAP server. Each command below is a link
-target — the [Features](README.md#features) table links into this document.
+Operations supported by the Dolphin DAP server. Use the table of contents below
+to find a request and its payload.
 
 For build/run instructions, tests, known limitations, and source awareness, see
 [`README.md`](README.md).
@@ -61,7 +61,7 @@ Dolphin-specific extensions it supports.
 // ← server response (excerpt)
 {"seq": 2, "type": "response", "command": "initialize", "request_seq": 1,
  "success": true,
- "body": {"capabilities": {
+  "body": {
    "supportsConfigurationDoneRequest": true,
    "supportsDisassembleRequest": true,
    "supportsReadMemoryRequest": true,
@@ -83,7 +83,7 @@ Dolphin-specific extensions it supports.
    "supportsDolphinMemoryRegions": true,
    "supportsDolphinMemoryScan": true,
    "supportsDolphinPointerChain": true
-  }}}
+  }}
 
 // ← then an "initialized" event (means "ready for setBreakpoints / launch")
 {"seq": 3, "type": "event", "event": "initialized", "body": {}}
@@ -92,11 +92,13 @@ Dolphin-specific extensions it supports.
 ## `launch` / `attach`
 
 ```jsonc
-{"command": "launch", "arguments": {}}      // boot the configured ISO/DOL, then stop at entry
+{"command": "launch", "arguments": {}}      // begin debugging the game already booted by Dolphin
 {"command": "attach", "arguments": {}}      // attach to an already-running core
 ```
 
-Response is empty `{}`. Server then emits a `stopped` event with
+Response is empty `{}`. Neither request selects a game or starts a Dolphin process;
+configure and boot the game through Dolphin's CLI or GUI first. With stop-on-entry
+enabled, after configuration completes the server emits a `stopped` event with
 `reason: "entry"` (launch) or `reason: "attach"`.
 
 **`stopOnEntry`** (standard DAP field): controls whether the game pauses before
@@ -152,15 +154,29 @@ an in-flight step, and overlapping step requests are rejected.
 
 ## `setBreakpoints`
 
-A Dolphin "source" is anchored at an address encoded as a hex string in
-`source.name` or `source.path`; each breakpoint's address is `base + line*4`.
+For a real source file, provide its path and one-based source lines. Dolphin
+resolves them using loaded DWARF or entrypoint information. Lines without a
+resolvable address are returned as unverified. Each request replaces this
+client's breakpoints for that source, not breakpoints belonging to other sources
+or clients.
+
+```jsonc
+{"command": "setBreakpoints", "arguments": {
+  "source": {"path": "/path/to/project/src/example.c"},
+  "breakpoints": [{"line": 42, "condition": "r3 == 0"}]
+}}
+```
+
+For a disassembly pseudo-source, encode the base address as a hex string in
+`source.name` or `source.path`. Its lines are also one-based; the address is
+`base + (line - 1) * 4`. Line zero is invalid.
 
 ```jsonc
 {"command": "setBreakpoints", "arguments": {
   "source": {"name": "0x80003100"},
   "breakpoints": [
-    {"line": 0,  "condition": "r3 == 0"},
-    {"line": 4}
+    {"line": 1, "condition": "r3 == 0"},
+    {"line": 2}
   ]
 }}
 //  → {"breakpoints": [
@@ -171,8 +187,8 @@ A Dolphin "source" is anchored at an address encoded as a hex string in
 
 ## `setInstructionBreakpoints`
 
-Directly sets code breakpoints by address. Replaces the whole code-breakpoint
-list (mirrors the GDB stub).
+Directly sets code breakpoints by address. Replaces this client's instruction
+breakpoint list, leaving source breakpoints and other clients' breakpoints intact.
 
 ```jsonc
 {"command": "setInstructionBreakpoints", "arguments": {
@@ -226,7 +242,7 @@ On a watchpoint hit, the server emits:
 ```jsonc
 // read 4 bytes at 0x80004000
 {"command": "readMemory", "arguments": {"memoryReference": "0x80004000", "count": 4}}
-//  → {"address": "0x80004000", "data": "AAAA"}   // base64
+//  → {"address": "0x80004000", "data": "AAAAAA=="}   // base64 for four zero bytes
 
 // write 3 bytes ("Man") at 0x80004000
 {"command": "writeMemory", "arguments":
@@ -304,15 +320,17 @@ breakpoint conditions.
 ## `goto` / `gotoTargets`
 
 ```jsonc
-{"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 0}}
-//  → {"targets": [{"id": 2147501824, "label": "0x80003100",
+{"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 1}}
+//  → {"targets": [{"id": 2147496192, "label": "0x80003100",
 //                  "instructionPointerReference": "0x80003100"}]}
 
-{"command": "goto", "arguments": {"threadId": 1, "targetId": 2147501824}}
+{"command": "goto", "arguments": {"threadId": 1, "targetId": 2147496192}}
 //  → {}  then a stopped/event with reason "goto"
 ```
 
-The address doubles as the target id so `goto` is stateless. The core is paused
+Use the `id` returned by `gotoTargets` as `targetId`; do not copy an ID from this
+example when jumping elsewhere. The address doubles as the target id so `goto` is
+stateless. The core is paused
 first so the post-goto stopped event is truthful — if the client called `goto`
 while emulation was running, the CPU would otherwise keep executing at the new
 PC while the adapter told the client emulation halted.
@@ -325,7 +343,7 @@ PC while the adapter told the client emulation halted.
 
 {"command": "source", "arguments": {"sourceReference": 1, "startLine": 0, "endLine": -1}}
 {"command": "breakpointLocations",
- "arguments": {"source": {"name": "0x80003100"}, "line": 0, "endLine": 20}}
+ "arguments": {"source": {"name": "0x80003100"}, "line": 1, "endLine": 20}}
 ```
 
 `source` line emission is capped at 256 lines and `breakpointLocations`
@@ -453,9 +471,15 @@ succeeds.
 ## `dolphin_findFreeMemory`
 
 Scans MEM1 (real RAM size, `GetRamSizeReal`) for the smallest 4-byte-aligned
-run of zero words of at least `count` bytes and returns its address. Used by
-integrators that want to inject code but don't know the game's memory layout —
-the server picks a safe address.
+run of zero words of at least `count` bytes and returns its address. This finds a
+**candidate code cave**, not an allocation from the game's heap. Zero-filled memory
+can belong to live buffers, globals, or other game state. The scan neither proves
+that the region is unused nor reserves it against future game writes.
+
+Before injecting, verify the region against the game's memory layout and keep a
+copy of the original bytes. Prefer an explicitly reserved region in your debug
+build. Pausing the game prevents concurrent execution, but does not establish
+ownership of the memory.
 
 ```jsonc
 {"command": "dolphin_findFreeMemory", "arguments": {"count": 64}}
@@ -466,10 +490,10 @@ the server picks a safe address.
 
 ## `dolphin_injectCode`
 
-Writes PPC machine code at an explicit or server-allocated address. The
+Writes PPC machine code at an explicit or server-selected address. The
 client supplies raw big-endian bytes (base64-encoded); the server does not
-assemble. `memoryReference` is optional — when omitted, the server allocates a
-region via `dolphin_findFreeMemory` and writes there; when present, it writes
+assemble. `memoryReference` is optional — when omitted, the server selects a
+candidate region via `dolphin_findFreeMemory` and writes there; when present, it writes
 at that address. `WriteMemory`'s iCache + JIT invalidation ensures the
 injected bytes are observed by the next fetch in both interpreter and JIT
 modes.
@@ -477,21 +501,25 @@ modes.
 ```jsonc
 // write at an explicit address
 {"command": "dolphin_injectCode", "arguments":
-  {"memoryReference": "0x8000c000", "code": "AAAAAAAA"}}
+   {"memoryReference": "0x8000c000", "code": "YAAAAA=="}}
 //  → {"address": "0x8000c000", "count": 4}
 
-// let the server pick a code cave
-{"command": "dolphin_injectCode", "arguments": {"code": "AAAAAAAA"}}
-//  → {"address": "0x8012d3c0", "count": 4}   (allocated address)
+// let the server find a candidate zero-filled region (not guaranteed unused)
+{"command": "dolphin_injectCode", "arguments": {"code": "YAAAAA=="}}
+//  → {"address": "0x8012d3c0", "count": 4}   (selected address)
 //  → error response "no free region of that size" if no cave exists
 ```
+
+`YAAAAA==` encodes the four big-endian bytes `60 00 00 00` (`nop`). These examples
+write one instruction; they do not redirect execution to it. Replace the example
+address only after verifying that you own the destination memory.
 
 `code` must be a non-empty multiple of 4 bytes (PPC instruction alignment);
 otherwise the request is rejected as invalid arguments. The server does not
 validate the instructions themselves — PC alignment of trailing data is the
-client's responsibility. When no address is supplied, free memory is allocated
-ONCE and threaded through to the inject call so the response is truthful (no
-second scan that could disagree with the pre-check under a running core).
+client's responsibility. When no address is supplied, the candidate address is
+selected once and passed to the write; this is not a reservation in the game's
+allocator.
 
 ### Overwriting existing memory
 
@@ -520,10 +548,10 @@ directly:
   rollback semantics (write-through-until-revert), snapshot the bytes
   yourself with `readMemory` before injecting.
 
-When `memoryReference` is **omitted**, the server allocates via
-`dolphin_findFreeMemory` which scans for a zero-run — so auto-allocated
-regions are guaranteed to be unused (as of the scan). Explicit addresses
-carry no such guarantee.
+When `memoryReference` is **omitted**, the server selects a destination via
+`dolphin_findFreeMemory`, which only scans for a zero-run. Neither automatic
+selection nor an explicit address guarantees that the destination is unused.
+Automatic selection also does not reserve the region in the game's allocator.
 
 ## `dolphin_detour`
 
@@ -538,9 +566,18 @@ Installs a transparent detour at a 4-byte instruction target. The server:
    followed by `b targetAddress + 4`.
 5. Patches `targetAddress` with `b detourAddress`.
 
-The patched-out instruction still executes (via the trampoline) so the detour
-is transparent. The detour body should end with `b trampolineAddress` (or
-fall through to the implicit appended one) to resume after the patch site.
+The patched-out instruction executes from the trampoline, **not its original
+address**, and is copied unchanged. The server does not relocate it or reject
+instructions that depend on their original location. A relative `b` or `bc`
+can therefore branch to the wrong address; a linking branch can also change the
+observable link-register value. Choose a displaced instruction whose behavior
+you have verified is safe at the trampoline address. A detour is not generally
+transparent just because it installs successfully.
+
+The detour body should fall through to the appended `b trampolineAddress` to
+resume after the patch site, or supply its own appropriate control flow.
+If no `detourAddress` is supplied, the same candidate-memory caveats as
+[`dolphin_findFreeMemory`](#dolphin_findfreememory) apply.
 All writes invalidate the iCache + JIT. If the call fails after any write,
 previously-written regions are restored in reverse so the caller is returned
 to the pre-detour byte layout (no partially-patched target/trampoline left
@@ -600,10 +637,11 @@ or constrain it. What your body can do depends on what you do at the end:
   functions: save `lr`, set up a stack frame on `r1`, preserve non-volatile
   registers (`r13`–`r31`, `cr2`–`cr4`, etc.) if appropriate.
 
-The detour mechanism itself is **call-transparent and minimal**. The server
-patches exactly four bytes (`b detour_addr`) at the target; the trampoline
-preserves the patched instruction's observable effect; everything else — what
-the body reads, writes, or calls — is up to the PPC code you supply. The body
+The detour mechanism is minimal, not a general-purpose instruction relocator.
+The server patches exactly four bytes (`b detour_addr`) at the target; the
+trampoline replays the original bytes from a different address. Correctness
+depends on that instruction being safe to relocate and on your body preserving
+the registers and other state required by the original code. The body
 **must not** assume the patched memory layout stays alive across a `restart`
 or another `dolphin_detour` call that touches the same regions; the patched
 bytes don't survive PPC reset, and the rollback on a failed detour only
