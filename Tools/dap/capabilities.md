@@ -471,9 +471,15 @@ succeeds.
 ## `dolphin_findFreeMemory`
 
 Scans MEM1 (real RAM size, `GetRamSizeReal`) for the smallest 4-byte-aligned
-run of zero words of at least `count` bytes and returns its address. Used by
-integrators that want to inject code but don't know the game's memory layout —
-the server picks a safe address.
+run of zero words of at least `count` bytes and returns its address. This finds a
+**candidate code cave**, not an allocation from the game's heap. Zero-filled memory
+can belong to live buffers, globals, or other game state. The scan neither proves
+that the region is unused nor reserves it against future game writes.
+
+Before injecting, verify the region against the game's memory layout and keep a
+copy of the original bytes. Prefer an explicitly reserved region in your debug
+build. Pausing the game prevents concurrent execution, but does not establish
+ownership of the memory.
 
 ```jsonc
 {"command": "dolphin_findFreeMemory", "arguments": {"count": 64}}
@@ -484,10 +490,10 @@ the server picks a safe address.
 
 ## `dolphin_injectCode`
 
-Writes PPC machine code at an explicit or server-allocated address. The
+Writes PPC machine code at an explicit or server-selected address. The
 client supplies raw big-endian bytes (base64-encoded); the server does not
-assemble. `memoryReference` is optional — when omitted, the server allocates a
-region via `dolphin_findFreeMemory` and writes there; when present, it writes
+assemble. `memoryReference` is optional — when omitted, the server selects a
+candidate region via `dolphin_findFreeMemory` and writes there; when present, it writes
 at that address. `WriteMemory`'s iCache + JIT invalidation ensures the
 injected bytes are observed by the next fetch in both interpreter and JIT
 modes.
@@ -495,21 +501,25 @@ modes.
 ```jsonc
 // write at an explicit address
 {"command": "dolphin_injectCode", "arguments":
-  {"memoryReference": "0x8000c000", "code": "AAAAAAAA"}}
+   {"memoryReference": "0x8000c000", "code": "YAAAAA=="}}
 //  → {"address": "0x8000c000", "count": 4}
 
-// let the server pick a code cave
-{"command": "dolphin_injectCode", "arguments": {"code": "AAAAAAAA"}}
-//  → {"address": "0x8012d3c0", "count": 4}   (allocated address)
+// let the server find a candidate zero-filled region (not guaranteed unused)
+{"command": "dolphin_injectCode", "arguments": {"code": "YAAAAA=="}}
+//  → {"address": "0x8012d3c0", "count": 4}   (selected address)
 //  → error response "no free region of that size" if no cave exists
 ```
+
+`YAAAAA==` encodes the four big-endian bytes `60 00 00 00` (`nop`). These examples
+write one instruction; they do not redirect execution to it. Replace the example
+address only after verifying that you own the destination memory.
 
 `code` must be a non-empty multiple of 4 bytes (PPC instruction alignment);
 otherwise the request is rejected as invalid arguments. The server does not
 validate the instructions themselves — PC alignment of trailing data is the
-client's responsibility. When no address is supplied, free memory is allocated
-ONCE and threaded through to the inject call so the response is truthful (no
-second scan that could disagree with the pre-check under a running core).
+client's responsibility. When no address is supplied, the candidate address is
+selected once and passed to the write; this is not a reservation in the game's
+allocator.
 
 ### Overwriting existing memory
 
@@ -538,10 +548,10 @@ directly:
   rollback semantics (write-through-until-revert), snapshot the bytes
   yourself with `readMemory` before injecting.
 
-When `memoryReference` is **omitted**, the server allocates via
-`dolphin_findFreeMemory` which scans for a zero-run — so auto-allocated
-regions are guaranteed to be unused (as of the scan). Explicit addresses
-carry no such guarantee.
+When `memoryReference` is **omitted**, the server selects a destination via
+`dolphin_findFreeMemory`, which only scans for a zero-run. Neither automatic
+selection nor an explicit address guarantees that the destination is unused.
+Automatic selection also does not reserve the region in the game's allocator.
 
 ## `dolphin_detour`
 
@@ -556,9 +566,18 @@ Installs a transparent detour at a 4-byte instruction target. The server:
    followed by `b targetAddress + 4`.
 5. Patches `targetAddress` with `b detourAddress`.
 
-The patched-out instruction still executes (via the trampoline) so the detour
-is transparent. The detour body should end with `b trampolineAddress` (or
-fall through to the implicit appended one) to resume after the patch site.
+The patched-out instruction executes from the trampoline, **not its original
+address**, and is copied unchanged. The server does not relocate it or reject
+instructions that depend on their original location. A relative `b` or `bc`
+can therefore branch to the wrong address; a linking branch can also change the
+observable link-register value. Choose a displaced instruction whose behavior
+you have verified is safe at the trampoline address. A detour is not generally
+transparent just because it installs successfully.
+
+The detour body should fall through to the appended `b trampolineAddress` to
+resume after the patch site, or supply its own appropriate control flow.
+If no `detourAddress` is supplied, the same candidate-memory caveats as
+[`dolphin_findFreeMemory`](#dolphin_findfreememory) apply.
 All writes invalidate the iCache + JIT. If the call fails after any write,
 previously-written regions are restored in reverse so the caller is returned
 to the pre-detour byte layout (no partially-patched target/trampoline left
@@ -618,10 +637,11 @@ or constrain it. What your body can do depends on what you do at the end:
   functions: save `lr`, set up a stack frame on `r1`, preserve non-volatile
   registers (`r13`–`r31`, `cr2`–`cr4`, etc.) if appropriate.
 
-The detour mechanism itself is **call-transparent and minimal**. The server
-patches exactly four bytes (`b detour_addr`) at the target; the trampoline
-preserves the patched instruction's observable effect; everything else — what
-the body reads, writes, or calls — is up to the PPC code you supply. The body
+The detour mechanism is minimal, not a general-purpose instruction relocator.
+The server patches exactly four bytes (`b detour_addr`) at the target; the
+trampoline replays the original bytes from a different address. Correctness
+depends on that instruction being safe to relocate and on your body preserving
+the registers and other state required by the original code. The body
 **must not** assume the patched memory layout stays alive across a `restart`
 or another `dolphin_detour` call that touches the same regions; the patched
 bytes don't survive PPC reset, and the rollback on a failed detour only

@@ -5,6 +5,8 @@ Dolphin's PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.).
 
 Start below to build Dolphin, choose what to run, and connect a debugger.
 For supported requests and their payloads, see [`capabilities.md`](capabilities.md).
+To debug in Dolphin's own Qt interface without an editor or DAP client, use the
+[Qt source-debugging guide](qt-source-debugging.md).
 
 ## Table of contents
 
