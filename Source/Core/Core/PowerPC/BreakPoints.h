@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "Common/AtomicSharedPtr.h"
 #include "Common/BitSet.h"
 #include "Common/CommonTypes.h"
 #include "Core/PowerPC/Expression.h"
@@ -226,7 +227,7 @@ private:
   std::recursive_mutex m_dispatch_mutex;
   bool m_is_draining = false;
   std::deque<PendingDispatch> m_pending_dispatches;
-  std::atomic<std::shared_ptr<const Snapshot>> m_snapshot;
+  Common::AtomicSharedPtr<const Snapshot> m_snapshot;
   ClientId m_next_client_id = 1;
   u64 m_revision = 0;
 };
@@ -370,7 +371,7 @@ private:
   std::recursive_mutex m_dispatch_mutex;
   bool m_is_draining = false;
   std::deque<std::shared_ptr<const Event>> m_pending_dispatches;
-  std::atomic<std::shared_ptr<const Snapshot>> m_snapshot;
+  Common::AtomicSharedPtr<const Snapshot> m_snapshot;
   ClientId m_next_client_id = 1;
   FreezeId m_next_freeze_id = 1;
   u64 m_revision = 0;
