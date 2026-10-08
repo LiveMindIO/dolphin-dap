@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <charconv>
 #include <cmath>
 #include <limits>
 #include <ranges>
@@ -627,19 +626,17 @@ std::optional<u64> ParseScalarValue(const WritableScalar scalar, const std::stri
   }
   if (scalar.kind == ScalarKind::Float || scalar.kind == ScalarKind::Double)
   {
-    double parsed = 0;
-    const auto [end, error] =
-        std::from_chars(text.data(), text.data() + text.size(), parsed, std::chars_format::general);
-    if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(parsed))
+    const auto parsed = Common::ParseFiniteDecimal<double>(text);
+    if (!parsed)
       return std::nullopt;
     if (scalar.kind == ScalarKind::Float)
     {
-      const float narrowed = static_cast<float>(parsed);
+      const float narrowed = static_cast<float>(*parsed);
       if (!std::isfinite(narrowed))
         return std::nullopt;
       return std::bit_cast<u32>(narrowed);
     }
-    return std::bit_cast<u64>(parsed);
+    return std::bit_cast<u64>(*parsed);
   }
   if (scalar.kind == ScalarKind::Signed)
   {

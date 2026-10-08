@@ -10,6 +10,24 @@
 #include "Common/StringUtil.h"
 #include "Common/Swap.h"
 
+TEST(StringUtil, ParseFiniteDecimal)
+{
+  EXPECT_EQ(Common::ParseFiniteDecimal<double>("-1.5e2"), -150.0);
+  EXPECT_EQ(Common::ParseFiniteDecimal<float>(".5"), 0.5f);
+  const auto zero = Common::ParseFiniteDecimal<float>("-0e-999");
+  ASSERT_TRUE(zero);
+  EXPECT_TRUE(std::signbit(*zero));
+  EXPECT_EQ(Common::ParseFiniteDecimal<float>("1.40129846e-45"),
+            std::numeric_limits<float>::denorm_min());
+  for (const char* text :
+       {"", " 1", "1 ", "+1", "1,5", "0x1p0", "nan", "inf", "1e999", "1e-999", "1e", "1.5suffix"})
+  {
+    SCOPED_TRACE(text);
+    EXPECT_FALSE(Common::ParseFiniteDecimal<double>(text));
+  }
+  EXPECT_FALSE(Common::ParseFiniteDecimal<float>("1e-50"));
+}
+
 TEST(StringUtil, StringPopBackIf)
 {
   std::string abc = "abc";

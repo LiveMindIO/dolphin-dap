@@ -326,6 +326,33 @@ TEST_F(DapMemoryEngineTest, FloatParsingRejectsLocaleAndUnderflowForms)
           .has_value());
 }
 
+TEST_F(DapMemoryEngineTest, FloatParsingRejectsInvalidAndNonFiniteForms)
+{
+  for (const auto type : {DAP::MemoryScanDataType::F32, DAP::MemoryScanDataType::F64})
+  {
+    for (const char* text :
+         {" 1.5", "1.5 ", "++1.5", "1.5suffix", "0x1p0", "nan", "inf", "1e999", "1e-999"})
+    {
+      SCOPED_TRACE(text);
+      EXPECT_FALSE(m_engine->StartScan(MakeConfig(type, SCAN_ADDRESS, 8, text)).has_value());
+    }
+  }
+}
+
+TEST_F(DapMemoryEngineTest, FloatParsingAcceptsDecimalExponentAndSignedZero)
+{
+  const std::vector<u8> zero(8, 0);
+  WriteBytes(DATA_ADDRESS, zero);
+  size_t event = 0;
+  for (const char* text : {"+1.5", "-1.5e+2", ".5", "-0e-999", "1.40129846e-45"})
+  {
+    SCOPED_TRACE(text);
+    ASSERT_TRUE(m_engine->StartScan(MakeConfig(DAP::MemoryScanDataType::F32, SCAN_ADDRESS, 4, text))
+                    .has_value());
+    ASSERT_TRUE(WaitForEvent(event++).has_value());
+  }
+}
+
 TEST_F(DapMemoryEngineTest, DeepResultPageUsesBitmapIndex)
 {
   constexpr u32 size = 1u << 20;

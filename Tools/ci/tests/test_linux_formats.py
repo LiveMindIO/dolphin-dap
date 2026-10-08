@@ -16,6 +16,39 @@ SCRIPTS = ROOT / "Tools/ci/linux-packages"
 
 
 class NativeFormatTests(unittest.TestCase):
+    def test_moltenvk_fetch_retries_and_records_only_success(self):
+        for succeeds in (True, False):
+            with self.subTest(succeeds=succeeds), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source with spaces"
+                source.mkdir()
+                stamp = root / "stamp"
+                stamp.mkdir()
+                commands = root / "bin"
+                commands.mkdir()
+                sleep = commands / "sleep"
+                sleep.write_text('#!/bin/sh\nexit 0\n')
+                sleep.chmod(0o755)
+                fetch = source / "fetchDependencies"
+                fetch.write_text('#!/bin/sh\n'
+                                 'count=$(cat "$(dirname "$0")/count" 2>/dev/null || echo 0)\n'
+                                 'count=$((count + 1))\n'
+                                 'echo "$count" > "$(dirname "$0")/count"\n' +
+                                 ('[ "$count" = 2 ]\n' if succeeds else 'exit 1\n'))
+                fetch.chmod(0o755)
+                env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"])
+                result = subprocess.run(["bash", str(ROOT / "Externals/MoltenVK/configure.sh"),
+                                         str(stamp), str(source), "v1.2.8"],
+                                        env=env, capture_output=True)
+                self.assertEqual(result.returncode, 0 if succeeds else 1)
+                marker = stamp / "MoltenVK-last-version.txt"
+                self.assertEqual(marker.exists(), succeeds)
+                self.assertEqual((source / "count").read_text().strip(), "2" if succeeds else "3")
+                if succeeds:
+                    subprocess.run(["bash", str(ROOT / "Externals/MoltenVK/configure.sh"),
+                                    str(stamp), str(source), "v1.2.8"], env=env, check=True)
+                    self.assertEqual((source / "count").read_text().strip(), "2")
+
     def test_appimage_launcher_resolves_apprun_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -67,6 +100,8 @@ class NativeFormatTests(unittest.TestCase):
         self.assertIn("rpmbuild -bb", script)
         self.assertIn("BINPKG_FORMAT=\"gpkg\"", script)
         self.assertIn("emerge --usepkgonly", script)
+        self.assertLess(script.index('" manifest'), script.index("FEATURES='buildpkg"))
+        self.assertLess(script.index("path-include=/usr/share/locale/*"), script.index("dpkg -i"))
 
     def test_container_scope_and_clean_install_check(self):
         script = (SCRIPTS / "container-build.sh").read_text()
@@ -95,6 +130,7 @@ class FlatpakManifestTests(unittest.TestCase):
         self.assertEqual(manifest["app-id"], "io.github.LiveMindIO.DolphinDAP")
         self.assertEqual(manifest["runtime-version"], "6.10")
         self.assertFalse(manifest["separate-locales"])
+        self.assertIn("--libdir=lib", manifest["modules"][0]["config-opts"])
         self.assertIn("--share=network", manifest["finish-args"])
         self.assertNotIn("--filesystem=host", manifest["finish-args"])
         module = manifest["modules"][-1]

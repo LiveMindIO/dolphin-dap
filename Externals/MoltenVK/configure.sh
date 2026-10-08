@@ -15,6 +15,16 @@ CURRENT_VERSION="$3"
 LAST_VERSION=$(cat "$VERSION_PATH" || true)
 
 if ! [ "$LAST_VERSION" = "$3" ]; then
-  $2/fetchDependencies --macos
-  echo $CURRENT_VERSION > $VERSION_PATH
+  # Dependency fetching can fail transiently (for example GitHub DNS on CI).
+  # Never record success until every dependency has been fetched.
+  for attempt in 1 2 3; do
+    if "$2/fetchDependencies" --macos; then
+      echo "$CURRENT_VERSION" > "$VERSION_PATH"
+      exit 0
+    fi
+    if [ "$attempt" = 3 ]; then
+      exit 1
+    fi
+    sleep 10
+  done
 fi

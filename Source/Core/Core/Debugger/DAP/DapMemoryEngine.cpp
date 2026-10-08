@@ -85,16 +85,7 @@ std::optional<T> ParseNumeric(std::string_view text)
   {
     if (text.starts_with('+'))
       text.remove_prefix(1);
-    if (text.empty())
-      return std::nullopt;
-    T result = 0;
-    const auto [ptr, error] =
-        std::from_chars(text.data(), text.data() + text.size(), result, std::chars_format::general);
-    if (error != std::errc{} || ptr != text.data() + text.size())
-      return std::nullopt;
-    if (!std::isfinite(result))
-      return std::nullopt;
-    return result;
+    return Common::ParseFiniteDecimal<T>(text);
   }
   else
   {

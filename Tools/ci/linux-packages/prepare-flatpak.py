@@ -11,6 +11,9 @@ manifest["app-id"] = "io.github.LiveMindIO.DolphinDAP"
 manifest["runtime-version"] = "6.10"
 manifest["command"] = "dolphin-emu"
 manifest["separate-locales"] = False
+# Fedora-based SDKs otherwise default Meson to lib64, outside Flatpak's
+# pkg-config and runtime search paths.
+manifest["modules"][0]["config-opts"].append("--libdir=lib")
 module = manifest["modules"][-1]
 module["config-opts"] = [
     "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_QT=ON", "-DENABLE_NOGUI=ON",

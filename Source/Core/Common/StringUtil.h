@@ -4,6 +4,7 @@
 #pragma once
 
 #include <charconv>
+#include <cmath>
 #include <concepts>
 #include <cstdarg>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <sstream>
@@ -173,6 +175,25 @@ inline auto HexDump(std::span<const u8> data)
 
 namespace Common
 {
+// Strict, locale-independent decimal parsing, including on Apple's libc++ which
+// does not yet provide floating-point from_chars. Callers may strip a leading +.
+template <std::floating_point T>
+std::optional<T> ParseFiniteDecimal(std::string_view text)
+{
+  if (text.empty() || text.starts_with('+'))
+    return std::nullopt;
+  T result = 0;
+  std::istringstream stream{std::string{text}};
+  stream.imbue(std::locale::classic());
+  if (!(stream >> std::noskipws >> result) || !stream.eof() || !std::isfinite(result))
+    return std::nullopt;
+  // Streams may silently round underflow to zero; from_chars rejects it.
+  const auto mantissa = text.substr(0, text.find_first_of("eE"));
+  if (result == 0 && mantissa.find_first_of("123456789") != std::string_view::npos)
+    return std::nullopt;
+  return result;
+}
+
 std::from_chars_result FromChars(std::string_view sv, std::integral auto& value, int base = 10)
 {
   const char* const first = sv.data();

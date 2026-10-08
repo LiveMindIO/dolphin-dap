@@ -7,6 +7,8 @@ jobs=${BUILD_JOBS:-2}
 version=${PACKAGE_VERSION:?numeric package version required}
 case "$format" in
   deb|appimage)
+    # Minimal Ubuntu images exclude locale files even during package installation.
+    printf 'path-include=/usr/share/locale/*\n' > /etc/dpkg/dpkg.cfg.d/zz-dolphin-dap-test
     apt-get update
     apt-get install -y --no-install-recommends build-essential cmake ninja-build pkg-config \
       gettext qt6-base-dev qt6-base-private-dev libqt6svg6-dev libevdev-dev libudev-dev \
@@ -132,6 +134,7 @@ EOF
       > /etc/portage/repos.conf/dolphin-dap.conf
     cp /source/Tools/ci/linux-packages/dolphin-dap.ebuild \
       "/var/db/repos/dolphin-dap/games-emulation/dolphin-dap/dolphin-dap-$version.ebuild"
+    ebuild "/var/db/repos/dolphin-dap/games-emulation/dolphin-dap/dolphin-dap-$version.ebuild" manifest
     mkdir -p /etc/portage/package.accept_keywords
     echo 'games-emulation/dolphin-dap ~amd64' > /etc/portage/package.accept_keywords/dolphin-dap
     FEATURES='buildpkg -sandbox -usersandbox' emerge --usepkg=n "=games-emulation/dolphin-dap-$version"
