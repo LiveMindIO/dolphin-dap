@@ -236,7 +236,7 @@ TEST(ExecutionStateTest, OwnerWaitsForWorkerBeforeStartingReplacementOperation)
       state.BeginOperation(owner, ExecutionOperationKind::SourceStepInto, &cancelled);
   ASSERT_TRUE(operation.has_value());
 
-  std::jthread canceller([&] {
+  std::thread canceller([&] {
     cancellation_succeeded.store(state.CancelActiveStepAndWait(owner).has_value());
     cancellation_finished.store(true);
   });

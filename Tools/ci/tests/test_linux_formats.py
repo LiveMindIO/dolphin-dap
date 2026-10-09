@@ -100,6 +100,7 @@ class NativeFormatTests(unittest.TestCase):
         self.assertIn("rpmbuild -bb", script)
         self.assertIn("BINPKG_FORMAT=\"gpkg\"", script)
         self.assertIn("emerge --usepkgonly", script)
+        self.assertIn("src_prepare() { default; }", (SCRIPTS / "dolphin-dap.ebuild").read_text())
         self.assertLess(script.index('" manifest'), script.index("FEATURES='buildpkg"))
         self.assertLess(script.index("path-include=/usr/share/locale/*"), script.index("dpkg -i"))
 

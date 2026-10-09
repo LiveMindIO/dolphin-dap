@@ -180,7 +180,10 @@ namespace Common
 template <std::floating_point T>
 std::optional<T> ParseFiniteDecimal(std::string_view text)
 {
-  if (text.empty() || text.starts_with('+'))
+  // MSVC's stream parser accepts hexadecimal floats even without std::hexfloat.
+  // Limit the alphabet to decimal syntax before invoking any platform parser.
+  if (text.empty() || text.starts_with('+') ||
+      text.find_first_not_of("-+0123456789.eE") != std::string_view::npos)
     return std::nullopt;
   T result = 0;
   std::istringstream stream{std::string{text}};

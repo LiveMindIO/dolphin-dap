@@ -11,7 +11,7 @@ RDEPEND="dev-qt/qtbase:6 dev-qt/qtsvg:6 dev-libs/libevdev virtual/libudev
  !games-emulation/dolphin"
 S="${WORKDIR}"
 src_unpack() { :; }
-src_prepare() { :; }
+src_prepare() { default; }
 src_configure() { :; }
 src_compile() { :; }
 src_install() {
