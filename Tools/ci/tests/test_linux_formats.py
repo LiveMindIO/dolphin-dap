@@ -16,6 +16,24 @@ SCRIPTS = ROOT / "Tools/ci/linux-packages"
 
 
 class NativeFormatTests(unittest.TestCase):
+    def test_macos_bundle_fixup_searches_homebrew_and_bundled_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "BundleUtilities.cmake").write_text(
+                'function(fixup_bundle app libs dirs)\n'
+                '  file(WRITE "${DOLPHIN_BUNDLE_PATH}/search-paths" "${dirs}")\n'
+                'endfunction()\n')
+            paths = "/opt/homebrew/lib;/opt/homebrew/opt/qt/lib;" + str(root / "Contents/Frameworks")
+            subprocess.run(["cmake", "-DCMAKE_MODULE_PATH=" + str(root),
+                            "-DDOLPHIN_BUNDLE_PATH=" + str(root),
+                            "-DDOLPHIN_BUNDLE_LIBRARY_DIRS=" + paths, "-P",
+                            str(ROOT / "CMake/DolphinPostprocessBundle.cmake")],
+                           check=True, capture_output=True)
+            self.assertEqual((root / "search-paths").read_text().split(";"),
+                             ["/usr/local/lib", "/lib", "/usr/lib", *paths.split(";")])
+        script = (ROOT / "Tools/ci/package-macos.sh").read_text()
+        self.assertIn("-DDOLPHIN_BUNDLE_LIBRARY_DIRS=$(brew --prefix)/lib", script)
+
     def test_moltenvk_fetch_retries_and_records_only_success(self):
         for succeeds in (True, False):
             with self.subTest(succeeds=succeeds), tempfile.TemporaryDirectory() as directory:

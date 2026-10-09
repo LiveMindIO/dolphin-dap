@@ -27,7 +27,9 @@ cp -R "$root/LICENSES" "$app/Contents/Resources/"
 "$(brew --prefix qt)/bin/macdeployqt" "$app" \
   "-executable=$app/Contents/MacOS/dolphin-emu-nogui" \
   "-executable=$app/Contents/MacOS/dolphin-tool" -always-overwrite
-cmake "-DDOLPHIN_BUNDLE_PATH=$app" -P "$root/CMake/DolphinPostprocessBundle.cmake"
+cmake "-DDOLPHIN_BUNDLE_PATH=$app" \
+  "-DDOLPHIN_BUNDLE_LIBRARY_DIRS=$(brew --prefix)/lib;$(brew --prefix qt)/lib;$app/Contents/Frameworks" \
+  -P "$root/CMake/DolphinPostprocessBundle.cmake"
 entitlements="$root/Source/Core/DolphinQt/DolphinEmu.entitlements"
 for binary in dolphin-emu-nogui dolphin-tool; do
   bash "$root/Tools/mac-codesign.sh" -e "$entitlements" - "$app/Contents/MacOS/$binary"
