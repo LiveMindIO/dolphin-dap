@@ -175,6 +175,13 @@ inline auto HexDump(std::span<const u8> data)
 
 namespace Common
 {
+namespace detail
+{
+bool ParseDecimal(std::string_view text, float* result);
+bool ParseDecimal(std::string_view text, double* result);
+bool ParseDecimal(std::string_view text, long double* result);
+}  // namespace detail
+
 // Strict, locale-independent decimal parsing, including on Apple's libc++ which
 // does not yet provide floating-point from_chars. Callers may strip a leading +.
 template <std::floating_point T>
@@ -186,9 +193,7 @@ std::optional<T> ParseFiniteDecimal(std::string_view text)
       text.find_first_not_of("-+0123456789.eE") != std::string_view::npos)
     return std::nullopt;
   T result = 0;
-  std::istringstream stream{std::string{text}};
-  stream.imbue(std::locale::classic());
-  if (!(stream >> std::noskipws >> result) || !stream.eof() || !std::isfinite(result))
+  if (!detail::ParseDecimal(text, &result) || !std::isfinite(result))
     return std::nullopt;
   // Streams may silently round underflow to zero; from_chars rejects it.
   const auto mantissa = text.substr(0, text.find_first_of("eE"));

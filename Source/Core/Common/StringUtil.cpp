@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cerrno>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -35,6 +36,10 @@ constexpr u32 CODEPAGE_WINDOWS_1252 = 1252;
 #include <cerrno>
 #include <iconv.h>
 #include <locale.h>
+#endif
+
+#ifdef __APPLE__
+#include <xlocale.h>
 #endif
 
 #if !defined(_WIN32) && !defined(ANDROID) && !defined(__HAIKU__) && !defined(__OpenBSD__) &&       \
@@ -869,6 +874,62 @@ std::string PathToString(const std::filesystem::path& path)
 
 namespace Common
 {
+namespace detail
+{
+template <typename T>
+static bool ParseDecimalImpl(std::string_view text, T* result)
+{
+#if defined(_WIN32)
+  static const _locale_t locale = _create_locale(LC_ALL, "C");
+  if (!locale)
+    return false;
+  const std::string input{text};
+  char* end = nullptr;
+  errno = 0;
+  if constexpr (std::is_same_v<T, float>)
+    *result = _strtof_l(input.c_str(), &end, locale);
+  else
+    *result = _strtod_l(input.c_str(), &end, locale);
+  return end == input.c_str() + input.size() && (errno == 0 || errno == ERANGE);
+#elif !defined(ANDROID) && !defined(__HAIKU__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
+  // libc++ streams report failbit for representable subnormals. The C locale
+  // functions let us distinguish those (ERANGE + nonzero) from underflow to zero.
+  const auto locale = GetCLocale();
+  if (!locale)
+    return false;
+  const std::string input{text};
+  char* end = nullptr;
+  errno = 0;
+  if constexpr (std::is_same_v<T, float>)
+    *result = strtof_l(input.c_str(), &end, locale);
+  else if constexpr (std::is_same_v<T, double>)
+    *result = strtod_l(input.c_str(), &end, locale);
+  else
+    *result = strtold_l(input.c_str(), &end, locale);
+  return end == input.c_str() + input.size() && (errno == 0 || errno == ERANGE);
+#else
+  std::istringstream stream{std::string{text}};
+  stream.imbue(std::locale::classic());
+  return static_cast<bool>(stream >> std::noskipws >> *result) && stream.eof();
+#endif
+}
+
+bool ParseDecimal(std::string_view text, float* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+
+bool ParseDecimal(std::string_view text, double* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+
+bool ParseDecimal(std::string_view text, long double* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+}  // namespace detail
+
 #ifdef _WIN32
 std::vector<std::string> CommandLineToUtf8Argv(const wchar_t* command_line)
 {

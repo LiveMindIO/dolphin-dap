@@ -132,6 +132,7 @@ class FlatpakManifestTests(unittest.TestCase):
         self.assertEqual(manifest["runtime-version"], "6.10")
         self.assertFalse(manifest["separate-locales"])
         self.assertIn("--libdir=lib", manifest["modules"][0]["config-opts"])
+        self.assertTrue(manifest["modules"][0]["sources"][0]["url"].startswith("https://deb.debian.org/"))
         self.assertIn("--share=network", manifest["finish-args"])
         self.assertNotIn("--filesystem=host", manifest["finish-args"])
         module = manifest["modules"][-1]

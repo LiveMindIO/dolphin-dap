@@ -14,6 +14,14 @@ manifest["separate-locales"] = False
 # Fedora-based SDKs otherwise default Meson to lib64, outside Flatpak's
 # pkg-config and runtime search paths.
 manifest["modules"][0]["config-opts"].append("--libdir=lib")
+# The upstream host intermittently blocks CI downloads (HTTP 418). Use Debian's
+# immutable source archive; documentation is excluded and disabled below.
+manifest["modules"][0]["sources"] = [{
+    "type": "archive",
+    "url": "https://deb.debian.org/debian/pool/main/libe/libevdev/"
+           "libevdev_1.13.6+dfsg.orig.tar.xz",
+    "sha256": "6643222f13cfbead0e30b8b74600f6d335f6ebb1ad8cbaf85783e36886689071",
+}]
 module = manifest["modules"][-1]
 module["config-opts"] = [
     "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_QT=ON", "-DENABLE_NOGUI=ON",

@@ -19,6 +19,8 @@ TEST(StringUtil, ParseFiniteDecimal)
   EXPECT_TRUE(std::signbit(*zero));
   EXPECT_EQ(Common::ParseFiniteDecimal<float>("1.40129846e-45"),
             std::numeric_limits<float>::denorm_min());
+  EXPECT_EQ(Common::ParseFiniteDecimal<double>("4.9406564584124654e-324"),
+            std::numeric_limits<double>::denorm_min());
   for (const char* text : {"", " 1", "1 ", "+1", "1,5", "0x1p0", "-0X1P2", "nan", "inf", "1e999",
                            "1e-999", "1e", "1.5suffix"})
   {
