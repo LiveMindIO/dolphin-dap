@@ -1,7 +1,8 @@
 # Annals index
 
-Reverse chronological. Recording branch: `feature/gui-source-debugger`; recording HEAD: `8297b5057d14ba208a74dd152e971e2efdbed613`; nearest describe: `5.0-25544-g8297b5057d`.
+Reverse chronological. Recording branch: `dolphin-dap-slippi`; recording HEAD: `764647ad2ee8cb0820225c2a75fed8f2e10f43b4`; nearest describe: `v1.0.1+upstream-f87e849-568-g764647ad2e`.
 
+- [2026-10-10: Merge master into the Slippi fork while retaining Slippi behavior](2026-10-10-merge-master-into-slippi.md) - implemented - Slippi/master integration and fork behavior preservation - `764647ad2ee8cb0820225c2a75fed8f2e10f43b4`.
 - [2026-10-05: Source-step interruption guards and temporary step-over breakpoint classification](2026-10-05-source-step-interruption-and-temporary-step-over-classification.md) — proposed — Source-row destination predicates, temporary step-over classification — open findings at `8297b5057d`.
 - [2026-10-05: Step-out return-destination breakpoint evaluation (implemented)](2026-10-05-stepout-return-destination-fix.md) — implemented — DAP/Qt step-out destination predicates — `8297b5057d`.
 - [2026-10-05: Step-out skips evaluation of the breakpoint at its return destination](2026-10-05-stepout-return-destination-breakpoint-gap.md) — implemented — DAP/Qt step-out destination predicates — finding at `88a5ddc3b9`; fixed in `8297b5057d`.
