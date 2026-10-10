@@ -135,7 +135,7 @@ protected:
     {
       auto device = std::make_unique<CountingSIDevice>(*m_system, i);
       m_devices[i] = device.get();
-      si.ChangeDevice(SerialInterface::SIDEVICE_GC_CONTROLLER, i);
+      Config::SetCurrent(Config::GetInfoForSIDevice(i), SerialInterface::SIDEVICE_GC_CONTROLLER);
       si.AddDevice(std::move(device));
     }
 
@@ -175,7 +175,7 @@ protected:
     m_mapping.reset();
     for (int i = 0; i < SerialInterface::MAX_SI_CHANNELS; ++i)
     {
-      m_system->GetSerialInterface().ChangeDevice(SerialInterface::SIDEVICE_NONE, i);
+      Config::SetCurrent(Config::GetInfoForSIDevice(i), SerialInterface::SIDEVICE_NONE);
       m_system->GetSerialInterface().RemoveDevice(i);
     }
     if (m_initialized_controller_interface)

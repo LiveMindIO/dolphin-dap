@@ -15,7 +15,6 @@
 
 #include <fmt/format.h>
 
-#include "Common/Event.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/StringUtil.h"
@@ -23,6 +22,8 @@
 #include "Core/Core.h"
 #include "Core/Debugger/DAP/DapJson.h"
 #include "Core/Debugger/PPCDebugInterface.h"
+#include "Core/Debugger/PPCStack.h"
+#include "Core/Debugger/PPCStepping.h"
 #include "Core/HW/AddressSpace.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
@@ -73,28 +74,14 @@ constexpr std::optional<u32> MakeBranchInstruction(u32 pc, u32 target)
 
 constexpr std::array<u8, 4> BigEndianBytes(u32 word)
 {
-  return {static_cast<u8>(word >> 24), static_cast<u8>(word >> 16),
-          static_cast<u8>(word >> 8), static_cast<u8>(word)};
+  return {static_cast<u8>(word >> 24), static_cast<u8>(word >> 16), static_cast<u8>(word >> 8),
+          static_cast<u8>(word)};
 }
 
 constexpr u32 ReadBigEndianU32(std::span<const u8> bytes)
 {
   return (static_cast<u32>(bytes[0]) << 24) | (static_cast<u32>(bytes[1]) << 16) |
          (static_cast<u32>(bytes[2]) << 8) | static_cast<u32>(bytes[3]);
-}
-
-bool WillInstructionReturn(Core::System& system, UGeckoInstruction inst)
-{
-  if (inst.hex == 0x4C000064u)
-    return true;
-
-  const auto& ppc_state = system.GetPPCState();
-  const bool counter =
-      (inst.BO_2 >> 2 & 1) != 0 || (CTR(ppc_state) != 0) != ((inst.BO_2 >> 1 & 1) != 0);
-  const bool condition =
-      inst.BO_2 >> 4 != 0 || ppc_state.cr.GetBit(inst.BI_2) == (inst.BO_2 >> 3 & 1);
-  const bool is_bclr = inst.OPCD_7 == 0b010011 && inst.XO == 16;
-  return is_bclr && counter && condition && !inst.LK_3;
 }
 
 std::string DescribeExceptions(u32 exceptions)
@@ -134,188 +121,233 @@ std::string DescribeExceptions(u32 exceptions)
 }
 }  // namespace
 
-DapDebugController::DapDebugController(Core::System& system) : m_system(system)
+DapDebugController::DapDebugController(Core::System& system)
+    : m_system(system),
+      m_breakpoint_client_id(system.GetPowerPC().GetBreakPoints().RegisterClient()),
+      m_memcheck_client_id(system.GetPowerPC().GetMemChecks().RegisterClient()),
+      m_execution_client_id(system.GetCPU().GetExecutionState().RegisterClient()),
+      m_variables(system, m_execution_client_id)
 {
 }
 
-void DapDebugController::Continue()
+DapDebugController::~DapDebugController()
 {
+  m_system.GetPowerPC().GetBreakPoints().UnregisterClient(m_breakpoint_client_id);
+  m_system.GetPowerPC().GetMemChecks().UnregisterClient(m_memcheck_client_id);
+  m_system.GetCPU().GetExecutionState().UnregisterClient(m_execution_client_id);
+}
+
+std::expected<void, std::string> DapDebugController::Continue()
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation = execution.BeginOperation(m_execution_client_id,
+                                                  Core::Debug::ExecutionOperationKind::Continue);
+  if (!operation)
+    return std::unexpected(operation.error());
+  m_system.GetPowerPC().ClearSteppingMemcheckHit();
   Core::SetState(m_system, Core::State::Running);
+  if (Core::GetState(m_system) != Core::State::Running)
+  {
+    execution.AbandonStep(*operation);
+    return std::unexpected("core did not resume");
+  }
+  return execution.PublishContinued(m_execution_client_id, *operation, m_system.GetPPCState().pc);
 }
 
-void DapDebugController::Pause()
+std::expected<void, std::string> DapDebugController::Pause()
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Pause);
+  if (!operation)
+    return std::unexpected(operation.error());
+  Core::SetState(m_system, Core::State::Paused);
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::UserPause,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = m_system.GetPPCState().pc});
+  return {};
+}
+
+std::expected<void, std::string> DapDebugController::CancelActiveStep()
+{
+  return m_system.GetCPU().GetExecutionState().CancelActiveStep(m_execution_client_id);
+}
+
+void DapDebugController::PauseWithoutEvent()
 {
   Core::SetState(m_system, Core::State::Paused);
 }
 
+void DapDebugController::PublishEntryStop()
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Entry);
+  if (operation)
+    m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Entry,
+                             .origin = m_execution_client_id,
+                             .operation_id = *operation,
+                             .pc = m_system.GetPPCState().pc});
+}
+
+void DapDebugController::SetExecutionEventCallback(
+    Core::Debug::ExecutionState::EventCallback callback)
+{
+  m_system.GetCPU().GetExecutionState().SetClientEventCallback(m_execution_client_id,
+                                                               std::move(callback));
+}
+
+std::expected<Core::Debug::ExecutionState::OperationId, std::string>
+DapDebugController::BeginStep(const Core::Debug::ExecutionOperationKind kind,
+                              std::atomic<bool>* const cancellation)
+{
+  return m_system.GetCPU().GetExecutionState().BeginOperation(m_execution_client_id, kind,
+                                                              cancellation);
+}
+
+void DapDebugController::PublishStepContinued(
+    const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  static_cast<void>(m_system.GetCPU().GetExecutionState().PublishContinued(
+      m_execution_client_id, operation_id, m_system.GetPPCState().pc));
+}
+
+void DapDebugController::CompleteStep(const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  if (!execution.IsOperationActive(operation_id))
+    return;
+  const u32 pc = m_system.GetPPCState().pc;
+  // Actual breakpoint hits publish their own stop and retire the operation. A breakpoint
+  // merely existing at the destination does not turn normal step completion into a hit.
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Step,
+                           .origin = m_execution_client_id,
+                           .operation_id = operation_id,
+                           .pc = pc});
+}
+
+void DapDebugController::AbandonStep(const Core::Debug::ExecutionState::OperationId operation_id)
+{
+  m_system.GetCPU().GetExecutionState().AbandonStep(operation_id);
+}
+
 bool DapDebugController::StepInto()
 {
-  auto& cpu = m_system.GetCPU();
-  // DESNOTE(jbarber, 2026-07-21): When the core isn't stepping (paused
-  // already, or never started), SingleStep is a no-op. Return true so the
-  // session emits a stopped event — the core IS stopped, after all. The
-  // false return is reserved for the async path where StepOpcode timed
-  // out without the CPU thread acknowledging: in that case the PC hasn't
-  // advanced and a stopped/step event would be a lie.
-  if (!cpu.IsStepping())
-    return true;
-
-  auto& power_pc = m_system.GetPowerPC();
-  if (Core::IsCPUThread())
-  {
-    Core::CPUThreadGuard guard(m_system);
-    const PowerPC::CoreMode old_mode = power_pc.GetMode();
-    power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-    power_pc.SingleStep();
-    power_pc.SetMode(old_mode);
-    return true;
-  }
-
-  Common::Event sync_event;
-  const PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-  cpu.StepOpcode(&sync_event);
-  // DESNOTE(jbarber, 2026-07-21): Wait for the CPU thread to ack the step
-  // rather than bail after 20ms. The previous 20ms timeout was chosen so
-  // the session thread wouldn't block when the CPU was mid-block or under
-  // load, returning false and instructing the caller NOT to emit a
-  // stopped event. But PollBreakpointStop can't observe the late
-  // completion -- it only emits stops on a not-stepping->stepping
-  // transition, and after Pause/SyncSteppingBaseline the core is already
-  // stepping=true with no further state change. The step's late
-  // completion sets sync_event silently and the client hangs waiting for
-  // a stop that never arrives (Bugbot: "Step timeout drops stopped
-  // event"). Bumping to 2s keeps the session responsive while covering
-  // the realistic range of CPU-thread step ack latency; if the ack truly
-  // never arrives (deadlock), no stop is emitted and the client will at
-  // worst time out itself rather than hang on a phantom in-flight step.
-  const bool completed = sync_event.WaitFor(std::chrono::seconds(2));
-  power_pc.SetMode(old_mode);
-  return completed;
+  return Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Into,
+                              Core::Debug::PPCStepGranularity::Instruction) !=
+         Core::Debug::PPCStepResult::NotStepped;
 }
 
-StepOverResult DapDebugController::StepOver()
+StepOverResult DapDebugController::StepOver(
+    const std::optional<Core::Debug::ExecutionState::OperationId> operation_id)
 {
-  auto& cpu = m_system.GetCPU();
-  if (!cpu.IsStepping())
+  Core::Debug::PPCStepOptions options;
+  if (operation_id)
+  {
+    options.temporary_breakpoint_installed = [this, operation = *operation_id](const u32 address) {
+      Core::System* const system = &m_system;
+      auto cleanup = [system, address] {
+        system->GetPowerPC().GetBreakPoints().ClearTemporary(address);
+      };
+      if (!m_system.GetCPU().GetExecutionState().SetActiveStepCleanup(operation, cleanup))
+        cleanup();
+    };
+  }
+  switch (Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Over,
+                               Core::Debug::PPCStepGranularity::Instruction, options))
+  {
+  case Core::Debug::PPCStepResult::Stepped:
     return StepOverResult::Stepped;
-
-  const UGeckoInstruction inst = [&] {
-    Core::CPUThreadGuard guard(m_system);
-    return PowerPC::MMU::HostRead_Instruction(guard, m_system.GetPPCState().pc);
-  }();
-
-  if (inst.LK)
-  {
-    auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
-    breakpoints.SetTemporary(m_system.GetPPCState().pc + 4);
-    cpu.SetStepping(false);
+  case Core::Debug::PPCStepResult::Continuing:
     return StepOverResult::Continuing;
+  case Core::Debug::PPCStepResult::NotStepped:
+    return StepOverResult::NotStepped;
   }
-
-  // DESNOTE(jbarber, 2026-07-21): Propagate StepInto's failure rather than
-  // unconditionally report Stepped. StepInto returns false when the async
-  // StepOpcode path timed out without the CPU thread acknowledging -- in
-  // that case the PC has not advanced. The session handler mirrors the
-  // stepIn guard (suppress the stopped event on false), so a `next` whose
-  // underlying single-step didn't complete no longer emits a spurious
-  // stopped/"step" event for a PC that didn't move.
-  const bool stepped = StepInto();
-  return stepped ? StepOverResult::Stepped : StepOverResult::NotStepped;
+  return StepOverResult::NotStepped;
 }
 
-void DapDebugController::StepOut(std::chrono::milliseconds timeout_ms)
+Core::Debug::PPCStepResult DapDebugController::StepSource(const bool step_over,
+                                                          const std::atomic<bool>& cancelled,
+                                                          const std::chrono::milliseconds timeout,
+                                                          const size_t instruction_cap)
 {
-  auto& cpu = m_system.GetCPU();
-  if (!cpu.IsStepping())
-    return;
-
-  using clock = std::chrono::steady_clock;
-  const clock::time_point timeout = clock::now() + timeout_ms;
-
-  auto& power_pc = m_system.GetPowerPC();
-  auto& ppc_state = power_pc.GetPPCState();
-  Core::CPUThreadGuard guard(m_system);
-
-  const PowerPC::CoreMode old_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
-
-  UGeckoInstruction inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-  do
-  {
-    if (WillInstructionReturn(m_system, inst))
-    {
-      power_pc.SingleStep();
-      break;
-    }
-
-    if (inst.LK)
-    {
-      const u32 next_pc = ppc_state.pc + 4;
-      do
-      {
-        power_pc.SingleStep();
-      } while (ppc_state.pc != next_pc && clock::now() < timeout && !power_pc.CheckBreakPoints());
-    }
-    else
-    {
-      power_pc.SingleStep();
-    }
-
-    inst = PowerPC::MMU::HostRead_Instruction(guard, ppc_state.pc);
-  } while (clock::now() < timeout && !power_pc.CheckBreakPoints());
-
-  power_pc.SetMode(old_mode);
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+  options.timeout = timeout;
+  options.instruction_cap = instruction_cap;
+  return Core::Debug::StepPPC(
+      m_system, step_over ? Core::Debug::PPCStepMode::Over : Core::Debug::PPCStepMode::Into,
+      Core::Debug::PPCStepGranularity::SourceRow, options);
 }
 
-void DapDebugController::ApplyCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
+Core::Debug::PPCStepResult DapDebugController::StepOut(const std::atomic<bool>& cancelled,
+                                                       std::chrono::milliseconds timeout_ms)
 {
-  auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
-  breakpoint_manager.Clear();
+  Core::Debug::PPCStepOptions options;
+  options.cancelled = &cancelled;
+  options.timeout = timeout_ms;
+  return Core::Debug::StepPPC(m_system, Core::Debug::PPCStepMode::Out,
+                              Core::Debug::PPCStepGranularity::Instruction, options);
+}
+
+std::vector<BreakPoints::CodeBreakpoint>
+DapDebugController::ConvertCodeBreakpoints(const std::vector<CodeBreakpointRequest>& breakpoints)
+{
+  std::vector<BreakPoints::CodeBreakpoint> converted;
+  converted.reserve(breakpoints.size());
   for (const CodeBreakpointRequest& request : breakpoints)
   {
-    std::optional<Expression> condition;
+    BreakPoints::CodeBreakpoint breakpoint;
+    breakpoint.address = request.address;
     if (request.condition && !request.condition->empty())
-      condition = Expression::TryParse(*request.condition);
-
-    breakpoint_manager.Add(request.address, true, false, std::move(condition));
+    {
+      if (const std::optional<Expression> condition = Expression::TryParse(*request.condition))
+        breakpoint.condition = condition->GetText();
+    }
+    converted.push_back(std::move(breakpoint));
   }
-}
-
-void DapDebugController::ReapplyCodeBreakpoints()
-{
-  std::vector<CodeBreakpointRequest> breakpoints;
-  for (const auto& [_, source_breakpoints] : m_source_breakpoints)
-  {
-    breakpoints.insert(breakpoints.end(), source_breakpoints.begin(), source_breakpoints.end());
-  }
-  breakpoints.insert(breakpoints.end(), m_instruction_breakpoints.begin(),
-                     m_instruction_breakpoints.end());
-  ApplyCodeBreakpoints(breakpoints);
+  return converted;
 }
 
 void DapDebugController::SetCodeBreakpoints(std::vector<CodeBreakpointRequest> breakpoints)
 {
-  m_source_breakpoints.clear();
-  m_instruction_breakpoints.clear();
-  ApplyCodeBreakpoints(breakpoints);
+  UpdateInstructionBreakpoints(std::move(breakpoints));
 }
 
-std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
-    const SourceBreakpointContext& context, const u32 line)
+void DapDebugController::SetBreakpointEventCallback(BreakPoints::EventCallback callback)
+{
+  m_system.GetPowerPC().GetBreakPoints().SetClientEventCallback(m_breakpoint_client_id,
+                                                                std::move(callback));
+}
+
+void DapDebugController::SetDataBreakpointEventCallback(MemChecks::EventCallback callback)
+{
+  m_system.GetPowerPC().GetMemChecks().SetClientEventCallback(m_memcheck_client_id,
+                                                              std::move(callback));
+}
+
+std::optional<u32>
+DapDebugController::ResolveSourceLineBreakpoint(const SourceBreakpointContext& context,
+                                                const u32 line)
 {
   Core::CPUThreadGuard guard(m_system);
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
+  bool is_file_reference = false;
 
   if (symbol_db.HasSourceLineInfo())
   {
-    if (context.source_reference && *context.source_reference > 0)
+    if (context.source_id)
+      return symbol_db.GetLineAddress(*context.source_id - 1, line);
+
+    if (context.source_reference)
     {
       const auto& files = symbol_db.GetSourceFiles();
-      if (static_cast<size_t>(*context.source_reference) <= files.size())
+      if (*context.source_reference <= files.size())
       {
+        is_file_reference = true;
         if (const std::optional<u32> address =
-                symbol_db.GetLineAddress(files[*context.source_reference - 1], line))
+                symbol_db.GetLineAddress(static_cast<u32>(*context.source_reference - 1), line))
           return address;
       }
     }
@@ -335,8 +367,17 @@ std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
     }
   }
 
+  if (is_file_reference)
+    return std::nullopt;
+
   std::optional<u32> base;
-  if (context.source_path)
+  if (context.source_reference)
+  {
+    base = DecodeDisassemblySourceReference(*context.source_reference);
+    if (!base && *context.source_reference <= std::numeric_limits<u32>::max())
+      base = static_cast<u32>(*context.source_reference);
+  }
+  if (!base && context.source_path)
     base = Json::ParseHexAddress(*context.source_path);
   if (!base && context.source_name)
     base = Json::ParseHexAddress(*context.source_name);
@@ -347,7 +388,9 @@ std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
   // produces a non-resolvable nullopt rather than silently wrapping past
   // u32 max and installing a breakpoint at a nonsense PC. Mirrors the same
   // guard in ParseSetBreakpoints. Bugbot #63.
-  const u64 effective = static_cast<u64>(*base) + static_cast<u64>(line) * 4ull;
+  if (line == 0)
+    return std::nullopt;
+  const u64 effective = static_cast<u64>(*base) + (static_cast<u64>(line) - 1ull) * 4ull;
   if (effective > static_cast<u64>(std::numeric_limits<u32>::max()))
     return std::nullopt;
   return static_cast<u32>(effective);
@@ -355,8 +398,10 @@ std::optional<u32> DapDebugController::ResolveSourceLineBreakpoint(
 
 std::vector<std::optional<u32>> DapDebugController::UpdateSourceBreakpoints(
     const std::string_view source_key, const SourceBreakpointContext& context,
-    std::vector<SourceBreakpointSpec> breakpoints)
+    std::vector<SourceBreakpointSpec> breakpoints, std::string* error)
 {
+  if (error)
+    error->clear();
   std::vector<CodeBreakpointRequest> resolved;
   resolved.reserve(breakpoints.size());
 
@@ -376,49 +421,34 @@ std::vector<std::optional<u32>> DapDebugController::UpdateSourceBreakpoints(
     resolved.push_back(std::move(request));
   }
 
-  if (resolved.empty())
-    m_source_breakpoints.erase(std::string(source_key));
-  else
-    m_source_breakpoints[std::string(source_key)] = std::move(resolved);
-
-  ReapplyCodeBreakpoints();
+  auto& breakpoint_manager = m_system.GetPowerPC().GetBreakPoints();
+  const auto result = breakpoint_manager.ReplaceClientSourceBreakpoints(
+      m_breakpoint_client_id, std::string(source_key), ConvertCodeBreakpoints(resolved));
+  if (!result)
+  {
+    if (error)
+      *error = result.error();
+  }
   return addresses;
 }
 
-void DapDebugController::UpdateInstructionBreakpoints(
-    std::vector<CodeBreakpointRequest> breakpoints)
+bool DapDebugController::UpdateInstructionBreakpoints(
+    std::vector<CodeBreakpointRequest> breakpoints, std::string* error)
 {
-  m_instruction_breakpoints = std::move(breakpoints);
-  ReapplyCodeBreakpoints();
+  if (error)
+    error->clear();
+  const auto result = m_system.GetPowerPC().GetBreakPoints().ReplaceClientInstructionBreakpoints(
+      m_breakpoint_client_id, ConvertCodeBreakpoints(breakpoints));
+  if (!result && error)
+    *error = result.error();
+  return result.has_value();
 }
 
-void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
+std::expected<void, std::string>
+DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> breakpoints)
 {
-  // DESNOTE(jbarber, 2026-07-21): Dolphin has a single global memcheck store
-  // tied to the one emulated PPC core, so installing this client's list
-  // replaces the global set. Concurrent DAP clients on the same core (a rare
-  // multi-client setup) will clobber each other's watchpoints here; DAP and
-  // GDB are mutually exclusive, and the typical flow is one client per core.
-  // DESNOTE(jbarber, 2026-07-26): memchecks.Clear() also wipes freeze memchecks
-  // installed by dolphin_freeze. Clear m_freezes so a later RemoveFreeze /
-  // dolphin_unfreeze safely returns false instead of calling
-  // MemChecks::Remove at a stale address and deleting an unrelated data
-  // watchpoint at the same address. The session's m_watch_to_freeze map
-  // becomes stale (freeze_ids no longer in m_freezes), but HandleUnfreeze
-  // and HandleRealtimeWatchCancel both handle RemoveFreeze returning false
-  // gracefully. The RealtimeWatchSampler's field-rate Tick remains as a
-  // fallback, so the frozen value is still restored on DMA drift — only the
-  // MMU-level CPU write suppression is lost (collateral damage of the global
-  // memcheck store being wiped). Bugbot #77.
-  // DESNOTE(jbarber, 2026-07-26): Clear() and Add() each take their own
-  // CPUThreadGuard. Since the DAP session runs on the CPU thread (declared
-  // via DeclareAsCPUThread), these guards are no-ops — the core isn't
-  // unpaused between calls. On a non-CPU thread, there would be a brief
-  // window with no memchecks between Clear and Add, but that doesn't apply
-  // here. Bugbot #80.
-  auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-  memchecks.Clear();
-  m_freezes.clear();
+  std::vector<MemChecks::MemoryBreakpoint> converted;
+  converted.reserve(breakpoints.size());
   for (const DataBreakpointRequest& request : breakpoints)
   {
     const u32 length = request.length == 0 ? 1 : request.length;
@@ -429,22 +459,29 @@ void DapDebugController::SetDataBreakpoints(std::vector<DataBreakpointRequest> b
                         std::numeric_limits<u32>::max() :
                         request.address + (length - 1u);
 
-    TMemCheck check;
+    MemChecks::MemoryBreakpoint check;
     check.start_address = request.address;
     check.end_address = end;
     // DESNOTE(jbarber, 2026-07-21): Dolphin's TMemCheck distinguishes single-
     // byte vs ranged checks; DAP data breakpoints default to one byte, but a
     // client may pass `length` (a Dolphin extension) to watch a region.
-    check.is_ranged = (length > 1);
     check.is_break_on_read = request.read;
     check.is_break_on_write = request.write;
     check.break_on_hit = true;
     check.log_on_hit = false;
     check.is_enabled = true;
     if (request.condition && !request.condition->empty())
-      check.condition = Expression::TryParse(*request.condition);
-    memchecks.Add(std::move(check));
+    {
+      const auto condition = Expression::TryParse(*request.condition);
+      if (!condition)
+        return std::unexpected(
+            fmt::format("invalid data breakpoint condition: {}", *request.condition));
+      check.condition = condition->GetText();
+    }
+    converted.push_back(std::move(check));
   }
+  return m_system.GetPowerPC().GetMemChecks().ReplaceClientBreakpoints(m_memcheck_client_id,
+                                                                       std::move(converted));
 }
 
 std::optional<std::string> DapDebugController::EvaluateExpression(const std::string_view expression)
@@ -453,8 +490,13 @@ std::optional<std::string> DapDebugController::EvaluateExpression(const std::str
   if (!parsed)
     return std::nullopt;
 
-  Core::CPUThreadGuard guard(m_system);
-  const double value = parsed->Evaluate(m_system);
+  double value;
+  {
+    Core::CPUThreadGuard guard(m_system);
+    value = parsed->Evaluate(m_system);
+  }
+  if (parsed->MayWriteState())
+    m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id);
   if (value == std::trunc(value) && value >= 0 && value <= 0xffffffff)
     return fmt::format("0x{:08x}", static_cast<u32>(value));
 
@@ -478,6 +520,44 @@ RegisterSnapshot DapDebugController::GetRegisters()
   return snapshot;
 }
 
+std::vector<DebugVariable> DapDebugController::GetDebugVariables(const bool globals)
+{
+  return m_variables.GetVariables(globals ? Core::Debug::PPCVariableScope::Globals :
+                                            Core::Debug::PPCVariableScope::Locals);
+}
+
+std::vector<DebugVariable>
+DapDebugController::GetDebugVariableChildren(const DebugValueContext& context)
+{
+  auto result = m_variables.GetChildren(context);
+  return result ? std::move(*result) : std::vector<DebugVariable>{};
+}
+
+std::expected<DebugVariable, std::string>
+DapDebugController::SetDebugVariable(const bool globals, const std::string_view name,
+                                     const std::string_view value)
+{
+  return m_variables.SetValue(globals ? Core::Debug::PPCVariableScope::Globals :
+                                        Core::Debug::PPCVariableScope::Locals,
+                              name, value);
+}
+
+std::expected<DebugVariable, std::string>
+DapDebugController::SetDebugVariableChild(const DebugValueContext& context,
+                                          const std::string_view name, const std::string_view value)
+{
+  auto children = m_variables.GetChildren(context);
+  if (!children)
+    return std::unexpected(children.error());
+  const auto it = std::ranges::find(*children, name, &DebugVariable::name);
+  if (it == children->end() || !it->write_context)
+    return std::unexpected("variable is not writable");
+  auto result = m_variables.SetValue(*it->write_context, value);
+  if (result)
+    result->name = it->name;
+  return result;
+}
+
 std::optional<u32> DapDebugController::SetRegister(const int variables_reference,
                                                    const std::string_view name,
                                                    const std::string_view value_text)
@@ -486,54 +566,39 @@ std::optional<u32> DapDebugController::SetRegister(const int variables_reference
   if (!value)
     return std::nullopt;
 
-  Core::CPUThreadGuard guard(m_system);
-  auto& ppc_state = m_system.GetPPCState();
-
-  if (variables_reference == REGISTERS_SCOPE)
   {
-    if (name.size() < 2 || name[0] != 'r')
+    Core::CPUThreadGuard guard(m_system);
+    auto& ppc_state = m_system.GetPPCState();
+    if (variables_reference == REGISTERS_SCOPE)
+    {
+      if (name.size() < 2 || name[0] != 'r')
+        return std::nullopt;
+      unsigned index = 0;
+      if (!TryParse(std::string(name.substr(1)), &index, 10) || index >= 32)
+        return std::nullopt;
+      ppc_state.gpr[index] = *value;
+    }
+    else if (variables_reference != PC_SCOPE)
       return std::nullopt;
-
-    unsigned index = 0;
-    if (!TryParse(std::string(name.substr(1)), &index, 10) || index >= 32)
+    else if (name == "pc")
+      ppc_state.pc = *value;
+    else if (name == "lr")
+      LR(ppc_state) = *value;
+    else if (name == "ctr")
+      CTR(ppc_state) = *value;
+    else if (name == "cr")
+      ppc_state.cr.Set(*value);
+    else if (name == "xer")
+    {
+      UReg_XER xer;
+      xer.Hex = *value;
+      ppc_state.SetXER(xer);
+    }
+    else
       return std::nullopt;
-
-    ppc_state.gpr[index] = *value;
-    return ppc_state.gpr[index];
   }
-
-  if (variables_reference != PC_SCOPE)
-    return std::nullopt;
-
-  if (name == "pc")
-  {
-    ppc_state.pc = *value;
-    return ppc_state.pc;
-  }
-  if (name == "lr")
-  {
-    LR(ppc_state) = *value;
-    return LR(ppc_state);
-  }
-  if (name == "ctr")
-  {
-    CTR(ppc_state) = *value;
-    return CTR(ppc_state);
-  }
-  if (name == "cr")
-  {
-    ppc_state.cr.Set(*value);
-    return ppc_state.cr.Get();
-  }
-  if (name == "xer")
-  {
-    UReg_XER xer;
-    xer.Hex = *value;
-    ppc_state.SetXER(xer);
-    return ppc_state.GetXER().Hex;
-  }
-
-  return std::nullopt;
+  m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id);
+  return value;
 }
 
 std::vector<ThreadInfo> DapDebugController::GetThreads()
@@ -545,90 +610,38 @@ std::vector<ThreadInfo> DapDebugController::GetThreads()
 
 StackTraceResult DapDebugController::GetStackTrace(const int start_frame, const int levels)
 {
-  Core::CPUThreadGuard guard(m_system);
-  auto& power_pc = m_system.GetPowerPC();
-  const auto& ppc_state = power_pc.GetPPCState();
-  auto& debug_interface = power_pc.GetDebugInterface();
+  const Core::Debug::StackTrace stack =
+      Core::Debug::GetPPCStackTrace(m_system, start_frame, levels);
 
-  std::vector<StackFrame> frames;
-
-  const auto push_frame = [&](const u32 address) {
+  StackTraceResult result;
+  result.total_frames = static_cast<int>(stack.total_frames);
+  result.frames.reserve(stack.frames.size());
+  for (const Core::Debug::StackFrame& stack_frame : stack.frames)
+  {
     StackFrame frame;
-    frame.id = static_cast<int>(frames.size());
-    frame.address = address;
-    std::string description = debug_interface.GetDescription(address);
-    if (description.empty() || description == "Invalid")
-      description = fmt::format("0x{:08x}", address);
-    frame.name = std::move(description);
-
-    const Common::Symbol* symbol = power_pc.GetSymbolDB().GetSymbolFromAddr(address);
-    const std::optional<PPCSymbolDB::SourceLine> source_line =
-        power_pc.GetSymbolDB().GetSourceLine(address);
-    if (source_line)
+    frame.id = static_cast<int>(stack_frame.index);
+    frame.address = stack_frame.address;
+    frame.name = stack_frame.name;
+    if (stack_frame.source)
     {
-      frame.source_file = source_line->file;
-      frame.source_line = static_cast<int>(source_line->line);
+      frame.source_file = stack_frame.source->file;
+      frame.source_id = stack_frame.source->file_index + 1;
+      frame.source_line = static_cast<int>(std::clamp<u32>(
+          stack_frame.source->line, 1, static_cast<u32>(std::numeric_limits<int>::max())));
     }
-    else if (symbol != nullptr && symbol->type == Common::Symbol::Type::Function)
+    else if (stack_frame.disassembly_base)
     {
-      frame.source_base = symbol->address;
-      frame.source_line = static_cast<int>((address - symbol->address) / 4);
+      frame.source_base = stack_frame.disassembly_base;
+      frame.source_line = static_cast<int>(stack_frame.disassembly_line);
     }
     else
     {
-      frame.source_base = address;
-      frame.source_line = 0;
+      // An unknown address is not an adapter-provided source. Keep the frame and
+      // instruction pointer for diagnostics without making clients fetch a fake file.
+      frame.source_line = 1;
     }
-
-    frames.push_back(std::move(frame));
-  };
-
-  const auto is_stack_bottom = [&](const u32 addr) {
-    return !addr || !PowerPC::MMU::HostIsRAMAddress(guard, addr);
-  };
-
-  // DESNOTE(jbarber, 2026-07-21): The innermost frame is the current PC --
-  // it's where execution actually stopped. The previous form only pushed the
-  // PC when the frame list was otherwise empty, so a typical `stackTrace`
-  // response started at LR-4 / stack-walked callers and omitted the
-  // instruction the user actually cares about. Walking up first, then
-  // prepending the PC, would shuffle addresses past DAP frame ids; instead
-  // push the PC first so the rest of the walk appends in declaration order.
-  push_frame(ppc_state.pc);
-
-  if (LR(ppc_state) != 0)
-    push_frame(LR(ppc_state) - 4);
-
-  if (!is_stack_bottom(ppc_state.gpr[1]))
-  {
-    u32 addr = PowerPC::MMU::HostRead<u32>(guard, ppc_state.gpr[1]);
-    for (int count = 0; !is_stack_bottom(addr) && !is_stack_bottom(addr + 4) && count < 20; ++count)
-    {
-      const u32 func_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 4);
-      push_frame(func_addr - 4);
-      addr = PowerPC::MMU::HostRead<u32>(guard, addr);
-    }
+    result.frames.push_back(std::move(frame));
   }
-
-  StackTraceResult result;
-  result.total_frames = static_cast<int>(frames.size());
-
-  const std::size_t begin = static_cast<std::size_t>(std::max(0, start_frame));
-  if (begin >= frames.size())
-    return result;
-
-  // DESNOTE(jbarber, 2026-07-03): Per the DAP spec `levels` of 0 (or omitted)
-  // means "all frames"; a negative value is invalid and treated the same way.
-  // See https://microsoft.github.io/debug-adapter-protocol/specification#Requests_StackTrace
-  const std::size_t end = levels <= 0 ?
-                              frames.size() :
-                              std::min(frames.size(), begin + static_cast<std::size_t>(levels));
-  frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(end), frames.end());
-  frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(begin));
-  for (std::size_t i = 0; i < frames.size(); ++i)
-    frames[i].id = static_cast<int>(begin + i);
-
-  result.frames = std::move(frames);
   return result;
 }
 
@@ -644,7 +657,8 @@ std::vector<LoadedSource> DapDebugController::GetLoadedSources()
     for (u32 i = 0; i < files.size(); ++i)
     {
       LoadedSource source;
-      source.source_reference = static_cast<int>(i + 1);
+      source.source_reference = File::Exists(files[i]) ? i + 1 : 0;
+      source.source_id = i + 1;
       source.path = files[i];
       source.name = files[i];
       const size_t slash = source.name.find_last_of("/\\");
@@ -660,8 +674,7 @@ std::vector<LoadedSource> DapDebugController::GetLoadedSources()
       return;
 
     LoadedSource source;
-    source.source_reference = static_cast<int>(symbol.address);
-    source.path = Json::FormatAddress(symbol.address);
+    source.source_reference = MakeDisassemblySourceReference(symbol.address);
     source.name = symbol.object_name.empty() ? symbol.name : symbol.object_name;
     if (source.name.empty())
       source.name = source.path;
@@ -670,13 +683,17 @@ std::vector<LoadedSource> DapDebugController::GetLoadedSources()
   return sources;
 }
 
-std::optional<SourceContent> DapDebugController::GetSource(const u32 base_address,
+std::optional<SourceContent> DapDebugController::GetSource(const SourceReference source_reference,
                                                            const int start_line, const int end_line)
 {
   Core::CPUThreadGuard guard(m_system);
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
 
-  const int first_line = std::max(start_line, 0);
+  const int first_line = std::max(start_line, 1);
+  const auto add_lines_clamped = [](const int line, const int count) {
+    return line > std::numeric_limits<int>::max() - count ? std::numeric_limits<int>::max() :
+                                                            line + count;
+  };
   // DESNOTE(jbarber, 2026-07-21): DAP's `endLine` defaults to -1 when the
   // client means "through end of file/source". The previous form
   // `end_line > first_line ? end_line : first_line + 63` collapsed -1 to
@@ -684,8 +701,9 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   // negative end_line as "no upper bound" so the read loop runs to EOF or
   // the line_count cap (256) below, whichever comes first. The cap keeps
   // responses bounded; clients paging past it just send another request.
-  const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
-                     (end_line > first_line ? end_line : first_line + 63);
+  const int last_line = end_line < 0 ?
+                            std::numeric_limits<int>::max() :
+                            (end_line > first_line ? end_line : add_lines_clamped(first_line, 63));
   // DESNOTE(jbarber, 2026-07-21): For the disassembly case below we bound
   // the result at 256 lines via `line_count`. The DWARF source-file path
   // above reads lines from disk in a `while (fgets)` loop -- the only
@@ -701,10 +719,11 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   const u64 span = static_cast<u64>(last_line) - static_cast<u64>(first_line) + 1ull;
   const int line_count = static_cast<int>(std::min(span, static_cast<u64>(kMaxResponseLines)));
 
-  if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
-      base_address <= symbol_db.GetSourceFiles().size())
+  const std::vector<std::string> source_files = symbol_db.GetSourceFiles();
+  if (symbol_db.HasSourceLineInfo() && source_reference > 0 &&
+      source_reference <= source_files.size())
   {
-    const std::string& path = symbol_db.GetSourceFiles()[base_address - 1];
+    const std::string& path = source_files[static_cast<size_t>(source_reference - 1)];
     File::IOFile file(path, "r");
     if (!file)
       return std::nullopt;
@@ -716,23 +735,35 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
     const int source_first_line = std::max(first_line, 1);
     int current_line = 1;
     int emitted_lines = 0;
+    bool output_line_started = false;
     while (std::fgets(buffer, sizeof(buffer), file.GetHandle()))
     {
       if (current_line > last_line || emitted_lines >= kMaxResponseLines)
         break;
+      std::string_view line(buffer);
+      const bool line_complete = !line.empty() && line.back() == '\n';
       if (current_line >= source_first_line)
       {
-        if (current_line > source_first_line)
+        if (!output_line_started && emitted_lines > 0)
           result.content += '\n';
-        std::string_view line(buffer);
-        if (!line.empty() && line.back() == '\n')
+        output_line_started = true;
+        if (line_complete)
+        {
           line.remove_suffix(1);
-        if (!line.empty() && line.back() == '\r')
-          line.remove_suffix(1);
+          if (!line.empty() && line.back() == '\r')
+            line.remove_suffix(1);
+        }
         result.content.append(line);
-        ++emitted_lines;
       }
-      ++current_line;
+      if (line_complete)
+      {
+        if (output_line_started)
+          ++emitted_lines;
+        output_line_started = false;
+        if (current_line == std::numeric_limits<int>::max())
+          break;
+        ++current_line;
+      }
     }
 
     // DESNOTE(jbarber, 2026-07-21): Previous form `... && current_line == 0`
@@ -745,7 +776,10 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
     return result;
   }
 
-  if (!PowerPC::MMU::HostIsRAMAddress(guard, base_address))
+  std::optional<u32> base_address = DecodeDisassemblySourceReference(source_reference);
+  if (!base_address && source_reference <= std::numeric_limits<u32>::max())
+    base_address = static_cast<u32>(source_reference);
+  if (!base_address || !PowerPC::MMU::HostIsInstructionRAMAddress(guard, *base_address))
     return std::nullopt;
 
   SourceContent result;
@@ -754,8 +788,12 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
 
   for (int i = 0; i < line_count; ++i)
   {
-    const u32 addr = base_address + static_cast<u32>((first_line + i) * 4);
-    if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
+    const u64 addr64 = static_cast<u64>(*base_address) +
+                       (static_cast<u64>(first_line - 1) + static_cast<u64>(i)) * 4ull;
+    if (addr64 > std::numeric_limits<u32>::max())
+      break;
+    const u32 addr = static_cast<u32>(addr64);
+    if (!PowerPC::MMU::HostIsInstructionRAMAddress(guard, addr))
       break;
     if (i > 0)
       result.content += '\n';
@@ -767,14 +805,20 @@ std::optional<SourceContent> DapDebugController::GetSource(const u32 base_addres
   return result;
 }
 
-std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const u32 base_address,
-                                                                           const int start_line,
-                                                                           const int end_line)
+std::vector<BreakpointLocation>
+DapDebugController::GetBreakpointLocations(const SourceReference source_reference,
+                                           const int start_line, const int end_line)
 {
   Core::CPUThreadGuard guard(m_system);
   std::vector<BreakpointLocation> locations;
 
-  const int first_line = std::max(start_line, 0);
+  if (start_line <= 0)
+    return locations;
+  const int first_line = start_line;
+  const auto add_lines_clamped = [](const int line, const int count) {
+    return line > std::numeric_limits<int>::max() - count ? std::numeric_limits<int>::max() :
+                                                            line + count;
+  };
   // DESNOTE(jbarber, 2026-07-21): DAP's `endLine` defaults to -1 meaning
   // "through end". Treat negative end_line as unbounded so we enumerate
   // every instruction slot / line entry in the range rather than stopping
@@ -782,35 +826,54 @@ std::vector<BreakpointLocation> DapDebugController::GetBreakpointLocations(const
   // pathological end_line (or an omitted one defaulting to INT_MAX)
   // doesn't spin the session thread for billions of GetLineAddress calls.
   constexpr int kMaxLocationEnumerations = 65536;
-  const int last_line = end_line < 0 ? std::numeric_limits<int>::max() :
-                     (end_line >= first_line ? end_line : first_line + 63);
-  const int capped_last = std::min(last_line, first_line + kMaxLocationEnumerations - 1);
+  const int last_line = end_line < 0 ?
+                            std::numeric_limits<int>::max() :
+                            (end_line >= first_line ? end_line : add_lines_clamped(first_line, 63));
+  const int capped_last =
+      std::min(last_line, add_lines_clamped(first_line, kMaxLocationEnumerations - 1));
+  const u64 line_count = static_cast<u64>(capped_last) - static_cast<u64>(first_line) + 1;
 
   auto& symbol_db = m_system.GetPowerPC().GetSymbolDB();
-  if (symbol_db.HasSourceLineInfo() && base_address > 0 &&
-      base_address <= symbol_db.GetSourceFiles().size())
+  if (symbol_db.HasSourceLineInfo() && source_reference > 0 &&
+      source_reference <= symbol_db.GetSourceFiles().size())
   {
-    const std::string& file = symbol_db.GetSourceFiles()[base_address - 1];
-    for (int line = first_line; line <= capped_last; ++line)
+    const auto line_addresses =
+        symbol_db.GetExactLineAddresses(static_cast<u32>(source_reference - 1));
+    for (auto it = line_addresses.lower_bound(static_cast<u32>(first_line));
+         it != line_addresses.end() && it->first <= static_cast<u32>(capped_last); ++it)
     {
-      if (symbol_db.GetLineAddress(file, static_cast<u32>(line)))
-        locations.push_back({line});
+      locations.push_back({static_cast<int>(it->first)});
     }
     return locations;
   }
 
-  for (int line = first_line; line <= capped_last; ++line)
+  std::optional<u32> base_address = DecodeDisassemblySourceReference(source_reference);
+  if (!base_address && source_reference <= std::numeric_limits<u32>::max())
+    base_address = static_cast<u32>(source_reference);
+  if (!base_address)
+    return locations;
+
+  for (u64 i = 0; i < line_count; ++i)
   {
-    const u32 addr = base_address + static_cast<u32>(line * 4);
-    if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
+    const int line = static_cast<int>(static_cast<u64>(first_line) + i);
+    const u64 addr64 = static_cast<u64>(*base_address) + (static_cast<u64>(line) - 1ull) * 4ull;
+    if (addr64 > std::numeric_limits<u32>::max())
+      break;
+    const u32 addr = static_cast<u32>(addr64);
+    if (!PowerPC::MMU::HostIsInstructionRAMAddress(guard, addr))
       break;
     locations.push_back({line});
   }
   return locations;
 }
 
-void DapDebugController::Restart()
+std::expected<void, std::string> DapDebugController::Restart()
 {
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Restart);
+  if (!operation)
+    return std::unexpected(operation.error());
   Core::CPUThreadGuard guard(m_system);
   m_system.GetPowerPC().Reset();
   // DESNOTE(jbarber, 2026-07-21): PowerPC::Reset only clears PPC/MMU/cache
@@ -820,47 +883,58 @@ void DapDebugController::Restart()
   // lie -- the client would believe emulation halted while the CPU kept
   // running. Force Break + State::Paused here so the post-restart stop is
   // truthful, mirroring what Terminate does.
-  m_system.GetCPU().Break();
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Restart,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = m_system.GetPPCState().pc});
   Core::SetState(m_system, Core::State::Paused);
+  return {};
 }
 
-void DapDebugController::Terminate()
+std::expected<void, std::string> DapDebugController::Terminate()
 {
-  m_system.GetCPU().Break();
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation = execution.BeginOperation(m_execution_client_id,
+                                                  Core::Debug::ExecutionOperationKind::Terminate);
+  if (!operation)
+    return std::unexpected(operation.error());
+  m_system.GetCPU().BreakWithoutDebugStop();
   Core::SetState(m_system, Core::State::Paused);
+  execution.AbandonStep(*operation);
+  return {};
+}
+
+std::expected<void, std::string> DapDebugController::Goto(const u32 address)
+{
+  auto& execution = m_system.GetCPU().GetExecutionState();
+  const auto operation =
+      execution.BeginOperation(m_execution_client_id, Core::Debug::ExecutionOperationKind::Goto);
+  if (!operation)
+    return std::unexpected(operation.error());
+  Core::SetState(m_system, Core::State::Paused);
+  SetPC(address);
+  m_system.GetCPU().Break({.cause = Core::Debug::ExecutionStopCause::Goto,
+                           .origin = m_execution_client_id,
+                           .operation_id = *operation,
+                           .pc = address});
+  return {};
 }
 
 void DapDebugController::ClearBreakpoints()
 {
-  // DESNOTE(jbarber, 2026-07-22): Dolphin has one shared global breakpoint /
-  // memcheck store tied to the PPC core. This session installed its
-  // breakpoints/watchpoints there via ApplyCodeBreakpoints (which clears the
-  // global store first) and SetDataBreakpoints (same for memchecks). Without
-  // this teardown call, a disconnecting client would leave the core halting
-  // on stale debugger state that no DAP client is around to clear. Wipe the
-  // session's tracked sets AND the global stores so follow-on emulation runs
-  // clean. Mirrors what ApplyCodeBreakpoints/SetDataBreakpoints do at the
-  // start of each set -- here we're doing the empty-set version.
-  m_source_breakpoints.clear();
-  m_instruction_breakpoints.clear();
-  {
-    Core::CPUThreadGuard guard(m_system);
-    m_system.GetPowerPC().GetBreakPoints().Clear();
-    m_system.GetPowerPC().GetMemChecks().Clear();
-  }
-  // Also clear any freezes this controller installed. ClearFreezes itself
-  // takes the guard and removes memchecks, so call it after the above guard
-  // scope ends to avoid nested guards (ClearFreezes opens its own).
-  // Actually -- ClearBreakpoints just wiped ALL memchecks via .Clear(), so
-  // the freeze memchecks are already gone from the global store. Just clear
-  // our tracking vector so RemoveFreeze/ClearFreezes don't try to remove
-  // already-gone entries. Bugbot-resistent: idempotent.
-  m_freezes.clear();
+  ClearCodeBreakpoints();
+  m_system.GetPowerPC().GetMemChecks().ClearClientBreakpoints(m_memcheck_client_id);
+  ClearFreezes();
+}
+
+void DapDebugController::ClearCodeBreakpoints()
+{
+  m_system.GetPowerPC().GetBreakPoints().ClearClientBreakpoints(m_breakpoint_client_id);
 }
 
 u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8> value)
 {
-  // DESNOTE(jbarber, 2026-07-22): Installs a `is_freeze` TMemCheck on
+  // DESNOTE(jbarber, 2026-07-22): Installs a private MemChecks freeze range on
   // [address, address+count) so MMU::Write<T> suppresses CPU stores to that
   // range. The frozen `value` is written to RAM immediately (via HostWrite,
   // which bypasses the freeze memcheck — so the freeze back-write itself
@@ -874,19 +948,14 @@ u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8
     return 0;
 
   const u32 freeze_id = m_next_freeze_id++;
-  m_freezes.push_back({freeze_id, address, count});
-
   {
     Core::CPUThreadGuard guard(m_system);
     auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    TMemCheck mc;
-    mc.start_address = address;
-    mc.end_address = address + count - 1;
-    mc.is_ranged = true;
-    mc.is_enabled = true;
-    mc.is_freeze = true;
-    // No break/log — freeze memchecks suppress silently.
-    memchecks.Add(std::move(mc));
+    const auto registry_id =
+        memchecks.AddClientFreeze(m_memcheck_client_id, address, address + count - 1);
+    if (!registry_id)
+      return 0;
+    m_freezes.push_back({freeze_id, address, count, *registry_id});
 
     // Write the frozen value into RAM so reads return the frozen bytes.
     // HostWrite bypasses Memcheck (and thus the freeze suppression), so
@@ -904,17 +973,12 @@ u32 DapDebugController::InstallFreeze(u32 address, u32 count, std::span<const u8
 bool DapDebugController::RemoveFreeze(u32 freeze_id)
 {
   auto it = std::find_if(m_freezes.begin(), m_freezes.end(),
-                         [freeze_id](const FreezeEntry& e) {
-                           return e.freeze_id == freeze_id;
-                         });
+                         [freeze_id](const FreezeEntry& e) { return e.freeze_id == freeze_id; });
   if (it == m_freezes.end())
     return false;
   {
     Core::CPUThreadGuard guard(m_system);
-    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    // Remove the freeze memcheck matching this address range. MemChecks
-    // doesn't have a RemoveById, so we remove by address.
-    memchecks.Remove(it->address);
+    m_system.GetPowerPC().GetMemChecks().RemoveClientFreeze(m_memcheck_client_id, it->registry_id);
   }
   m_freezes.erase(it);
   return true;
@@ -926,9 +990,7 @@ void DapDebugController::ClearFreezes()
     return;
   {
     Core::CPUThreadGuard guard(m_system);
-    auto& memchecks = m_system.GetPowerPC().GetMemChecks();
-    for (const FreezeEntry& e : m_freezes)
-      memchecks.Remove(e.address);
+    m_system.GetPowerPC().GetMemChecks().ClearClientFreezes(m_memcheck_client_id);
   }
   m_freezes.clear();
 }
@@ -952,8 +1014,7 @@ std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
   // top-of-MEM1 read of exactly 1 byte at 0xFFFFFFFF was incorrectly
   // rejected.
   if (size > static_cast<std::size_t>(std::numeric_limits<u32>::max()) ||
-      (size > 0 &&
-       static_cast<u32>(size - 1) > std::numeric_limits<u32>::max() - address))
+      (size > 0 && static_cast<u32>(size - 1) > std::numeric_limits<u32>::max() - address))
   {
     return {};
   }
@@ -972,6 +1033,44 @@ std::vector<u8> DapDebugController::ReadMemory(u32 address, std::size_t size)
   return bytes;
 }
 
+std::expected<PointerChainResult, std::string>
+DapDebugController::ResolvePointerChain(u32 base_address, std::span<const s32> offsets)
+{
+  Core::CPUThreadGuard guard(m_system);
+  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+
+  PointerChainResult result;
+  result.final_address = base_address;
+  result.steps.reserve(offsets.size());
+  for (const s32 offset : offsets)
+  {
+    if (result.final_address > std::numeric_limits<u32>::max() - 3)
+      return std::unexpected(
+          fmt::format("pointer at 0x{:08x} crosses the address boundary", result.final_address));
+    for (u32 byte = 0; byte < 4; ++byte)
+    {
+      if (!accessors->IsValidAddress(guard, result.final_address + byte))
+      {
+        return std::unexpected(
+            fmt::format("cannot read pointer at 0x{:08x}", result.final_address));
+      }
+    }
+
+    const u32 pointer_value = accessors->ReadU32(guard, result.final_address);
+    const s64 adjusted = static_cast<s64>(pointer_value) + offset;
+    if (adjusted < 0 || adjusted > std::numeric_limits<u32>::max())
+    {
+      return std::unexpected(
+          fmt::format("pointer offset overflows at 0x{:08x}", result.final_address));
+    }
+
+    const u32 next = static_cast<u32>(adjusted);
+    result.steps.push_back({result.final_address, pointer_value, offset, next});
+    result.final_address = next;
+  }
+  return result;
+}
+
 std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> data)
 {
   // DESNOTE(jbarber, 2026-07-21): Same overflow guard as ReadMemory above --
@@ -986,25 +1085,31 @@ std::size_t DapDebugController::WriteMemory(u32 address, std::span<const u8> dat
   {
     return 0;
   }
-  Core::CPUThreadGuard guard(m_system);
-  AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
-
   std::size_t written = 0;
-  for (const u8 byte : data)
   {
-    const u32 addr = address + static_cast<u32>(written);
-    if (!accessors->IsValidAddress(guard, addr))
-      break;
-    accessors->WriteU8(guard, addr, byte);
-    ++written;
+    Core::CPUThreadGuard guard(m_system);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+
+    for (const u8 byte : data)
+    {
+      const u32 addr = address + static_cast<u32>(written);
+      if (!accessors->IsValidAddress(guard, addr))
+        break;
+      accessors->WriteU8(guard, addr, byte);
+      ++written;
+    }
+    // DESNOTE(jbarber, 2026-07-21): MMU::WriteToHardware copies bytes into RAM
+    // with no icbi/JIT hook, so writes that patch code leave the L1 iCache and
+    // JIT block cache pointing at stale bytes. Invalidate every cacheline we
+    // touched so interpreter and JIT fetch paths both see the new bytes the
+    // next time control reaches this address. Without this, an injected
+    // detour or code patch can be silently ignored.
+    InvalidateCodeRange(address, written);
   }
-  // DESNOTE(jbarber, 2026-07-21): MMU::WriteToHardware copies bytes into RAM
-  // with no icbi/JIT hook, so writes that patch code leave the L1 iCache and
-  // JIT block cache pointing at stale bytes. Invalidate every cacheline we
-  // touched so interpreter and JIT fetch paths both see the new bytes the
-  // next time control reaches this address. Without this, an injected
-  // detour or code patch can be silently ignored.
-  InvalidateCodeRange(address, written);
+  // Notify every debugger even when a caller rejects an already-partially-written request.
+  if (written != 0)
+    m_system.GetCPU().GetExecutionState().PublishValuesChanged(m_execution_client_id, address,
+                                                               static_cast<u32>(written));
   return written;
 }
 
@@ -1075,7 +1180,6 @@ std::optional<u32> DapDebugController::FindFreeMemory(u32 count)
   // 4-byte-aligned offset, mirroring what a real allocator would return
   // for a code-cave request. Iterating by word keeps the start address
   // naturally 4-byte-aligned.
-  const u32 need_words = (count + 3u) / 4u;
   std::optional<u32> best_addr;
   std::optional<u32> best_bytes;
   u32 run_start = 0;
@@ -1174,8 +1278,7 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
     if (end_byte_64 > static_cast<u64>(std::numeric_limits<u32>::max()))
       return std::nullopt;
     const u32 end_byte = static_cast<u32>(end_byte_64);
-    AddressSpace::Accessors* accessors =
-        AddressSpace::GetAccessors(AddressSpace::Type::Effective);
+    AddressSpace::Accessors* accessors = AddressSpace::GetAccessors(AddressSpace::Type::Effective);
     {
       Core::CPUThreadGuard guard(m_system);
       if (!accessors->IsValidAddress(guard, detour_addr) ||
@@ -1223,9 +1326,8 @@ DapDebugController::Detour(u32 target_address, std::optional<u32> detour_address
       (void)WriteMemory(it->address, std::span<const u8>{it->snapshot});
   };
   const auto stage_or_fail = [&](u32 address, const std::vector<u8>& snapshot,
-                                  std::span<const u8> new_bytes) -> bool {
-    if (snapshot.size() != new_bytes.size() ||
-        WriteMemory(address, new_bytes) != new_bytes.size())
+                                 std::span<const u8> new_bytes) -> bool {
+    if (snapshot.size() != new_bytes.size() || WriteMemory(address, new_bytes) != new_bytes.size())
     {
       restore();
       return false;
@@ -1319,6 +1421,13 @@ StopInfo DapDebugController::GetStopInfo()
   // Step rather than mis-reporting, which is safe for the DAP `stopped` reason.
   if ((ppc_state.Exceptions & EXCEPTION_FAKE_MEMCHECK_HIT) != 0)
   {
+    info.reason = StopReason::DataBreakpoint;
+    return info;
+  }
+
+  if (m_system.GetPowerPC().DidSteppingMemcheckHit())
+  {
+    m_system.GetPowerPC().ClearSteppingMemcheckHit();
     info.reason = StopReason::DataBreakpoint;
     return info;
   }

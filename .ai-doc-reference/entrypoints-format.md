@@ -4,14 +4,21 @@ Normalized debug metadata for **function entrypoint-only** source mapping. Read 
 when implementing the Melee/objdiff producer, Dolphin importer, or DAP UX for
 sparse line tables.
 
+**Implementation status:** Dolphin's importer and sidecar discovery are implemented.
+The consumer sections below describe the current code, not a proposed feature.
+The Melee/objdiff producer pipeline is an integration sketch; the producer is not
+shipped in this Dolphin repository. Keep genuine future changes in
+[Future extensions](#future-extensions-not-v1).
+
 ## Problem
 
-Matching decomp units link freshly compiled `src/*.o` with MWCC `-sym on`, so
-`main.elf` carries full DWARF 1.1 (see
+Reconstructed source units compiled with MWCC `-sym on` can provide
+full DWARF 1.1 in `main.elf` (see
 [`.ai-doc-reference/dwarf-1.1-format.md`](dwarf-1.1-format.md)).
 
-NonMatching units intentionally link retail `obj/*.o` (no DWARF) to preserve byte
-matching. objdiff still knows which **individual functions** match between
+Some matching-build configurations retain retail objects without DWARF rather
+than executing reconstructed source for every unit. For these builds, objdiff
+can identify which **individual functions** match between
 `target_path` (retail) and `base_path` (decomp `src/*.o`), including absolute
 linked addresses via `metadata.virtual_address`.
 
@@ -37,11 +44,17 @@ build/GALE01/main.elf
 build/GALE01/entrypoints.json   # sibling of debug ELF
 ```
 
-Dolphin resolution order (planned):
+Dolphin resolution order (implemented by `ImportConfiguredEntrypoints`):
 
 1. `--debug-entrypoints <path>` / `Dolphin.Debug.Entrypoints`
-2. Else `<dirname(debug_elf)>/entrypoints.json` if present
+2. Else `entrypoints.json` beside the ELF passed to the importer, or beside
+   `Dolphin.Debug.ELFFile` when no ELF path was passed, if that sibling file exists
 3. Else entrypoints import is skipped (DWARF-only)
+
+A configured sidecar takes precedence even if the file is missing; Dolphin logs
+the missing file rather than falling back to sibling discovery. `--debug-entrypoints`
+sets the same `Dolphin.Debug.Entrypoints` configuration key. The `dwarf_elf` field
+inside the JSON is provenance, not a path Dolphin uses to select or load an ELF.
 
 ## Top-level schema (version 1)
 
@@ -50,7 +63,7 @@ Dolphin resolution order (planned):
   "schema_version": 1,
   "precision": "entrypoint",
   "game_id": "GALE01",
-  "dwarf_elf": "build/GALE01/main.elf",
+  "dwarf_elf": "main.elf",
   "generated_at": "2026-07-04T20:50:00Z",
   "generated_from": {
     "tool": "entrypoints.py",
@@ -65,15 +78,20 @@ Dolphin resolution order (planned):
 }
 ```
 
-### Required fields
+### Required fields in the producer schema
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `schema_version` | integer | Must be `1` for this document |
 | `precision` | string | Must be `"entrypoint"` (future: `"line"`, etc.) |
-| `game_id` | string | DOL/ISO game ID (e.g. `GALE01`) for validation/logging |
-| `dwarf_elf` | string | Path to the sidecar ELF whose layout these addresses use (relative paths resolved from the JSON file's directory) |
+| `game_id` | string | DOL/ISO game ID (e.g. `GALE01`); provenance for producer-side validation |
+| `dwarf_elf` | string | Path identifying the ELF whose layout these addresses use; producers can use a path relative to the JSON directory |
 | `functions` | array | Function records (see below) |
+
+Dolphin does not run the JSON Schema validator. It requires `schema_version: 1`,
+`precision: "entrypoint"`, and a `functions` array, but does not currently read or
+validate `game_id` or `dwarf_elf`. It does not verify that these addresses match
+the running executable. Producers and users must establish that match.
 
 ### Optional metadata
 
@@ -92,7 +110,7 @@ Each element of `functions`:
 ```json
 {
   "name": "GetMatchTimer",
-  "address": 2158970376,
+  "address": 2148970376,
   "size": 124,
   "file": "src/melee/gm/gm_16AE.c",
   "line": 117,
@@ -121,9 +139,11 @@ Each element of `functions`:
 
 ### Address encoding
 
-- **On disk:** JSON number (decimal integer). Example: `2158970760` = `0x8016AF88`.
-- **Not used in v1:** hex strings, `"0x…"` strings (reject or normalize in importer).
-- Importer must verify `address` is 4-byte aligned for PPC function entrypoints.
+- **On disk:** JSON number (decimal integer). Example: `2148970376` = `0x8016AF88`.
+- Hex strings are not supported by the current importer; emit numeric addresses.
+- Producers should verify 4-byte PPC alignment and that the address/size lie
+  within the intended executable. The current importer does not enforce alignment
+  or compare entries with an ELF symbol table.
 
 ### Duplicate policy (producer)
 
@@ -145,11 +165,16 @@ Each element of `functions`:
 
 Informational only; Dolphin import may ignore `units`.
 
-## Producer pipeline (Melee)
+## Producer integration sketch (Melee/objdiff)
+
+This describes a producer that emits the schema above; it is not a runnable setup
+recipe or a claim that a particular upstream Melee checkout includes this tool.
+Use the build/report commands supported by your checkout. Emit entries only for
+code whose linked addresses match the executable you will run.
 
 ```
 configure.py --debug
-    → ninja (all_source + main.elf)
+    → build a debug ELF and matching objdiff report
     → objdiff-cli report generate → build/GALE01/report.json
 
 entrypoints.py
@@ -166,7 +191,7 @@ entrypoints.py
 | objdiff (`report.json`) | entrypoints.json |
 |-------------------------|------------------|
 | `units[].metadata.source_path` | `file` (on each function) |
-| `units[].metadata.complete` | skip unit when false and `include_complete_units` is false |
+| `units[].metadata.complete` | skip an already-complete unit when true and `include_complete_units` is false |
 | `units[].name` | `unit` |
 | `functions[].name` | `name` |
 | `functions[].size` (string) | `size` (integer) |
@@ -190,11 +215,14 @@ Example objdiff function (from Melee `gm_16AE`):
 
 ## Consumer pipeline (Dolphin)
 
-After `ImportDwarfFromElf` (sidecar ELF):
+After loading available ELF/DWARF information, the importer processes records in
+JSON array order (it does not sort or deduplicate them):
 
 ```
 ImportEntrypointsFromJson(path)
-    for each function in functions (sorted by address):
+    validate schema_version, precision, and functions array
+    for each record in functions:
+        if name/file/address/size missing or invalid, or size == 0: continue
         if HasDenseLineInfo(address, size): continue
         AddKnownSymbol(address, size, name, file)
         if line present:
@@ -207,9 +235,13 @@ ImportEntrypointsFromJson(path)
 | Existing state | Action |
 |----------------|--------|
 | No symbol at address | Add symbol + optional line entry |
-| Symbol, no line entry | Add line entry only |
+| Symbol, no dense line info | Update symbol name/object name/size; add a line entry if supplied |
 | Line table covers `[address, address+size)` with >1 distinct lines | Skip (full DWARF wins) |
-| Single line entry at same address | Keep existing (idempotent re-import) |
+| Single line entry at same address, no dense range | Replace that row if the record supplies `line` |
+
+An identical re-import restores the same mapping, but changed records can replace
+sparse rows. Duplicate addresses are not rejected; later records can overwrite
+earlier sparse mappings. Deduplicate in the producer as described above.
 
 ### `precision: entrypoint` semantics in DAP
 
@@ -217,8 +249,8 @@ Existing `PPCSymbolDB` behavior with sparse entries:
 
 | API | Behavior |
 |-----|----------|
-| `GetSourceLine(addr)` | Nearest preceding line entry → whole function maps to definition line |
-| `GetLineAddress(file, line)` | Exact line match, else last entry with `line <= requested` → breakpoints on signature lines work; interior lines may bind to entry |
+| `GetSourceLine(addr)` | Nearest preceding row, restricted to the same function when symbol boundaries are known; a sparse row maps that function to its definition line |
+| `GetLineAddress(file, line)` | Exact line match, else the smallest recorded line greater than the request; no later row means no address. Interior lines do not generally bind to this function's entry |
 | `GetBreakpointLocations` | Only lines with explicit entries |
 | Stack frames | File + definition line when inside mapped function range |
 
@@ -233,11 +265,19 @@ Producer:
 - [ ] `file` exists relative to decomp repo root
 - [ ] `schema_version` and `precision` recognized
 
-Consumer:
+Current consumer checks:
 
-- [ ] Reject unknown `schema_version`
-- [ ] Reject `precision` other than `"entrypoint"` until supported
-- [ ] Log count: imported / skipped (DWARF overlap) / skipped (invalid)
+- Rejects malformed JSON, a non-object root, versions other than `1`, precision
+  other than `"entrypoint"`, and a missing/non-array `functions` field.
+- Skips non-object records, missing/invalid name/file/address/size fields, and
+  zero-size functions.
+- Skips functions whose range already contains more than one distinct DWARF line.
+- Logs imported and dense-overlap counts, but does not count invalid records
+  separately. No imported entries returns `false`, including an all-dense-overlap
+  import; that does not mean existing DWARF was removed.
+
+ELF-layout validation, game-ID checks, alignment checks, and source-file existence
+checks remain producer/user responsibilities, not guarantees of the importer.
 
 ## Versioning
 
@@ -258,14 +298,14 @@ Add optional fields without a version bump. Importers must ignore unknown fields
 | Direct `report.json` import in Dolphin | Prefer keeping objdiff as Melee-only adapter |
 | Checksum of `dwarf_elf` | Detect stale sidecar after relink |
 
-## Related files (planned)
+## Current consumer files and producer conventions
 
-| Repo | Path |
-|------|------|
-| Melee | `tools/entrypoints.py` |
-| Melee | `build/GALE01/entrypoints.json` (generated) |
-| Dolphin | `Source/Core/Core/Debugger/Entrypoints/EntrypointsImport.{h,cpp}` |
-| Dolphin | `Source/UnitTests/Core/Debugger/Entrypoints/EntrypointsImportTest.cpp` |
+| Status | Path |
+|--------|------|
+| Producer integration sketch, not shipped here | Melee `tools/entrypoints.py` |
+| Suggested generated-file location | Melee `build/GALE01/entrypoints.json` |
+| Implemented importer | [`EntrypointsImport.cpp`](../Source/Core/Core/Debugger/Entrypoints/EntrypointsImport.cpp) and [header](../Source/Core/Core/Debugger/Entrypoints/EntrypointsImport.h) |
+| Existing consumer tests | [`EntrypointsImportTest.cpp`](../Source/UnitTests/Core/Debugger/Entrypoints/EntrypointsImportTest.cpp) |
 
 ## JSON Schema
 

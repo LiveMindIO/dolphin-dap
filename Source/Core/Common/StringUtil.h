@@ -4,6 +4,7 @@
 #pragma once
 
 #include <charconv>
+#include <cmath>
 #include <concepts>
 #include <cstdarg>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <sstream>
@@ -49,6 +51,8 @@ inline void CharArrayFromFormat(char (&out)[Count], const char* format, ...)
 std::string ArrayToString(const u8* data, u32 size, int line_len = 20, bool spaces = true);
 
 std::string_view StripWhitespace(std::string_view s);
+std::string_view StripLeadingWhitespace(std::string_view s);
+std::string_view StripTrailingWhitespace(std::string_view s);
 std::string_view StripSpaces(std::string_view s);
 std::string_view StripQuotes(std::string_view s);
 
@@ -171,6 +175,33 @@ inline auto HexDump(std::span<const u8> data)
 
 namespace Common
 {
+namespace detail
+{
+bool ParseDecimal(std::string_view text, float* result);
+bool ParseDecimal(std::string_view text, double* result);
+bool ParseDecimal(std::string_view text, long double* result);
+}  // namespace detail
+
+// Strict, locale-independent decimal parsing, including on Apple's libc++ which
+// does not yet provide floating-point from_chars. Callers may strip a leading +.
+template <std::floating_point T>
+std::optional<T> ParseFiniteDecimal(std::string_view text)
+{
+  // MSVC's stream parser accepts hexadecimal floats even without std::hexfloat.
+  // Limit the alphabet to decimal syntax before invoking any platform parser.
+  if (text.empty() || text.starts_with('+') ||
+      text.find_first_not_of("-+0123456789.eE") != std::string_view::npos)
+    return std::nullopt;
+  T result = 0;
+  if (!detail::ParseDecimal(text, &result) || !std::isfinite(result))
+    return std::nullopt;
+  // Streams may silently round underflow to zero; from_chars rejects it.
+  const auto mantissa = text.substr(0, text.find_first_of("eE"));
+  if (result == 0 && mantissa.find_first_of("123456789") != std::string_view::npos)
+    return std::nullopt;
+  return result;
+}
+
 std::from_chars_result FromChars(std::string_view sv, std::integral auto& value, int base = 10)
 {
   const char* const first = sv.data();

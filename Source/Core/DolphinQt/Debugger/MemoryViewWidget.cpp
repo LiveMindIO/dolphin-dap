@@ -126,7 +126,9 @@ public:
       if (event->modifiers() == Qt::ControlModifier)
       {
         m_view->TriggerActivateSearch();
+        return;
       }
+      [[fallthrough]];
     default:
       QWidget::keyPressEvent(event);
       return;
@@ -356,6 +358,7 @@ void MemoryViewWidget::UpdateDispatcher(UpdateType type)
     // Values were captured on CPU thread while doing a callback.
     if (m_values.size() != 0)
       UpdateColumns();
+    break;
   default:
     break;
   }
@@ -1063,7 +1066,7 @@ void MemoryViewWidget::ToggleBreakpoint(u32 addr, bool row)
     for (int i = 0; i < breaks; i++)
     {
       u32 address = addr + length * i;
-      TMemCheck* check_ptr = memchecks.GetMemCheck(address, length);
+      const auto check_ptr = memchecks.GetMemCheck(address, length);
 
       if (check_ptr == nullptr && !overlap)
       {

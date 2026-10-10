@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cerrno>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -26,7 +27,7 @@
 #include "Common/Logging/Log.h"
 
 #ifdef _WIN32
-#include <Windows.h>
+#include <windows.h>
 #include <shellapi.h>
 constexpr u32 CODEPAGE_SHIFT_JIS = 932;
 constexpr u32 CODEPAGE_WINDOWS_1252 = 1252;
@@ -36,6 +37,10 @@ constexpr u32 CODEPAGE_WINDOWS_1252 = 1252;
 #include <cerrno>
 #include <iconv.h>
 #include <locale.h>
+#endif
+
+#ifdef __APPLE__
+#include <xlocale.h>
 #endif
 
 #if !defined(_WIN32) && !defined(ANDROID) && !defined(__HAIKU__) && !defined(__OpenBSD__) &&       \
@@ -194,7 +199,7 @@ std::string ArrayToString(const u8* data, u32 size, int line_len, bool spaces)
 template <typename T>
 static std::string_view StripEnclosingChars(std::string_view str, T chars)
 {
-  const size_t s = str.find_first_not_of(chars);
+  const std::size_t s = str.find_first_not_of(chars);
 
   if (str.npos != s)
     return str.substr(s, str.find_last_not_of(chars) - s + 1);
@@ -202,10 +207,39 @@ static std::string_view StripEnclosingChars(std::string_view str, T chars)
   return "";
 }
 
+template <typename T>
+static std::string_view StripLeadingChars(std::string_view str, T chars)
+{
+  const std::size_t s = str.find_first_not_of(chars);
+
+  if (str.npos != s)
+    return str.substr(s);
+  else
+    return "";
+}
+
+template <typename T>
+static std::string_view StripTrailingChars(std::string_view str, T chars)
+{
+  return str.substr(0, str.find_last_not_of(chars) + 1);
+}
+
 // Turns "\n\r\t hello " into "hello" (trims at the start and end but not inside).
 std::string_view StripWhitespace(std::string_view str)
 {
   return StripEnclosingChars(str, " \t\r\n");
+}
+
+// Turns "\n\r\t hello " into "hello " (trims at the start).
+std::string_view StripLeadingWhitespace(std::string_view str)
+{
+  return StripLeadingChars(str, " \t\r\n");
+}
+
+// Turns "\n\r\t hello " into "\n\r\t hello" (trims at the end).
+std::string_view StripTrailingWhitespace(std::string_view str)
+{
+  return StripTrailingChars(str, " \t\r\n");
 }
 
 std::string_view StripSpaces(std::string_view str)
@@ -1030,6 +1064,62 @@ std::string PathToString(const std::filesystem::path& path)
 
 namespace Common
 {
+namespace detail
+{
+template <typename T>
+static bool ParseDecimalImpl(std::string_view text, T* result)
+{
+#if defined(_WIN32)
+  static const _locale_t locale = _create_locale(LC_ALL, "C");
+  if (!locale)
+    return false;
+  const std::string input{text};
+  char* end = nullptr;
+  errno = 0;
+  if constexpr (std::is_same_v<T, float>)
+    *result = _strtof_l(input.c_str(), &end, locale);
+  else
+    *result = _strtod_l(input.c_str(), &end, locale);
+  return end == input.c_str() + input.size() && (errno == 0 || errno == ERANGE);
+#elif !defined(ANDROID) && !defined(__HAIKU__) && !defined(__OpenBSD__) && !defined(__NetBSD__)
+  // libc++ streams report failbit for representable subnormals. The C locale
+  // functions let us distinguish those (ERANGE + nonzero) from underflow to zero.
+  const auto locale = GetCLocale();
+  if (!locale)
+    return false;
+  const std::string input{text};
+  char* end = nullptr;
+  errno = 0;
+  if constexpr (std::is_same_v<T, float>)
+    *result = strtof_l(input.c_str(), &end, locale);
+  else if constexpr (std::is_same_v<T, double>)
+    *result = strtod_l(input.c_str(), &end, locale);
+  else
+    *result = strtold_l(input.c_str(), &end, locale);
+  return end == input.c_str() + input.size() && (errno == 0 || errno == ERANGE);
+#else
+  std::istringstream stream{std::string{text}};
+  stream.imbue(std::locale::classic());
+  return static_cast<bool>(stream >> std::noskipws >> *result) && stream.eof();
+#endif
+}
+
+bool ParseDecimal(std::string_view text, float* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+
+bool ParseDecimal(std::string_view text, double* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+
+bool ParseDecimal(std::string_view text, long double* result)
+{
+  return ParseDecimalImpl(text, result);
+}
+}  // namespace detail
+
 #ifdef _WIN32
 std::vector<std::string> CommandLineToUtf8Argv(const wchar_t* command_line)
 {

@@ -11,6 +11,8 @@
 #include <picojson.h>
 
 #include "Common/CommonTypes.h"
+#include "Core/Debugger/DAP/DapMemoryEngine.h"
+#include "Core/Debugger/DAP/DapSource.h"
 
 // Structured models for the subset of the Debug Adapter Protocol the Dolphin
 // DAP server speaks. Requests are decoded from picojson objects into typed
@@ -18,6 +20,15 @@
 // escaping and number formatting are handled by the serializer.
 namespace DAP::Protocol
 {
+enum class SteppingGranularity
+{
+  Statement,
+  Line,
+  Instruction,
+};
+
+std::optional<SteppingGranularity> ParseSteppingGranularity(const picojson::object& arguments);
+
 // A decoded DAP request envelope. `arguments` is empty when the request carries
 // none.
 struct Request
@@ -78,7 +89,7 @@ struct RequestedBreakpoint
 
 // Arguments of a `setBreakpoints` request. The base address is taken from the
 // `source.name`/`source.path` hex string (Dolphin models a "source" as a code
-// region anchored at an address). Each breakpoint's address is base + line*4.
+// region anchored at an address). Pseudo-source lines are one-based.
 struct SetBreakpointsArguments
 {
   std::optional<u32> base;
@@ -139,10 +150,11 @@ SetInstructionBreakpointsArguments
 ParseSetInstructionBreakpoints(const picojson::object& arguments);
 
 // Arguments of a `gotoTargets` request. The base address is taken from the
-// `source.name`/`source.path` hex string; `line` is a 4-byte instruction index.
+// `source.name`/`source.path` hex string; pseudo-source lines are one-based.
 struct GotoTargetsArguments
 {
   std::optional<u32> address;
+  int line = 0;
 };
 
 GotoTargetsArguments ParseGotoTargets(const picojson::object& arguments);
@@ -159,7 +171,7 @@ std::optional<GotoArguments> ParseGoto(const picojson::object& arguments);
 
 struct SourceRequestArguments
 {
-  std::optional<u32> base;
+  std::optional<SourceReference> source_reference;
   int start_line = 0;
   int end_line = -1;
 };
@@ -168,7 +180,7 @@ SourceRequestArguments ParseSourceRequest(const picojson::object& arguments);
 
 struct BreakpointLocationsArguments
 {
-  std::optional<u32> base;
+  std::optional<SourceReference> source_reference;
   int start_line = 0;
   int end_line = -1;
 };
@@ -270,6 +282,40 @@ struct DetourArguments
 };
 
 std::optional<DetourArguments> ParseDetour(const picojson::object& arguments);
+
+struct ResolvePointerChainArguments
+{
+  u32 base_address = 0;
+  std::vector<s32> offsets;
+};
+
+std::optional<ResolvePointerChainArguments>
+ParseResolvePointerChain(const picojson::object& arguments);
+
+struct MemoryScanStatusArguments
+{
+  int scan_id = 0;
+};
+
+struct MemoryScanResultsArguments
+{
+  int scan_id = 0;
+  u64 start = 0;
+  u32 count = 0;
+};
+
+struct MemoryScanRemoveResultsArguments
+{
+  int scan_id = 0;
+  std::vector<u32> addresses;
+};
+
+std::optional<MemoryScanStartConfig> ParseMemoryScanStart(const picojson::object& arguments);
+std::optional<MemoryScanRefineConfig> ParseMemoryScanRefine(const picojson::object& arguments);
+std::optional<MemoryScanStatusArguments> ParseMemoryScanStatus(const picojson::object& arguments);
+std::optional<MemoryScanResultsArguments> ParseMemoryScanResults(const picojson::object& arguments);
+std::optional<MemoryScanRemoveResultsArguments>
+ParseMemoryScanRemoveResults(const picojson::object& arguments);
 
 // Arguments of a `launch`/`attach` request. `stop_on_entry` is nullopt when
 // the client omitted the field; the session resolves the effective policy

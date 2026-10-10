@@ -12,6 +12,8 @@ Source/Core/Common/scmrev.h
 /out/
 /[Bb]inary*/
 /obj/
+/release/
+/test-results/
 # Accidental in-source CMake at repo root (prefer: cmake -B build ...)
 /CMakeCache.txt
 /CMakeFiles/
@@ -68,3 +70,5 @@ Externals/SlippiRustExtensions/target/
 AppDir/
 *.AppImage
 # end slippi change
+# Ignore CMake user presets
+CMakeUserPresets.json

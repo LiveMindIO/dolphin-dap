@@ -7,12 +7,19 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QComboBox>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFontDialog>
+#include <QFormLayout>
 #include <QInputDialog>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMap>
+#include <QSpinBox>
 #include <QUrl>
 
 #include <fmt/format.h>
@@ -27,6 +34,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/Debugger/DWARF/DwarfImport.h"
 #include "Core/Debugger/RSO.h"
 #include "Core/HLE/HLE.h"
@@ -107,6 +115,11 @@ MenuBar::MenuBar(QWidget* parent) : QMenuBar(parent)
   connect(this, &MenuBar::SelectionChanged, this, &MenuBar::OnSelectionChanged);
   connect(this, &MenuBar::RecordingStatusChanged, this, &MenuBar::OnRecordingStatusChanged);
   connect(this, &MenuBar::ReadOnlyModeChanged, this, &MenuBar::OnReadOnlyModeChanged);
+}
+
+MenuBar::~MenuBar()
+{
+  DAP::Deinit();
 }
 
 void MenuBar::OnEmulationStateChanged(Core::State state)
@@ -283,9 +296,18 @@ void MenuBar::AddToolsMenu()
 
   tools_menu->addAction(tr("&Cheats Manager"), this, [this] { emit ShowCheatsManager(); });
 
-  tools_menu->addAction(tr("FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
+  tools_menu->addAction(tr("&FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
 
-  auto* usb_device_menu = new QMenu(tr("Emulated USB Devices"), tools_menu);
+  tools_menu->addSeparator();
+
+  m_dap_server_action = tools_menu->addAction(QString{}, this, &MenuBar::ToggleDAPServer);
+  tools_menu->addAction(tr("Configure DAP Server..."), this, &MenuBar::ConfigureDAPServer);
+  connect(tools_menu, &QMenu::aboutToShow, this, &MenuBar::UpdateDAPServerAction);
+  UpdateDAPServerAction();
+
+  tools_menu->addSeparator();
+
+  auto* usb_device_menu = new QMenu(tr("&Emulated USB Devices"), tools_menu);
   usb_device_menu->addAction(tr("&Skylanders Portal"), this, &MenuBar::ShowSkylanderPortal);
   usb_device_menu->addAction(tr("&Infinity Base"), this, &MenuBar::ShowInfinityBase);
   usb_device_menu->addAction(tr("&Wii Speak"), this, &MenuBar::ShowWiiSpeakWindow);
@@ -301,7 +323,7 @@ void MenuBar::AddToolsMenu()
 
 #ifdef USE_RETRO_ACHIEVEMENTS
   m_achievements_action =
-      tools_menu->addAction(tr("Achievements"), this, [this] { emit ShowAchievementsWindow(); });
+      tools_menu->addAction(tr("&Achievements"), this, [this] { emit ShowAchievementsWindow(); });
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
   m_achievements_dev_menu = tools_menu->addMenu(tr("RetroAchievements Development"));
   m_raintegration_event_hook = AchievementManager::GetInstance().dev_menu_update_event.Register(
@@ -311,61 +333,61 @@ void MenuBar::AddToolsMenu()
   tools_menu->addSeparator();
 #endif  // USE_RETRO_ACHIEVEMENTS
 
-  QMenu* gc_ipl = tools_menu->addMenu(tr("Load GameCube Main Menu"));
+  QMenu* gc_ipl = tools_menu->addMenu(tr("Load &GameCube Main Menu"));
 
-  m_ntscj_ipl = gc_ipl->addAction(tr("NTSC-J"), this,
+  m_ntscj_ipl = gc_ipl->addAction(tr("NTSC-&J"), this,
                                   [this] { emit BootGameCubeIPL(DiscIO::Region::NTSC_J); });
-  m_ntscu_ipl = gc_ipl->addAction(tr("NTSC-U"), this,
+  m_ntscu_ipl = gc_ipl->addAction(tr("NTSC-&U"), this,
                                   [this] { emit BootGameCubeIPL(DiscIO::Region::NTSC_U); });
   m_pal_ipl =
-      gc_ipl->addAction(tr("PAL"), this, [this] { emit BootGameCubeIPL(DiscIO::Region::PAL); });
+      gc_ipl->addAction(tr("&PAL"), this, [this] { emit BootGameCubeIPL(DiscIO::Region::PAL); });
 
-  m_dev_ipl = gc_ipl->addAction(tr("Triforce"), this,
+  m_dev_ipl = gc_ipl->addAction(tr("&Triforce"), this,
                                 [this] { emit BootGameCubeIPL(DiscIO::Region::Unknown); });
 
-  tools_menu->addAction(tr("Memory Card Manager"), this, [this] { emit ShowMemcardManager(); });
+  tools_menu->addAction(tr("&Memory Card Manager"), this, [this] { emit ShowMemcardManager(); });
 
   tools_menu->addSeparator();
 
   // Label will be set by a NANDRefresh later
   m_boot_sysmenu = tools_menu->addAction(QString{}, this, [this] { emit BootWiiSystemMenu(); });
-  m_wad_install_action = tools_menu->addAction(tr("Install WAD..."), this, &MenuBar::InstallWAD);
-  m_manage_nand_menu = tools_menu->addMenu(tr("Manage NAND"));
-  m_import_backup = m_manage_nand_menu->addAction(tr("Import BootMii NAND Backup..."), this,
+  m_wad_install_action = tools_menu->addAction(tr("Install &WAD..."), this, &MenuBar::InstallWAD);
+  m_manage_nand_menu = tools_menu->addMenu(tr("Manage &NAND"));
+  m_import_backup = m_manage_nand_menu->addAction(tr("Import &BootMii NAND Backup..."), this,
                                                   [this] { emit ImportNANDBackup(); });
-  m_check_nand = m_manage_nand_menu->addAction(tr("Check NAND..."), this, &MenuBar::CheckNAND);
-  m_extract_certificates = m_manage_nand_menu->addAction(tr("Extract Certificates from NAND"), this,
-                                                         &MenuBar::NANDExtractCertificates);
+  m_check_nand = m_manage_nand_menu->addAction(tr("Check &NAND..."), this, &MenuBar::CheckNAND);
+  m_extract_certificates = m_manage_nand_menu->addAction(tr("Extract &Certificates from NAND"),
+                                                         this, &MenuBar::NANDExtractCertificates);
 
   m_boot_sysmenu->setEnabled(false);
 
   connect(&Settings::Instance(), &Settings::NANDRefresh, this,
           [this] { UpdateToolsMenu(Core::State::Uninitialized); });
 
-  m_perform_online_update_menu = tools_menu->addMenu(tr("Perform Online System Update"));
+  m_perform_online_update_menu = tools_menu->addMenu(tr("Perform Online System &Update"));
   m_perform_online_update_for_current_region = m_perform_online_update_menu->addAction(
-      tr("Current Region"), this, [this] { emit PerformOnlineUpdate(""); });
+      tr("&Current Region"), this, [this] { emit PerformOnlineUpdate(""); });
   m_perform_online_update_menu->addSeparator();
-  m_perform_online_update_menu->addAction(tr("Europe"), this,
+  m_perform_online_update_menu->addAction(tr("&Europe"), this,
                                           [this] { emit PerformOnlineUpdate("EUR"); });
-  m_perform_online_update_menu->addAction(tr("Japan"), this,
+  m_perform_online_update_menu->addAction(tr("&Japan"), this,
                                           [this] { emit PerformOnlineUpdate("JPN"); });
-  m_perform_online_update_menu->addAction(tr("Korea"), this,
+  m_perform_online_update_menu->addAction(tr("&Korea"), this,
                                           [this] { emit PerformOnlineUpdate("KOR"); });
-  m_perform_online_update_menu->addAction(tr("United States"), this,
+  m_perform_online_update_menu->addAction(tr("&United States"), this,
                                           [this] { emit PerformOnlineUpdate("USA"); });
 
   tools_menu->addSeparator();
 
   m_import_wii_save =
-      tools_menu->addAction(tr("Import Wii Save..."), this, &MenuBar::ImportWiiSave);
+      tools_menu->addAction(tr("Import &Wii Save..."), this, &MenuBar::ImportWiiSave);
   m_import_wii_saves =
-      tools_menu->addAction(tr("Import Wii Saves..."), this, &MenuBar::ImportWiiSaves);
+      tools_menu->addAction(tr("Import &Wii Saves..."), this, &MenuBar::ImportWiiSaves);
   m_export_wii_saves =
-      tools_menu->addAction(tr("Export All Wii Saves"), this, &MenuBar::ExportWiiSaves);
+      tools_menu->addAction(tr("Export All &Wii Saves"), this, &MenuBar::ExportWiiSaves);
 
   auto* const connect_wii_remotes_menu{
-      new QtUtils::NonAutodismissibleMenu(tr("Connect Wii Remotes"), tools_menu)};
+      new QtUtils::NonAutodismissibleMenu(tr("&Connect Wii Remotes"), tools_menu)};
 
   tools_menu->addSeparator();
   tools_menu->addMenu(connect_wii_remotes_menu);
@@ -373,15 +395,179 @@ void MenuBar::AddToolsMenu()
   for (int i = 0; i < 4; i++)
   {
     m_wii_remotes[i] = connect_wii_remotes_menu->addAction(
-        tr("Connect Wii Remote %1").arg(i + 1), this, [this, i] { emit ConnectWiiRemote(i); });
+        tr("Connect Wii Remote &%1").arg(i + 1), this, [this, i] { emit ConnectWiiRemote(i); });
     m_wii_remotes[i]->setCheckable(true);
   }
 
   connect_wii_remotes_menu->addSeparator();
 
-  m_wii_remotes[4] = connect_wii_remotes_menu->addAction(tr("Connect Balance Board"), this,
+  m_wii_remotes[4] = connect_wii_remotes_menu->addAction(tr("Connect &Balance Board"), this,
                                                          [this] { emit ConnectWiiRemote(4); });
   m_wii_remotes[4]->setCheckable(true);
+}
+
+void MenuBar::ToggleDAPServer()
+{
+  if (DAP::IsActive())
+  {
+    DAP::Deinit();
+    UpdateDAPServerAction();
+    return;
+  }
+
+  if (Config::Get(Config::MAIN_DAP_PORT) <= 0 && Config::Get(Config::MAIN_DAP_SOCKET).empty())
+  {
+    ConfigureDAPServer();
+    if (Config::Get(Config::MAIN_DAP_PORT) <= 0 && Config::Get(Config::MAIN_DAP_SOCKET).empty())
+    {
+      return;
+    }
+  }
+
+  StartDAPServer();
+}
+
+void MenuBar::ConfigureDAPServer()
+{
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Configure DAP Server"));
+
+  auto* transport = new QComboBox(&dialog);
+  transport->addItem(tr("TCP"), false);
+#ifndef _WIN32
+  transport->addItem(tr("Unix socket"), true);
+#endif
+
+  auto* port = new QSpinBox(&dialog);
+  port->setRange(1, 65535);
+  const int configured_port = Config::Get(Config::MAIN_DAP_PORT);
+  port->setValue(configured_port > 0 ? configured_port : 5678);
+
+  auto* socket_path = new QLineEdit(&dialog);
+  socket_path->setText(QString::fromStdString(Config::Get(Config::MAIN_DAP_SOCKET)));
+#ifndef _WIN32
+  socket_path->setPlaceholderText(QStringLiteral("/tmp/dolphin-dap"));
+#else
+  socket_path->setVisible(false);
+#endif
+
+  auto* port_label = new QLabel(tr("Port:"), &dialog);
+  auto* socket_label = new QLabel(tr("Socket path:"), &dialog);
+#ifdef _WIN32
+  socket_label->setVisible(false);
+#endif
+  auto update_transport = [=] {
+    const bool use_socket = transport->currentData().toBool();
+    port_label->setEnabled(!use_socket);
+    port->setEnabled(!use_socket);
+    socket_label->setEnabled(use_socket);
+    socket_path->setEnabled(use_socket);
+  };
+  connect(transport, &QComboBox::currentIndexChanged, &dialog, update_transport);
+
+#ifndef _WIN32
+  if (!Config::Get(Config::MAIN_DAP_SOCKET).empty())
+    transport->setCurrentIndex(1);
+#endif
+  update_transport();
+
+  auto* description = new QLabel(
+      tr("The server listens only on this computer. Configuration changes restart an active DAP "
+         "server and are used automatically when future games start."),
+      &dialog);
+  description->setWordWrap(true);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  auto* layout = new QFormLayout(&dialog);
+  layout->addRow(tr("Transport:"), transport);
+  layout->addRow(port_label, port);
+  layout->addRow(socket_label, socket_path);
+  layout->addRow(description);
+  layout->addRow(buttons);
+
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  const bool use_socket = transport->currentData().toBool();
+  const QString trimmed_socket_path = socket_path->text().trimmed();
+  if (use_socket && trimmed_socket_path.isEmpty())
+  {
+    ModalMessageBox::warning(this, tr("Invalid DAP Configuration"),
+                             tr("A Unix socket path is required."));
+    return;
+  }
+
+  const bool restart = DAP::IsActive();
+  if (use_socket)
+  {
+    Config::SetBase(Config::MAIN_DAP_SOCKET, trimmed_socket_path.toStdString());
+    Config::SetBase(Config::MAIN_DAP_PORT, -1);
+  }
+  else
+  {
+    Config::SetBase(Config::MAIN_DAP_SOCKET, std::string{});
+    Config::SetBase(Config::MAIN_DAP_PORT, port->value());
+  }
+  Config::Save();
+
+  if (restart)
+  {
+    DAP::Deinit();
+    StartDAPServer();
+  }
+}
+
+void MenuBar::StartDAPServer()
+{
+  if (DAP::IsActive())
+  {
+    UpdateDAPServerAction();
+    return;
+  }
+
+  if (AchievementManager::GetInstance().IsHardcoreModeActive())
+  {
+    ModalMessageBox::warning(this, tr("DAP Server"),
+                             tr("The DAP server is unavailable in Hardcore Mode."));
+    return;
+  }
+
+  if (Core::GetState(Core::System::GetInstance()) == Core::State::Uninitialized)
+  {
+    ModalMessageBox::information(
+        this, tr("DAP Server"),
+        tr("The DAP server is configured and will start when a game is launched."));
+    UpdateDAPServerAction();
+    return;
+  }
+
+#ifndef _WIN32
+  const std::string socket_path = Config::Get(Config::MAIN_DAP_SOCKET);
+  if (!socket_path.empty())
+    DAP::InitLocal(socket_path.c_str());
+  else
+#endif
+  {
+    const int port = Config::Get(Config::MAIN_DAP_PORT);
+    if (port > 0)
+      DAP::Init(static_cast<u32>(port));
+  }
+
+  if (!DAP::IsActive())
+  {
+    ModalMessageBox::critical(
+        this, tr("DAP Server"),
+        tr("Failed to start the DAP server. The configured port or socket may already be in use."));
+  }
+  UpdateDAPServerAction();
+}
+
+void MenuBar::UpdateDAPServerAction()
+{
+  m_dap_server_action->setText(DAP::IsActive() ? tr("Stop DAP Server") : tr("Start DAP Server"));
 }
 
 void MenuBar::AddEmulationMenu()
@@ -1074,6 +1260,7 @@ void MenuBar::AddSymbolsMenu()
   generate->addAction(tr("Address"), this, &MenuBar::GenerateSymbolsFromAddress);
   generate->addAction(tr("Signature Database"), this, &MenuBar::GenerateSymbolsFromSignatureDB);
   generate->addAction(tr("RSO Modules"), this, &MenuBar::GenerateSymbolsFromRSO);
+  m_debugger_show_demangled_names = m_symbols->addAction(tr("Show &Demangled Names"));
   m_symbols->addSeparator();
 
   m_symbols->addAction(tr("&Load Symbol Map"), this, &MenuBar::LoadSymbolMap);
@@ -1098,6 +1285,13 @@ void MenuBar::AddSymbolsMenu()
   m_symbols->addSeparator();
 
   m_symbols->addAction(tr("&Patch HLE Functions"), this, &MenuBar::PatchHLEFunctions);
+
+  m_debugger_show_demangled_names->setCheckable(true);
+  m_debugger_show_demangled_names->setChecked(Settings::Instance().IsShowDemangledNames());
+  connect(m_debugger_show_demangled_names, &QAction::toggled, &Settings::Instance(),
+          &Settings::SetShowDemangledNames);
+  connect(&Settings::Instance(), &Settings::ShowDemangledNamesChanged,
+          m_debugger_show_demangled_names, &QAction::setChecked);
 }
 
 void MenuBar::UpdateToolsMenu(const Core::State state)
@@ -1128,8 +1322,8 @@ void MenuBar::UpdateToolsMenu(const Core::State state)
                             DiscIO::GetSysMenuVersionString(tmd.GetTitleVersion(), tmd.IsvWii())) :
                         QString{};
 
-    const QString sysmenu_text = (tmd.IsValid() && tmd.IsvWii()) ? tr("Load vWii System Menu %1") :
-                                                                   tr("Load Wii System Menu %1");
+    const QString sysmenu_text = (tmd.IsValid() && tmd.IsvWii()) ? tr("Load vWii &System Menu %1") :
+                                                                   tr("Load Wii &System Menu %1");
 
     m_boot_sysmenu->setText(sysmenu_text.arg(sysmenu_version));
 

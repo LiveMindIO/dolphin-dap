@@ -17,5 +17,6 @@ namespace Core::Debug
 bool ImportEntrypointsFromJson(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
                                const std::string& json_path);
 
-bool ImportConfiguredEntrypoints(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db);
+bool ImportConfiguredEntrypoints(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
+                                 const std::string& elf_path = {});
 }  // namespace Core::Debug

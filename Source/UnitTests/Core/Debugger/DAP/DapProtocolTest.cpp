@@ -1,6 +1,7 @@
 // Copyright 2026 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +15,26 @@
 
 namespace
 {
+TEST(DapProtocolTest, ParseSteppingGranularityDefaultsToSource)
+{
+  EXPECT_EQ(DAP::Protocol::ParseSteppingGranularity({}),
+            DAP::Protocol::SteppingGranularity::Statement);
+  EXPECT_EQ(DAP::Protocol::ParseSteppingGranularity({{"granularity", picojson::value("line")}}),
+            DAP::Protocol::SteppingGranularity::Line);
+  EXPECT_EQ(
+      DAP::Protocol::ParseSteppingGranularity({{"granularity", picojson::value("statement")}}),
+      DAP::Protocol::SteppingGranularity::Statement);
+  EXPECT_EQ(
+      DAP::Protocol::ParseSteppingGranularity({{"granularity", picojson::value("instruction")}}),
+      DAP::Protocol::SteppingGranularity::Instruction);
+  EXPECT_FALSE(
+      DAP::Protocol::ParseSteppingGranularity({{"granularity", picojson::value("invalid")}}));
+  EXPECT_FALSE(DAP::Protocol::ParseSteppingGranularity({{"threadId", picojson::value(2.0)}}));
+  EXPECT_EQ(DAP::Protocol::ParseSteppingGranularity(
+                {{"threadId", picojson::value(1.0)}, {"singleThread", picojson::value(true)}}),
+            DAP::Protocol::SteppingGranularity::Statement);
+}
+
 using namespace DAP;
 
 picojson::object ParseObjectOrDie(const std::string& text)
@@ -59,6 +80,248 @@ TEST(DapProtocol, ParseRequestRejectsMissingSeq)
 {
   const auto message = ParseObjectOrDie(R"({"command":"pause"})");
   EXPECT_FALSE(Protocol::ParseRequest(message).has_value());
+}
+
+TEST(DapProtocol, ParseMemoryScanStart)
+{
+  const auto args = ParseObjectOrDie(R"({
+    "regions": ["mem1"],
+    "ranges": [{"start":"0x80004000", "end":"0x80004100"}],
+    "dataType": "u32",
+    "filter": "exact",
+    "value": "100",
+    "aligned": false,
+    "pauseDuringScan": true
+  })");
+  const auto scan = Protocol::ParseMemoryScanStart(args);
+  ASSERT_TRUE(scan.has_value());
+  ASSERT_EQ(scan->regions.size(), 1u);
+  EXPECT_EQ(scan->regions[0], "mem1");
+  ASSERT_EQ(scan->ranges.size(), 1u);
+  EXPECT_EQ(scan->ranges[0].start, 0x80004000u);
+  EXPECT_EQ(scan->ranges[0].end, 0x80004100u);
+  EXPECT_EQ(scan->data_type, MemoryScanDataType::U32);
+  EXPECT_EQ(scan->filter, MemoryScanFilter::Exact);
+  EXPECT_EQ(scan->value, "100");
+  EXPECT_FALSE(scan->aligned);
+  EXPECT_TRUE(scan->pause_during_scan);
+}
+
+TEST(DapProtocol, ParseMemoryScanStartDefaultsPauseAndAlignment)
+{
+  const auto args = ParseObjectOrDie(R"({"dataType":"s16", "filter":"unknown"})");
+  const auto scan = Protocol::ParseMemoryScanStart(args);
+  ASSERT_TRUE(scan.has_value());
+  EXPECT_TRUE(scan->aligned);
+  EXPECT_FALSE(scan->pause_during_scan);
+  EXPECT_TRUE(scan->regions.empty());
+}
+
+TEST(DapProtocol, ParseMemoryScanBytesDecodesPattern)
+{
+  const auto scan = Protocol::ParseMemoryScanStart(
+      ParseObjectOrDie(R"({"dataType":"bytes","filter":"exact","value":"3q2+7w=="})"));
+  ASSERT_TRUE(scan.has_value());
+  EXPECT_EQ(scan->data_type, MemoryScanDataType::Bytes);
+  EXPECT_EQ(scan->byte_value, (std::vector<u8>{0xde, 0xad, 0xbe, 0xef}));
+
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(R"({"dataType":"bytes","filter":"exact"})"))
+          .has_value());
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(
+                   ParseObjectOrDie(R"({"dataType":"bytes","filter":"exact","value":"bad"})"))
+                   .has_value());
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(
+                   ParseObjectOrDie(R"({"dataType":"bytes","filter":"exact","value":"3q2+7w== "})"))
+                   .has_value());
+
+  const auto refine = Protocol::ParseMemoryScanRefine(
+      ParseObjectOrDie(R"({"scanId":1,"filter":"exact","value":"qrs="})"));
+  ASSERT_TRUE(refine.has_value());
+  EXPECT_EQ(refine->value, "qrs=");
+}
+
+TEST(DapProtocol, ParseMemoryScanStringOptions)
+{
+  const auto scan = Protocol::ParseMemoryScanStart(ParseObjectOrDie(
+      R"({"dataType":"string","filter":"exact","value":"Hello",
+           "encoding":"ascii","caseSensitive":false})"));
+  ASSERT_TRUE(scan.has_value());
+  EXPECT_EQ(scan->data_type, MemoryScanDataType::String);
+  EXPECT_EQ(scan->byte_value, (std::vector<u8>{'H', 'e', 'l', 'l', 'o'}));
+  EXPECT_EQ(scan->string_encoding, MemoryScanStringEncoding::Ascii);
+  EXPECT_FALSE(scan->case_sensitive);
+
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(
+                                         R"({"dataType":"string","filter":"exact","value":"é",
+                        "encoding":"ascii"})"))
+          .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(
+                                         R"({"dataType":"string","filter":"exact","value":"x",
+                        "encoding":"utf16"})"))
+          .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(
+                                         R"({"dataType":"bytes","filter":"exact","value":"eA==",
+                        "caseSensitive":false})"))
+          .has_value());
+}
+
+TEST(DapProtocol, ParseMemoryScanPpcInstruction)
+{
+  const auto mnemonic = Protocol::ParseMemoryScanStart(
+      ParseObjectOrDie(R"({"dataType":"ppcInstruction","filter":"mnemonic","value":"ori"})"));
+  ASSERT_TRUE(mnemonic.has_value());
+  EXPECT_EQ(mnemonic->data_type, MemoryScanDataType::PpcInstruction);
+  EXPECT_EQ(mnemonic->filter, MemoryScanFilter::Mnemonic);
+
+  const auto valid = Protocol::ParseMemoryScanStart(
+      ParseObjectOrDie(R"({"dataType":"ppcInstruction","filter":"validInstruction"})"));
+  ASSERT_TRUE(valid.has_value());
+  EXPECT_EQ(valid->filter, MemoryScanFilter::ValidInstruction);
+}
+
+TEST(DapProtocol, ParseMemoryScanStartRejectsUnknownTypeOrFilter)
+{
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(R"({"dataType":"string", "filter":"exact"})"))
+          .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanStart(ParseObjectOrDie(R"({"dataType":"u8", "filter":"mystery"})"))
+          .has_value());
+}
+
+TEST(DapProtocol, ParseMemoryScanRefinePreservesOptionalPauseOverride)
+{
+  auto refine =
+      Protocol::ParseMemoryScanRefine(ParseObjectOrDie(R"({"scanId":4, "filter":"changed"})"));
+  ASSERT_TRUE(refine.has_value());
+  EXPECT_EQ(refine->scan_id, 4);
+  EXPECT_EQ(refine->filter, MemoryScanFilter::Changed);
+  EXPECT_FALSE(refine->pause_during_scan.has_value());
+
+  refine = Protocol::ParseMemoryScanRefine(
+      ParseObjectOrDie(R"({"scanId":4, "filter":"decreasedBy", "value":"2",
+                           "pauseDuringScan":false})"));
+  ASSERT_TRUE(refine.has_value());
+  ASSERT_TRUE(refine->pause_during_scan.has_value());
+  EXPECT_FALSE(*refine->pause_during_scan);
+}
+
+TEST(DapProtocol, ParseMemoryScanResultsCapsPageSize)
+{
+  const auto results = Protocol::ParseMemoryScanResults(
+      ParseObjectOrDie(R"({"scanId":2, "start":5, "count":100000})"));
+  ASSERT_TRUE(results.has_value());
+  EXPECT_EQ(results->scan_id, 2);
+  EXPECT_EQ(results->start, 5u);
+  EXPECT_EQ(results->count, 4096u);
+}
+
+TEST(DapProtocol, ParseMemoryScanRejectsMalformedOptionalFields)
+{
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(
+                   ParseObjectOrDie(R"({"dataType":"u8","filter":"unknown","regions":"mem1"})"))
+                   .has_value());
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(
+                   ParseObjectOrDie(R"({"dataType":"u8","filter":"unknown","pauseDuringScan":1})"))
+                   .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanRefine(ParseObjectOrDie(R"({"scanId":1.5,"filter":"changed"})"))
+          .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanResults(ParseObjectOrDie(R"({"scanId":1,"start":-1,"count":2})"))
+          .has_value());
+  EXPECT_FALSE(Protocol::ParseMemoryScanResults(
+                   ParseObjectOrDie(R"({"scanId":1,"start":18446744073709551616,"count":2})"))
+                   .has_value());
+}
+
+TEST(DapProtocol, ParseMemoryScanCapsMetadata)
+{
+  picojson::object arguments =
+      ParseObjectOrDie(R"({"dataType":"u8","filter":"exact","value":"1"})");
+  arguments["value"] = picojson::value(std::string(129, '1'));
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(arguments).has_value());
+
+  arguments = ParseObjectOrDie(R"({"dataType":"u8","filter":"unknown"})");
+  picojson::array ranges;
+  const picojson::object range = ParseObjectOrDie(R"({"start":"0x80004000","end":"0x80004001"})");
+  for (size_t i = 0; i < 1025; ++i)
+    ranges.emplace_back(range);
+  arguments["ranges"] = picojson::value(std::move(ranges));
+  EXPECT_FALSE(Protocol::ParseMemoryScanStart(arguments).has_value());
+
+  picojson::object refine = ParseObjectOrDie(R"({"scanId":1,"filter":"exact","value":"1"})");
+  refine["value"] = picojson::value(std::string(5465, '1'));
+  EXPECT_FALSE(Protocol::ParseMemoryScanRefine(refine).has_value());
+}
+
+TEST(DapProtocol, ParseMemoryScanRemoveResults)
+{
+  const auto arguments = Protocol::ParseMemoryScanRemoveResults(
+      ParseObjectOrDie(R"({"scanId":3,"addresses":["0x80004000","80004004"]})"));
+  ASSERT_TRUE(arguments.has_value());
+  EXPECT_EQ(arguments->scan_id, 3);
+  EXPECT_EQ(arguments->addresses, (std::vector<u32>{0x80004000, 0x80004004}));
+}
+
+TEST(DapProtocol, ParseMemoryScanRemoveResultsRejectsMalformedArguments)
+{
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanRemoveResults(ParseObjectOrDie(R"({"scanId":1,"addresses":[]})"))
+          .has_value());
+  EXPECT_FALSE(
+      Protocol::ParseMemoryScanRemoveResults(ParseObjectOrDie(R"({"scanId":1,"addresses":[1]})"))
+          .has_value());
+  EXPECT_FALSE(Protocol::ParseMemoryScanRemoveResults(
+                   ParseObjectOrDie(R"({"scanId":1,"addresses":["not-hex"]})"))
+                   .has_value());
+
+  picojson::array addresses(4097, picojson::value(std::string("0")));
+  picojson::object too_many;
+  too_many.emplace("scanId", 1.0);
+  too_many.emplace("addresses", std::move(addresses));
+  EXPECT_FALSE(Protocol::ParseMemoryScanRemoveResults(too_many).has_value());
+}
+
+TEST(DapProtocol, ParseResolvePointerChain)
+{
+  const auto arguments = Protocol::ParseResolvePointerChain(
+      ParseObjectOrDie(R"({"baseAddress":"0x80004000","offsets":[16,-4,0]})"));
+  ASSERT_TRUE(arguments.has_value());
+  EXPECT_EQ(arguments->base_address, 0x80004000u);
+  EXPECT_EQ(arguments->offsets, (std::vector<s32>{16, -4, 0}));
+
+  const auto boundaries = Protocol::ParseResolvePointerChain(
+      ParseObjectOrDie(R"({"baseAddress":"0","offsets":[-2147483648,2147483647]})"));
+  ASSERT_TRUE(boundaries.has_value());
+  EXPECT_EQ(boundaries->offsets,
+            (std::vector<s32>{std::numeric_limits<s32>::min(), std::numeric_limits<s32>::max()}));
+}
+
+TEST(DapProtocol, ParseResolvePointerChainRejectsMalformedArguments)
+{
+  EXPECT_FALSE(Protocol::ParseResolvePointerChain(
+                   ParseObjectOrDie(R"({"baseAddress":"0x80004000","offsets":[]})"))
+                   .has_value());
+  EXPECT_FALSE(Protocol::ParseResolvePointerChain(
+                   ParseObjectOrDie(R"({"baseAddress":"not-hex","offsets":[0]})"))
+                   .has_value());
+  EXPECT_FALSE(Protocol::ParseResolvePointerChain(
+                   ParseObjectOrDie(R"({"baseAddress":"0x80004000","offsets":[1.5]})"))
+                   .has_value());
+  EXPECT_FALSE(Protocol::ParseResolvePointerChain(
+                   ParseObjectOrDie(R"({"baseAddress":"0x80004000","offsets":[2147483648]})"))
+                   .has_value());
+
+  picojson::array offsets(65, picojson::value(0.0));
+  picojson::object too_deep;
+  too_deep.emplace("baseAddress", std::string("0x80004000"));
+  too_deep.emplace("offsets", std::move(offsets));
+  EXPECT_FALSE(Protocol::ParseResolvePointerChain(too_deep).has_value());
 }
 
 TEST(DapProtocol, ParseReadMemoryResolvesFields)
@@ -119,8 +382,7 @@ TEST(DapProtocol, ParseReadMemoryCapsOversizedCount)
   // for in shape, just bounded in size). `requested_count` retains the
   // original count so HandleReadMemory can surface the difference as
   // `unreadableBytes` (Bugbot #65).
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference":"0x80003100", "count": 4294967295})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100", "count": 4294967295})");
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->address, 0x80003100u);
@@ -132,8 +394,7 @@ TEST(DapProtocol, ParseReadMemoryCapsOversizedCount)
 TEST(DapProtocol, ParseReadMemoryPassesThroughUnderCap)
 {
   // A reasonable count well under the cap passes through unchanged.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference":"0x80003100", "count": 4096})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100", "count": 4096})");
   const auto read = Protocol::ParseReadMemory(args);
   ASSERT_TRUE(read.has_value());
   EXPECT_EQ(read->count, 4096u);
@@ -242,8 +503,7 @@ TEST(DapProtocol, ParseRealtimeWatchCapsCount)
   // allocate multi-MB buffers per subscription AND force a full-region
   // seed read in AddSubscription. Mirrors readMemory/writeMemory caps.
   // Bugbot #73.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference":"0x80003100", "count": 4294967295})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100", "count": 4294967295})");
   const auto watch = Protocol::ParseRealtimeWatch(args);
   ASSERT_TRUE(watch.has_value());
   EXPECT_EQ(watch->address, 0x80003100u);
@@ -258,8 +518,7 @@ TEST(DapProtocol, ParseRealtimeWatchCapsCount)
 TEST(DapProtocol, ParseRealtimeWatchPassesThroughUnderCap)
 {
   // A small count passes through unchanged.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference":"0x80003100", "count": 4096})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100", "count": 4096})");
   const auto watch = Protocol::ParseRealtimeWatch(args);
   ASSERT_TRUE(watch.has_value());
   EXPECT_EQ(watch->count, 4096u);
@@ -269,8 +528,7 @@ TEST(DapProtocol, ParseRealtimeWatchPassesThroughUnderCap)
 
 TEST(DapProtocol, ParseRealtimeWatchRejectsZeroCount)
 {
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference":"0x80003100", "count": 0})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference":"0x80003100", "count": 0})");
   EXPECT_FALSE(Protocol::ParseRealtimeWatch(args).has_value());
 }
 
@@ -288,7 +546,7 @@ TEST(DapProtocol, ParseSetBreakpointsResolvesLinesAgainstBase)
 {
   const auto args = ParseObjectOrDie(R"({
     "source": {"name": "0x80003000"},
-    "breakpoints": [{"line": 0}, {"line": 2}]
+    "breakpoints": [{"line": 1}, {"line": 3}]
   })");
   const auto parsed = Protocol::ParseSetBreakpoints(args);
   ASSERT_EQ(parsed.breakpoints.size(), 2u);
@@ -320,7 +578,7 @@ TEST(DapProtocol, ParseSetBreakpointsUsesPathWhenNameNotHex)
   EXPECT_EQ(*parsed.base, 0x80004000u);
   ASSERT_EQ(parsed.breakpoints.size(), 1u);
   ASSERT_TRUE(parsed.breakpoints[0].address.has_value());
-  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80004004u);
+  EXPECT_EQ(*parsed.breakpoints[0].address, 0x80004000u);
 }
 
 TEST(DapProtocol, ParseSetBreakpointsExtractsCondition)
@@ -574,7 +832,8 @@ TEST(DapProtocol, ParseGotoTargetsResolvesSourceAndLine)
   })");
   const auto parsed = Protocol::ParseGotoTargets(message);
   ASSERT_TRUE(parsed.address.has_value());
-  EXPECT_EQ(*parsed.address, 0x80001008u);
+  EXPECT_EQ(*parsed.address, 0x80001004u);
+  EXPECT_EQ(parsed.line, 2);
 }
 
 TEST(DapProtocol, ParseGotoTargetsWithoutSourceIsUnresolved)
@@ -588,8 +847,7 @@ TEST(DapProtocol, ParseGotoTargetsWithoutLineUsesSourceBase)
 {
   const auto message = ParseObjectOrDie(R"({"source": {"name": "0x80001000"}})");
   const auto parsed = Protocol::ParseGotoTargets(message);
-  ASSERT_TRUE(parsed.address.has_value());
-  EXPECT_EQ(*parsed.address, 0x80001000u);
+  EXPECT_FALSE(parsed.address.has_value());
 }
 
 TEST(DapProtocol, ParseGotoExtractsThreadAndTarget)
@@ -610,15 +868,25 @@ TEST(DapProtocol, ParseGotoRejectsMissingTarget)
 TEST(DapProtocol, ParseSourceRequestFromSourceReference)
 {
   const auto message = ParseObjectOrDie(R"({
-    "sourceReference": 2147487744,
+    "sourceReference": 6442455040,
     "startLine": 2,
     "endLine": 3
   })");
   const auto parsed = Protocol::ParseSourceRequest(message);
-  ASSERT_TRUE(parsed.base.has_value());
-  EXPECT_EQ(*parsed.base, 0x80001000u);
+  ASSERT_TRUE(parsed.source_reference.has_value());
+  EXPECT_EQ(*parsed.source_reference, DAP::MakeDisassemblySourceReference(0x80001000u));
   EXPECT_EQ(parsed.start_line, 2);
   EXPECT_EQ(parsed.end_line, 3);
+}
+
+TEST(DapProtocol, DisassemblySourceReferencesArePositiveAndDisjointFromFileReferences)
+{
+  constexpr u32 address = 1;
+  constexpr DAP::SourceReference reference = DAP::MakeDisassemblySourceReference(address);
+  EXPECT_GT(reference, static_cast<DAP::SourceReference>(std::numeric_limits<u32>::max()));
+  EXPECT_NE(reference, 1u);
+  ASSERT_TRUE(DAP::DecodeDisassemblySourceReference(reference).has_value());
+  EXPECT_EQ(*DAP::DecodeDisassemblySourceReference(reference), address);
 }
 
 TEST(DapProtocol, ParseSourceRequestFromSourceObject)
@@ -628,10 +896,21 @@ TEST(DapProtocol, ParseSourceRequestFromSourceObject)
     "startLine": 1
   })");
   const auto parsed = Protocol::ParseSourceRequest(message);
-  ASSERT_TRUE(parsed.base.has_value());
-  EXPECT_EQ(*parsed.base, 0x80001000u);
+  ASSERT_TRUE(parsed.source_reference.has_value());
+  EXPECT_EQ(*parsed.source_reference, DAP::MakeDisassemblySourceReference(0x80001000u));
   EXPECT_EQ(parsed.start_line, 1);
   EXPECT_EQ(parsed.end_line, -1);
+}
+
+TEST(DapProtocol, ParseSourceRequestFromDolphinSourceIdentity)
+{
+  const auto message = ParseObjectOrDie(R"({
+    "source": {"adapterData": {"dolphinSourceId": 2}},
+    "startLine": 1
+  })");
+  const auto parsed = Protocol::ParseSourceRequest(message);
+  ASSERT_TRUE(parsed.source_reference.has_value());
+  EXPECT_EQ(*parsed.source_reference, 2U);
 }
 
 TEST(DapProtocol, ParseBreakpointLocationsResolvesLineRange)
@@ -642,8 +921,8 @@ TEST(DapProtocol, ParseBreakpointLocationsResolvesLineRange)
     "endLine": 3
   })");
   const auto parsed = Protocol::ParseBreakpointLocations(message);
-  ASSERT_TRUE(parsed.base.has_value());
-  EXPECT_EQ(*parsed.base, 0x80001000u);
+  ASSERT_TRUE(parsed.source_reference.has_value());
+  EXPECT_EQ(*parsed.source_reference, DAP::MakeDisassemblySourceReference(0x80001000u));
   EXPECT_EQ(parsed.start_line, 1);
   EXPECT_EQ(parsed.end_line, 3);
 }
@@ -652,19 +931,19 @@ TEST(DapProtocol, ParseBreakpointLocationsWithoutSourceIsUnresolved)
 {
   const auto message = ParseObjectOrDie(R"({"line": 1})");
   const auto parsed = Protocol::ParseBreakpointLocations(message);
-  EXPECT_FALSE(parsed.base.has_value());
+  EXPECT_FALSE(parsed.source_reference.has_value());
 }
 
 TEST(DapProtocol, ParseBreakpointLocationsResolvesSourceReference)
 {
   const auto message = ParseObjectOrDie(R"({
-    "sourceReference": 1,
+    "source": {"sourceReference": 1},
     "line": 2,
     "endLine": 5
   })");
   const auto parsed = Protocol::ParseBreakpointLocations(message);
-  ASSERT_TRUE(parsed.base.has_value());
-  EXPECT_EQ(*parsed.base, 1u);
+  ASSERT_TRUE(parsed.source_reference.has_value());
+  EXPECT_EQ(*parsed.source_reference, 1u);
   EXPECT_EQ(parsed.start_line, 2);
   EXPECT_EQ(parsed.end_line, 5);
 }
@@ -865,8 +1144,7 @@ TEST(DapProtocol, ParseFindFreeMemoryRejectsZeroCount)
 TEST(DapProtocol, ParseInjectCodeStandaloneFormResolvesCode)
 {
   // "AAAAAQ==" base64-decodes to {0x00,0x00,0x00,0x01}.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "code": "AAAAAQ=="})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000", "code": "AAAAAQ=="})");
   const auto parsed = Protocol::ParseInjectCode(args);
   ASSERT_TRUE(parsed.has_value());
   ASSERT_TRUE(parsed->address.has_value());
@@ -894,16 +1172,14 @@ TEST(DapProtocol, ParseInjectCodeRejectsMissingData)
 TEST(DapProtocol, ParseInjectCodeRejectsInvalidBase64)
 {
   // "AAAA" is missing padding; reject the parse (strict base64).
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "code": "AAAA"})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000", "code": "AAAA"})");
   EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
 }
 
 TEST(DapProtocol, ParseInjectCodeRejectsNonMultipleOfFourLength)
 {
   // "AAE=" base64-decodes to a single byte (0x01) -- not a 4-byte instruction.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "code": "AAE="})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000", "code": "AAE="})");
   EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
 }
 
@@ -911,8 +1187,8 @@ TEST(DapProtocol, ParseDetourExtractsTargetAddressAndBody)
 {
   // detourBody: "fGMbeA==" base64-decodes to {0x7C,0x63,0x1B,0x78}
   // (`mr r3,r3`). target via memoryReference.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "detourBody": "fGMbeA=="})");
+  const auto args =
+      ParseObjectOrDie(R"({"memoryReference": "0x80001000", "detourBody": "fGMbeA=="})");
   const auto parsed = Protocol::ParseDetour(args);
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->target_address, 0x80001000u);
@@ -948,8 +1224,7 @@ TEST(DapProtocol, ParseDetourRejectsMissingBody)
 TEST(DapProtocol, ParseDetourRejectsNonMultipleOfFourBodyLength)
 {
   // "AAE=" decodes to one byte -- not a 4-byte aligned instruction sequence.
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "detourBody": "AAE="})");
+  const auto args = ParseObjectOrDie(R"({"memoryReference": "0x80001000", "detourBody": "AAE="})");
   EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
 }
 
@@ -961,10 +1236,10 @@ TEST(DapProtocol, ParseInjectCodeRejectsOversizedDecode)
 {
   // Build a 1 MiB + 4 byte payload (4-byte aligned), base64-encode it.
   constexpr std::size_t kCap = 1u << 20;  // 1 MiB
-  std::vector<u8> raw(kCap + 4, 0x60);  // nop padding
+  std::vector<u8> raw(kCap + 4, 0x60);    // nop padding
   const std::string b64 = DAP::Json::Base64Encode(raw);
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
+  const auto args =
+      ParseObjectOrDie(R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
   EXPECT_FALSE(Protocol::ParseInjectCode(args).has_value());
 }
 
@@ -974,8 +1249,8 @@ TEST(DapProtocol, ParseInjectCodeAcceptsAtCap)
   constexpr std::size_t kCap = 1u << 20;  // 1 MiB
   std::vector<u8> raw(kCap, 0x60);
   const std::string b64 = DAP::Json::Base64Encode(raw);
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
+  const auto args =
+      ParseObjectOrDie(R"({"memoryReference": "0x80001000", "code": ")" + b64 + R"("})");
   const auto parsed = Protocol::ParseInjectCode(args);
   ASSERT_TRUE(parsed.has_value());
   EXPECT_EQ(parsed->code.size(), kCap);
@@ -986,8 +1261,8 @@ TEST(DapProtocol, ParseDetourRejectsOversizedDecode)
   constexpr std::size_t kCap = 1u << 20;
   std::vector<u8> raw(kCap + 4, 0x60);
   const std::string b64 = DAP::Json::Base64Encode(raw);
-  const auto args = ParseObjectOrDie(
-      R"({"memoryReference": "0x80001000", "detourBody": ")" + b64 + R"("})");
+  const auto args =
+      ParseObjectOrDie(R"({"memoryReference": "0x80001000", "detourBody": ")" + b64 + R"("})");
   EXPECT_FALSE(Protocol::ParseDetour(args).has_value());
 }
 

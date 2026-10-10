@@ -378,6 +378,36 @@ double Expression::Evaluate(Core::System& system) const
   return result;
 }
 
+bool Expression::MayWriteState() const
+{
+  std::vector<const expr*> pending{m_expr.get()};
+  while (!pending.empty())
+  {
+    const expr* node = pending.back();
+    pending.pop_back();
+    if (node->type == OP_ASSIGN)
+      return true;
+    const vec_expr_t* args = nullptr;
+    if (node->type == OP_FUNC)
+    {
+      // These are parsed function names, not text inside literals or variable names.
+      if (std::string_view(node->param.func.f->name).starts_with("write_"))
+        return true;
+      args = &node->param.func.args;
+    }
+    else if (expr_is_unary(node->type) || expr_is_binary(node->type))
+    {
+      args = &node->param.op.args;
+    }
+    if (args)
+    {
+      for (int i = 0; i < vec_len(args); ++i)
+        pending.push_back(&vec_nth(args, i));
+    }
+  }
+  return false;
+}
+
 void Expression::SynchronizeBindings(Core::System& system, SynchronizeDirection dir) const
 {
   auto& ppc_state = system.GetPPCState();

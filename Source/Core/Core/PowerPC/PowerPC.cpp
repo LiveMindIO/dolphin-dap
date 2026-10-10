@@ -19,6 +19,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/Debugger/ExecutionState.h"
 #include "Core/HW/CPU.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/Host.h"
@@ -633,34 +634,62 @@ void PowerPCManager::CheckExternalExceptions()
   MSRUpdated();
 }
 
+namespace
+{
+enum class BreakpointHit
+{
+  None,
+  Temporary,
+  Regular,
+};
+
+BreakpointHit CheckBreakpointHit(Core::System& system, const BreakPoints::Snapshot& snapshot,
+                                 const u32 pc)
+{
+  if (!snapshot.breaking_enabled)
+    return BreakpointHit::None;
+  // A temporary return breakpoint guarantees step completion, but must not hide a
+  // genuine user hit (or fabricate one for a disabled/false/log-only user breakpoint).
+  const TBreakPoint* bp = snapshot.GetRegularBreakpoint(pc);
+  if (bp && bp->is_enabled && EvaluateCondition(system, bp->condition))
+  {
+    const auto& state = system.GetPPCState();
+
+    if (bp->log_on_hit)
+    {
+      NOTICE_LOG_FMT(MEMMAP,
+                     "BP {:08x} {}({:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
+                     "{:08x}) LR={:08x}",
+                     pc, system.GetPPCSymbolDB().GetDescription(pc), state.gpr[3], state.gpr[4],
+                     state.gpr[5], state.gpr[6], state.gpr[7], state.gpr[8], state.gpr[9],
+                     state.gpr[10], state.gpr[11], state.gpr[12], LR(state));
+    }
+    if (bp->break_on_hit)
+      return BreakpointHit::Regular;
+  }
+  return snapshot.temporary_breakpoint && snapshot.temporary_breakpoint->address == pc ?
+             BreakpointHit::Temporary :
+             BreakpointHit::None;
+}
+}  // namespace
+
 bool PowerPCManager::CheckBreakPoints()
 {
-  const TBreakPoint* bp = m_breakpoints.GetBreakpoint(m_ppc_state.pc);
-
-  if (!m_breakpoints.IsBreakingEnabled() || !bp || !bp->is_enabled ||
-      !EvaluateCondition(m_system, bp->condition))
-    return false;
-
-  if (bp->log_on_hit)
-  {
-    NOTICE_LOG_FMT(MEMMAP,
-                   "BP {:08x} {}({:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
-                   "{:08x}) LR={:08x}",
-                   m_ppc_state.pc, m_symbol_db.GetDescription(m_ppc_state.pc), m_ppc_state.gpr[3],
-                   m_ppc_state.gpr[4], m_ppc_state.gpr[5], m_ppc_state.gpr[6], m_ppc_state.gpr[7],
-                   m_ppc_state.gpr[8], m_ppc_state.gpr[9], m_ppc_state.gpr[10], m_ppc_state.gpr[11],
-                   m_ppc_state.gpr[12], LR(m_ppc_state));
-  }
-  if (bp->break_on_hit)
-    return true;
-  return false;
+  return CheckBreakpointHit(m_system, *m_breakpoints.GetSnapshot(), m_ppc_state.pc) !=
+         BreakpointHit::None;
 }
 
 bool PowerPCManager::CheckAndHandleBreakPoints()
 {
-  if (CheckBreakPoints())
+  const auto hit = CheckBreakpointHit(m_system, *m_breakpoints.GetSnapshot(), m_ppc_state.pc);
+  if (hit != BreakpointHit::None)
   {
-    m_system.GetCPU().Break();
+    const bool regular = hit == BreakpointHit::Regular;
+    m_system.GetCPU().Break(
+        {.cause = regular ? Core::Debug::ExecutionStopCause::CodeBreakpoint :
+                            Core::Debug::ExecutionStopCause::Step,
+         .pc = m_ppc_state.pc,
+         .code_breakpoint_address = regular ? std::optional<u32>(m_ppc_state.pc) : std::nullopt});
     if (GDBStub::IsActive())
       GDBStub::TakeControl();
     return true;

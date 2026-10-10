@@ -29,7 +29,9 @@ enum ElfMachine
   EM_68K = 4,
   EM_88K = 5,
   EM_860 = 7,
-  EM_MIPS = 8
+  EM_MIPS = 8,
+  EM_PPC = 20,
+  EM_ARM = 40,
 };
 
 // File version

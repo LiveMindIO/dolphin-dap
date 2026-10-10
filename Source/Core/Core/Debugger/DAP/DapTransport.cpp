@@ -13,12 +13,14 @@ typedef SSIZE_T ssize_t;
 #include <unistd.h>
 #endif
 
+#include "Common/Network.h"
 #include "Core/Debugger/DAP/DapFraming.h"
 
 namespace DAP
 {
 DapTransport::DapTransport(int socket) : m_socket(socket)
 {
+  Common::SetPlatformSocketOptions(m_socket);
 }
 
 DapTransport::~DapTransport()
@@ -67,7 +69,7 @@ bool DapTransport::WriteMessage(std::string_view body)
   size_t size = framed.size();
   while (size > 0)
   {
-    const ssize_t sent = send(m_socket, data, static_cast<int>(size), 0);
+    const ssize_t sent = send(m_socket, data, static_cast<int>(size), Common::SEND_FLAGS);
     if (sent <= 0)
       return false;
     data += sent;

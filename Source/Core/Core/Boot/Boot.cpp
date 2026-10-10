@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <numeric>
@@ -34,6 +35,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
+#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/GeckoCode.h"
 #include "Core/HLE/HLE.h"
@@ -76,6 +78,11 @@ static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
   {
     // This is the UTF-8 representation of U+FEFF.
     constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
+
+#ifndef _WIN32
+    if (line.ends_with('\r'))
+      line.pop_back();
+#endif
 
     if (line.starts_with(utf8_bom))
     {
@@ -251,6 +258,14 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
     if (extension == ".elf")
     {
       auto elf_reader = std::make_unique<ElfReader>(path);
+      if (!elf_reader->IsPPCExecutable())
+      {
+        PanicAlertFmtT(
+            "\"{0}\" is not a supported executable. Dolphin requires a 32-bit big-endian "
+            "PowerPC ELF with an executable load segment containing its entry point.",
+            path);
+        return {};
+      }
       return std::make_unique<BootParameters>(Executable{std::move(path), std::move(elf_reader)},
                                               std::move(boot_session_data_));
     }
@@ -476,11 +491,12 @@ bool CBoot::Load_BS2(Core::System& system, const std::string& boot_rom_filename)
   return true;
 }
 
-static void SetDefaultDisc(DVD::DVDInterface& dvd_interface)
+static const DiscIO::VolumeDisc* SetDefaultDisc(DVD::DVDInterface& dvd_interface)
 {
   const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
   if (!default_iso.empty())
-    SetDisc(dvd_interface, DiscIO::CreateDiscForCore(default_iso));
+    return SetDisc(dvd_interface, DiscIO::CreateDiscForCore(default_iso));
+  return nullptr;
 }
 
 static void CopyDefaultExceptionHandlers(Core::System& system)
@@ -533,7 +549,34 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (!EmulatedBS2(system, guard, system.IsWii(), *volume, riivolution_patches))
         return false;
 
-      SConfig::OnTitleDirectlyBooted(guard);
+      if (disc.debug_elf && disc.replace_executable)
+      {
+        if (!disc.debug_elf->LoadIntoMemory(system))
+        {
+          PanicAlertFmtT("Failed to load the debug ELF to memory.");
+          return false;
+        }
+        system.GetPPCState().pc = disc.debug_elf->GetEntryPoint();
+      }
+
+      SConfig::OnTitleDirectlyBooted(guard, disc.load_debug_elf);
+
+      bool debug_symbols_changed = false;
+      if (disc.debug_elf && disc.debug_elf->LoadSymbols(guard, system.GetPPCSymbolDB(),
+                                                        PathToFileName(disc.debug_elf_path)))
+      {
+        debug_symbols_changed = true;
+      }
+      if (disc.replace_executable && Core::Debug::ImportConfiguredEntrypoints(
+                                         guard, system.GetPPCSymbolDB(), disc.debug_elf_path))
+      {
+        debug_symbols_changed = true;
+      }
+      if (debug_symbols_changed)
+      {
+        HLE::PatchFunctions(system);
+        Host_PPCSymbolsChanged();
+      }
       return true;
     }
 
@@ -544,36 +587,46 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       if (!executable.reader->IsValid())
         return false;
 
-      SetDefaultDisc(system.GetDVDInterface());
+      const DiscIO::VolumeDisc* const default_disc = SetDefaultDisc(system.GetDVDInterface());
 
       auto& ppc_state = system.GetPPCState();
-
-      SetupMSR(system);
-      SetupHID(ppc_state, system.IsWii());
-      SetupBAT(system, system.IsWii());
-      CopyDefaultExceptionHandlers(system);
-
-      if (system.IsWii())
+      if (executable.boot_with_default_disc)
       {
-        // Set a value for the SP. It doesn't matter where this points to,
-        // as long as it is a valid location. This value is taken from a homebrew binary.
-        ppc_state.gpr[1] = 0x8004d4bc;
-
-        // Because there is no TMD to get the requested system (IOS) version from,
-        // we default to IOS58, which is the version used by the Homebrew Channel.
-        SetupWiiMemory(system, IOS::HLE::IOSC::ConsoleType::Retail);
-        system.GetIOS()->BootIOS(Titles::IOS(58));
-
-        // The Apploader writes an IOS-like version number into memory.
-        // Older versions of OSInit read it to check IOS compatibility.
-        constexpr u32 ADDR_IOS_VERSION = 0x3140;
-        constexpr u32 ADDR_APPLOADER_VERSION = 0x3188;
-        const u32 ios_version = system.GetMemory().Read_U32(ADDR_IOS_VERSION);
-        system.GetMemory().Write_U32(ios_version, ADDR_APPLOADER_VERSION);
+        if (!default_disc ||
+            !EmulatedBS2(system, guard, system.IsWii(), *default_disc, riivolution_patches))
+        {
+          return false;
+        }
       }
       else
       {
-        SetupGCMemory(system, guard);
+        SetupMSR(system);
+        SetupHID(ppc_state, system.IsWii());
+        SetupBAT(system, system.IsWii());
+        CopyDefaultExceptionHandlers(system);
+
+        if (system.IsWii())
+        {
+          // Set a value for the SP. It doesn't matter where this points to,
+          // as long as it is a valid location. This value is taken from a homebrew binary.
+          ppc_state.gpr[1] = 0x8004d4bc;
+
+          // Because there is no TMD to get the requested system (IOS) version from,
+          // we default to IOS58, which is the version used by the Homebrew Channel.
+          SetupWiiMemory(system, IOS::HLE::IOSC::ConsoleType::Retail);
+          system.GetIOS()->BootIOS(Titles::IOS(58));
+
+          // The Apploader writes an IOS-like version number into memory.
+          // Older versions of OSInit read it to check IOS compatibility.
+          constexpr u32 ADDR_IOS_VERSION = 0x3140;
+          constexpr u32 ADDR_APPLOADER_VERSION = 0x3188;
+          const u32 ios_version = system.GetMemory().Read_U32(ADDR_IOS_VERSION);
+          system.GetMemory().Write_U32(ios_version, ADDR_APPLOADER_VERSION);
+        }
+        else
+        {
+          SetupGCMemory(system, guard);
+        }
       }
 
       if (!executable.reader->LoadIntoMemory(system))
@@ -582,19 +635,9 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
         return false;
       }
 
-      AchievementManager::GetInstance().LoadGame(nullptr);
+      AchievementManager::GetInstance().LoadGame(executable.boot_with_default_disc ? default_disc :
+                                                                                     nullptr);
 
-      // DESNOTE(jbarber, 2026-07-21): The previous order called
-      // OnTitleDirectlyBooted (which imports the configured DwarfElf and
-      // entrypoints sidecars) and then ran ppc_symbol_db.Clear() before
-      // LoadSymbols, silently discarding the sidecar imports. Order is now:
-      // set PC, clear the symbol DB, load the executable's own symbols
-      // (and any .debug DWARF it carries), THEN hand off to
-      // OnTitleDirectlyBooted so the sidecar imports layer on top. The
-      // symbol DB is additive -- OnTitleDirectlyBooted calls
-      // ImportConfiguredDwarfElf / ImportConfiguredEntrypoints without
-      // clearing, and its HLE::Reload re-runs PatchFunctions with all
-      // symbols available.
       ppc_state.pc = executable.reader->GetEntryPoint();
 
       const std::string filename = PathToFileName(executable.path);
@@ -602,16 +645,31 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
       auto& ppc_symbol_db = system.GetPPCSymbolDB();
       bool symbols_changed = ppc_symbol_db.Clear();
 
+      const std::string& configured_elf = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+      std::error_code equivalent_error;
+      const bool configured_elf_is_executable =
+          !configured_elf.empty() &&
+          std::filesystem::equivalent(configured_elf, executable.path, equivalent_error);
+      const bool defer_configured_elf =
+          executable.boot_with_default_disc || configured_elf_is_executable;
+
+      // Title setup can clear or replace the symbol DB while loading a map, so it must finish
+      // before the executable's intrinsic symbols and DWARF are imported.
+      SConfig::OnTitleDirectlyBooted(guard, !defer_configured_elf);
+
       if (executable.reader->LoadSymbols(guard, ppc_symbol_db, filename))
       {
         symbols_changed = true;
         HLE::PatchFunctions(system);
       }
 
-      SConfig::OnTitleDirectlyBooted(guard);
-      // OnTitleDirectlyBooted may have imported sidecar symbols; surface
-      // any change to the host UI. PatchFunctions already ran above and
-      // inside OnTitleDirectlyBooted's HLE::Reload, so symbols are live.
+      if (defer_configured_elf &&
+          Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db, executable.path))
+      {
+        symbols_changed = true;
+        HLE::PatchFunctions(system);
+      }
+
       if (symbols_changed)
         Host_PPCSymbolsChanged();
 

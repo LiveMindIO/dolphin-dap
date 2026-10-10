@@ -41,6 +41,9 @@ public:
 
   double Evaluate(Core::System& system) const;
 
+  // Conservatively detects assignments and host writes, including conditional branches.
+  bool MayWriteState() const;
+
   std::string GetText() const;
 
   BitSet32 GetGPRsUsed()

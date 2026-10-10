@@ -1,0 +1,9 @@
+#!/bin/sh
+# AppRun is a symlink to this file. Resolve it before locating the executables;
+# linuxdeploy patches their library paths and installs the adjacent qt.conf.
+here=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+if [ "${1:-}" = --nogui ]; then
+  shift
+  exec "$here/dolphin-emu-nogui" "$@"
+fi
+exec "$here/dolphin-emu" "$@"

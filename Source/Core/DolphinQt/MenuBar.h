@@ -45,6 +45,7 @@ public:
   static MenuBar* GetMenuBar() { return s_menu_bar; }
 
   explicit MenuBar(QWidget* parent = nullptr);
+  ~MenuBar() override;
 
   void UpdateToolsMenu(Core::State state);
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
@@ -169,6 +170,10 @@ private:
   void ExportWiiSaves();
   void CheckNAND();
   void NANDExtractCertificates();
+  void ToggleDAPServer();
+  void ConfigureDAPServer();
+  void StartDAPServer();
+  void UpdateDAPServerAction();
   void ChangeDebugFont();
 
   // Debugging UI
@@ -237,6 +242,7 @@ private:
   QAction* m_import_wii_save;
   QAction* m_import_wii_saves;
   QAction* m_export_wii_saves;
+  QAction* m_dap_server_action;
 
   // Emulation
   QAction* m_play_action;
@@ -311,6 +317,7 @@ private:
   QAction* m_jit_systemregisters_off;
   QAction* m_jit_branch_off;
   QAction* m_jit_register_cache_off;
+  QAction* m_debugger_show_demangled_names;
 
   bool m_game_selected = false;
 

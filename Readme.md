@@ -9,12 +9,37 @@ that the dolphin upstream would like, so don't ask me to upstream it.  People wh
 use what's here. If any dedicated individual wants to add the functionality to official dolphin without vibecoding the
 whole thing, I would love it.
 
+For the DAP functionality, setup, and usage, see the [Dolphin DAP documentation](Tools/dap/README.md).
+
+## Builds, tests, and release downloads
+
+The [GitHub Actions workflow](.github/workflows/build.yml) builds and tests Windows x64
+and Linux x64 in both Release and Debug configurations on pull requests and pushes.
+Release packages are available as Actions artifacts. Pushing any tag also creates a
+GitHub Release for that tag (or adds assets to an existing release), but only after
+all Windows/Linux builds, tests and Linux packaging jobs pass. The tagged commit must contain the workflow.
+See the [CI guide](Tools/ci/README.md) for upstream recipe provenance and release details.
+
+Extract the entire ZIP before running `Dolphin.exe` for the Qt source debugger or
+`DolphinNoGUI.exe` for an editor-managed DAP session. The ZIP includes Qt plugins,
+MSVC runtime DLLs, translations, game-system resources, and license files; the executables
+are not standalone files. Linux downloads include Ubuntu 24.04 DEB, Fedora 44 RPM,
+Arch Linux, Gentoo GPKG, AppImage and Flatpak packages. See the [CI guide](Tools/ci/README.md)
+for installation, supported environments and Flatpak debugger permissions.
+macOS downloads are DMGs for Apple Silicon and Intel, requiring macOS 14 or newer.
+They are ad-hoc signed but not notarized; see the included README for first launch.
+Every package includes a SHA-256 checksum file. The official Dolphin auto-updater is disabled in these builds
+so it cannot replace the fork with an upstream binary. Game images and debug ELFs are
+not included; see the [Qt guide](Tools/dap/qt-source-debugging.md) or
+[DAP server guide](Tools/dap/README.md) to configure your own files.
+
 ## Debug Adapter Protocol (DAP) Server
 
 This fork adds a **Debug Adapter Protocol server** that exposes Dolphin's
 PowerPC debugger to DAP-aware clients (VS Code, Cursor, Neovim, etc.). Enable
-it by configuring a DAP port or socket at runtime; it compiles into the
-NoGUI target with no separate binary.
+core debugging with `-C Dolphin.Interface.DebugModeEnabled=True`, configure a DAP
+port or socket, and boot a game to start the listener. A port or socket alone does
+not enable breakpoint checks. The server is included in Dolphin's Qt and NoGUI builds.
 
 For build/run instructions, tests, known limitations, the operations summary,
 and per-operation request/response payload reference, see
@@ -90,12 +115,12 @@ This means that you will need to install a Rust compiler for your current system
 
 ### Windows
 
-Visual Studio 2022 or later is a hard requirement.
+Visual Studio 2026 or later is a hard requirement.
 Open the folder that contains the base CMakeLists.txt file to build Dolphin on Windows.
 Other compilers might able to build Dolphin on Windows but have not been tested and are not
 recommended to be used. Git and Windows 11 SDK must be installed when building.
+Before building, make sure to pull all submodules:
 
-Make sure to pull submodules before building:
 ```sh
 git submodule update --init --recursive
 ```
@@ -105,8 +130,8 @@ The "Debug" solution configuration is significantly slower, more verbose and les
 
 ## Building for Linux and macOS
 
-Dolphin requires [CMake 3](https://cmake.org/) for systems other than Windows. CMake 4 is unsupported at this time.
-You need a recent version of GCC or Clang with decent c++20 support. CMake will
+Dolphin requires [CMake](https://cmake.org/) and a recent version of GCC or Clang
+with C++23 support. CMake will
 inform you if your compiler is too old.
 Many libraries are bundled with Dolphin and used if they're not installed on
 your system. CMake will inform you if a bundled library is used or if you need
@@ -171,6 +196,17 @@ Or useful for having multiple distinct Dolphin setups for testing/development/TA
 4. `make`
 5. `cp -r ../Overwrite/{Sys,User} Binaries/`
 6. `touch Binaries/portable.txt`
+
+### Android-specific instructions
+
+These instructions assume familiarity with Android development. If you do not have an
+Android dev environment set up, see [AndroidSetup.md](AndroidSetup.md).
+
+If using Android Studio, import the Gradle project located in `./Source/Android`.
+
+Android apps are compiled using a build system called Gradle. Dolphin's native component,
+however, is compiled using CMake. The Gradle script will attempt to run a CMake build
+automatically while building the Java code.
 
 ## Uninstalling
 
@@ -239,21 +275,21 @@ Usage: convert [options]... [FILE]...
 Options:
   -h, --help            show this help message and exit
   -u USER, --user=USER  User folder path, required for temporary processing
-                        files.Will be automatically created if this option is
+                        files. Will be automatically created if this option is
                         not set.
   -i FILE, --input=FILE
                         Path to disc image FILE.
   -o FILE, --output=FILE
                         Path to the destination FILE.
-  -f FORMAT, --format=FORMAT
-                        Container format to use. Default is RVZ. [iso|gcz|wia|rvz]
+  -f rvz|iso|gcz|wia, --format=rvz|iso|gcz|wia
+                        Container format to use. Default is RVZ.
   -s, --scrub           Scrub junk data as part of conversion.
   -b BLOCK_SIZE, --block_size=BLOCK_SIZE
                         Block size for GCZ/WIA/RVZ formats, as an integer.
                         Suggested value for RVZ: 131072 (128 KiB)
-  -c COMPRESSION, --compression=COMPRESSION
+  -c none|zstd|bzip2|lzma|lzma2, --compression=none|zstd|bzip2|lzma|lzma2
                         Compression method to use when converting to WIA/RVZ.
-                        Suggested value for RVZ: zstd [none|zstd|bzip|lzma|lzma2]
+                        Suggested value for RVZ: zstd
   -l COMPRESSION_LEVEL, --compression_level=COMPRESSION_LEVEL
                         Level of compression for the selected method. Ignored
                         if 'none'. Suggested value for zstd: 5
@@ -265,13 +301,13 @@ Usage: verify [options]...
 Options:
   -h, --help            show this help message and exit
   -u USER, --user=USER  User folder path, required for temporary processing
-                        files.Will be automatically created if this option is
+                        files. Will be automatically created if this option is
                         not set.
   -i FILE, --input=FILE
-                        Path to disc image FILE.
-  -a ALGORITHM, --algorithm=ALGORITHM
+                        Path to input file.
+  -a crc32|md5|sha1|rchash, --algorithm=crc32|md5|sha1|rchash
                         Optional. Compute and print the digest using the
-                        selected algorithm, then exit. [crc32|md5|sha1|rchash]
+                        selected algorithm, then exit.
 ```
 
 ```

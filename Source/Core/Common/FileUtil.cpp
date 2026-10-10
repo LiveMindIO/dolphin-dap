@@ -31,13 +31,13 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <ShlObj.h>
-#include <Shlwapi.h>
 #include <commdlg.h>  // for GetSaveFileName
 #include <direct.h>   // getcwd
 #include <io.h>
 #include <objbase.h>  // guid stuff
 #include <shellapi.h>
 #include <winerror.h>
+#include <shlwapi.h>
 #else
 #include <libgen.h>
 #include <stdlib.h>
@@ -797,6 +797,11 @@ std::string GetExePath()
   if (sysctl(name, 4, dolphin_exe_path.data(), &length, nullptr, 0) != 0)
     return {};
   return dolphin_exe_path;
+#elif defined(__OpenBSD__) && defined(HAVE_GETEXECPATH)
+  char dolphin_exe_path[PATH_MAX];
+  if (getexecpath(dolphin_exe_path, sizeof(dolphin_exe_path)) != 0)
+    return {};
+  return dolphin_exe_path;
 #else
   char dolphin_exe_path[PATH_MAX];
   ssize_t len = ::readlink("/proc/self/exe", dolphin_exe_path, sizeof(dolphin_exe_path));
@@ -844,36 +849,44 @@ std::string GetExeDirectory()
 
 static std::string CreateSysDirectoryPath()
 {
-#if defined(_WIN32) || defined(LINUX_LOCAL_DEV)
-#define SYSDATA_DIR "Sys"
-#elif defined __APPLE__
-#define SYSDATA_DIR "Contents/Resources/Sys"
+#define SYS_FOLDER_NAME "Sys"
+#if defined __APPLE__
+#define SYSDATA_DIR "Contents/Resources/" SYS_FOLDER_NAME
 #else
-#ifdef DATA_DIR
-#define SYSDATA_DIR DATA_DIR "sys"
-#else
-#define SYSDATA_DIR "sys"
-#endif
+#define SYSDATA_DIR DATA_DIR SYS_FOLDER_NAME
 #endif
 
+  std::string sys_directory;
+
 #if defined(__APPLE__)
-  const std::string sys_directory = GetBundleDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
-#elif defined(_WIN32) || defined(LINUX_LOCAL_DEV)
-  const std::string sys_directory = GetExeDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
+  sys_directory = GetBundleDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
 #elif defined ANDROID
-  const std::string sys_directory = s_android_sys_directory + DIR_SEP;
+  sys_directory = s_android_sys_directory + DIR_SEP;
   ASSERT_MSG(COMMON, !s_android_sys_directory.empty(), "Sys directory has not been set");
 #else
-  const char* home = getenv("HOME");
-  if (!home)
-    home = getenv("PWD");
-  if (!home)
-    home = "";
-  std::string home_path = std::string(home) + DIR_SEP;
-  const char* config_home = getenv("XDG_CONFIG_HOME");
-  const std::string sys_directory =
-      std::string(config_home && config_home[0] == '/' ? config_home : (home_path + ".config")) +
-      DIR_SEP DOLPHIN_DATA_DIR DIR_SEP "Sys" DIR_SEP;
+  const std::string local_sys_directory = GetExeDirectory() + DIR_SEP SYS_FOLDER_NAME DIR_SEP;
+  if (IsDirectory(local_sys_directory))
+    sys_directory = local_sys_directory;
+#ifdef _WIN32
+  else
+    sys_directory = SYSDATA_DIR DIR_SEP;
+#else
+  else
+  {
+    const char* home = getenv("HOME");
+    if (!home)
+      home = getenv("PWD");
+    if (!home)
+      home = "";
+    std::string home_path = std::string(home) + DIR_SEP;
+    const char* config_home = getenv("XDG_CONFIG_HOME");
+    sys_directory =
+        std::string(config_home && config_home[0] == '/' ? config_home : (home_path + ".config")) +
+        DIR_SEP DOLPHIN_DATA_DIR DIR_SEP "Sys" DIR_SEP;
+    if (!IsDirectory(sys_directory))
+      sys_directory = SYSDATA_DIR DIR_SEP;
+  }
+#endif
 #endif
 
   INFO_LOG_FMT(COMMON, "CreateSysDirectoryPath: Setting to {}", sys_directory);

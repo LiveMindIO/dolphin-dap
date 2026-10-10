@@ -4,9 +4,9 @@
 #include "Core/Debugger/DAP/DAP.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
-#include <errno.h>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,14 +21,17 @@
 typedef SSIZE_T ssize_t;
 #define SHUT_RDWR SD_BOTH
 #else
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
 
 #include "Common/Logging/Log.h"
+#include "Common/Network.h"
 #include "Common/SocketContext.h"
 #include "Core/Debugger/DAP/DapSession.h"
 #include "Core/Debugger/DAP/DapTransport.h"
@@ -41,6 +44,11 @@ static std::thread s_accept_thread;
 static std::atomic<bool> s_shutting_down{false};
 static std::atomic<bool> s_active{false};
 static int s_listen_sock = -1;
+static std::mutex s_lifecycle_mutex;
+#ifndef _WIN32
+static std::string s_local_socket_path;
+#endif
+constexpr size_t MAX_CONCURRENT_CLIENTS = 2;
 
 // A connected DAP client session. The DAP layer owns the client fd (closed in
 // `ReapFinishedSessions` after the session ends, or by `Deinit` during forced
@@ -73,6 +81,23 @@ static void CloseSocket(int& sock)
   close(sock);
 #endif
   sock = -1;
+}
+
+static void ShutdownSocket(int sock)
+{
+  if (sock != -1)
+    shutdown(sock, SHUT_RDWR);
+}
+
+static bool SetSocketBlocking(int sock)
+{
+#ifdef _WIN32
+  u_long nonblocking = 0;
+  return ioctlsocket(sock, FIONBIO, &nonblocking) == 0;
+#else
+  const int flags = fcntl(sock, F_GETFL, 0);
+  return flags >= 0 && fcntl(sock, F_SETFL, flags & ~O_NONBLOCK) == 0;
+#endif
 }
 
 static void RunClient(SessionHandle* handle)
@@ -108,7 +133,13 @@ static int TimedAccept(int listen_fd, int timeout_ms)
 
   const int ready = select(listen_fd + 1, &readfds, nullptr, nullptr, &tv);
   if (ready < 0)
+  {
+#ifndef _WIN32
+    if (errno == EINTR)
+      return -2;
+#endif
     return -1;
+  }
   if (ready == 0)
     return -2;
 
@@ -116,7 +147,21 @@ static int TimedAccept(int listen_fd, int timeout_ms)
   socklen_t client_addrlen = sizeof(client_addr);
   const int fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_addrlen);
   if (fd < 0)
+  {
+#ifdef _WIN32
+    if (WSAGetLastError() == WSAEWOULDBLOCK)
+#else
+    if (errno == EAGAIN || errno == EINTR)
+#endif
+      return -2;
     return -1;
+  }
+  if (!SetSocketBlocking(fd))
+  {
+    int client_fd = fd;
+    CloseSocket(client_fd);
+    return -2;
+  }
   return fd;
 }
 
@@ -146,27 +191,28 @@ static void ReapFinishedSessions()
   // Join outside the mutex so we don't block `Deinit` from making progress.
   for (auto& handle : finished)
   {
-    CloseSocket(handle->client_fd);
     if (handle->thread.joinable())
       handle->thread.join();
+    CloseSocket(handle->client_fd);
   }
 }
 
-static void AcceptLoop()
+static void AcceptLoop(int listen_fd)
 {
   INFO_LOG_FMT(CONSOLE, "DAP: listening for clients...");
 
   while (!s_shutting_down.load())
   {
-    const int client_fd = TimedAccept(s_listen_sock, 200);
+    const int client_fd = TimedAccept(listen_fd, 200);
 
     if (client_fd == -1)
     {
       // `select`/`accept` returned an error (typically the listen socket
       // being closed during shutdown).
       if (!s_shutting_down.load())
-        ERROR_LOG_FMT(CONSOLE, "DAP: accept failed (errno {}).", errno);
-      break;
+        ERROR_LOG_FMT(CONSOLE, "DAP: accept failed: {}", Common::StrNetworkError());
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
     }
     if (client_fd == -2)
     {
@@ -185,12 +231,20 @@ static void AcceptLoop()
       break;
     }
 
-    auto handle = std::make_unique<SessionHandle>();
-    handle->client_fd = client_fd;
-    handle->thread = std::thread(RunClient, handle.get());
-
+    ReapFinishedSessions();
     {
       std::lock_guard lock(s_sessions_mutex);
+      if (s_sessions.size() >= MAX_CONCURRENT_CLIENTS)
+      {
+        WARN_LOG_FMT(CONSOLE, "DAP: rejecting client; concurrent client limit ({}) reached.",
+                     MAX_CONCURRENT_CLIENTS);
+        int fd = client_fd;
+        CloseSocket(fd);
+        continue;
+      }
+      auto handle = std::make_unique<SessionHandle>();
+      handle->client_fd = client_fd;
+      handle->thread = std::thread(RunClient, handle.get());
       s_sessions.push_back(std::move(handle));
     }
   }
@@ -202,8 +256,17 @@ static void AcceptLoop()
 
 static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t server_addrlen)
 {
+  if (s_active.load() || s_accept_thread.joinable())
+  {
+    WARN_LOG_FMT(CONSOLE, "DAP: server is already active.");
+    return;
+  }
   s_socket_context.emplace();
   s_shutting_down.store(false);
+  {
+    std::lock_guard lock(s_sessions_mutex);
+    s_sessions.reserve(MAX_CONCURRENT_CLIENTS);
+  }
 
   // DESNOTE(jbarber, 2026-07-21): On any failure after `s_socket_context` is
   // emplaced, tear it down before returning. The caller only invokes
@@ -217,6 +280,19 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
   if (s_listen_sock == -1)
   {
     ERROR_LOG_FMT(CONSOLE, "DAP: failed to create socket.");
+    s_socket_context.reset();
+    return;
+  }
+#ifdef _WIN32
+  u_long nonblocking = 1;
+  if (ioctlsocket(s_listen_sock, FIONBIO, &nonblocking) != 0)
+#else
+  const int flags = fcntl(s_listen_sock, F_GETFL, 0);
+  if (flags < 0 || fcntl(s_listen_sock, F_SETFL, flags | O_NONBLOCK) < 0)
+#endif
+  {
+    ERROR_LOG_FMT(CONSOLE, "DAP: failed to make listener nonblocking.");
+    CloseSocket(s_listen_sock);
     s_socket_context.reset();
     return;
   }
@@ -249,12 +325,18 @@ static void InitGeneric(int domain, const sockaddr* server_addr, socklen_t serve
   }
 
   s_active.store(true);
-  s_accept_thread = std::thread(AcceptLoop);
+  s_accept_thread = std::thread(AcceptLoop, s_listen_sock);
 }
 
 #ifndef _WIN32
 void InitLocal(const char* socket_path)
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
+  if (s_active.load() || s_accept_thread.joinable())
+  {
+    WARN_LOG_FMT(CONSOLE, "DAP: server is already active.");
+    return;
+  }
   // DESNOTE(jbarber, 2026-07-21): Bound the path against sun_path's capacity
   // (108 on Linux, 104 on macOS, varies elsewhere). A path longer than
   // sizeof(sun_un::sun_path) - 1 would silently truncate / overflow, so reject
@@ -262,13 +344,27 @@ void InitLocal(const char* socket_path)
   const size_t path_len = std::strlen(socket_path);
   if (path_len >= sizeof(sockaddr_un::sun_path))
   {
-    ERROR_LOG_FMT(CONSOLE,
-                  "DAP: unix socket path too long ({} chars, max {}): {}",
-                  path_len, sizeof(sockaddr_un::sun_path) - 1, socket_path);
+    ERROR_LOG_FMT(CONSOLE, "DAP: unix socket path too long ({} chars, max {}): {}", path_len,
+                  sizeof(sockaddr_un::sun_path) - 1, socket_path);
     return;
   }
 
-  unlink(socket_path);
+  struct stat path_stat;
+  if (lstat(socket_path, &path_stat) == 0)
+  {
+    if (!S_ISSOCK(path_stat.st_mode))
+    {
+      ERROR_LOG_FMT(CONSOLE, "DAP: refusing to replace non-socket path: {}", socket_path);
+      return;
+    }
+    unlink(socket_path);
+  }
+  else if (errno != ENOENT)
+  {
+    ERROR_LOG_FMT(CONSOLE, "DAP: failed to inspect socket path {}: {}", socket_path,
+                  std::strerror(errno));
+    return;
+  }
 
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
@@ -276,12 +372,16 @@ void InitLocal(const char* socket_path)
 
   InitGeneric(PF_LOCAL, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
   if (s_active.load())
+  {
+    s_local_socket_path = socket_path;
     INFO_LOG_FMT(CONSOLE, "DAP: listening on unix socket {}", socket_path);
+  }
 }
 #endif
 
 void Init(u32 port)
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(static_cast<u16>(port));
@@ -298,6 +398,7 @@ void Init(u32 port)
 
 void Deinit()
 {
+  std::lock_guard lifecycle_lock(s_lifecycle_mutex);
   const bool empty = [&] {
     std::lock_guard lock(s_sessions_mutex);
     return s_sessions.empty();
@@ -308,21 +409,11 @@ void Deinit()
 
   s_shutting_down.store(true);
 
-  // Close the listening socket first so `AcceptLoop` exits its `select` and
-  // stops spawning new session threads.
-  CloseSocket(s_listen_sock);
-
-  // Closing every live client fd unblocks each session's `recv` (it sees EOF
-  // / `select` reports the fd as readable), so the still-running session
-  // threads exit and we can `join` them below.
-  {
-    std::lock_guard lock(s_sessions_mutex);
-    for (auto& handle : s_sessions)
-      CloseSocket(handle->client_fd);
-  }
-
+  // TimedAccept wakes within 200 ms; keep the listener descriptor stable until
+  // its sole reader has exited, then close it.
   if (s_accept_thread.joinable())
     s_accept_thread.join();
+  CloseSocket(s_listen_sock);
 
   // Drain any remaining sessions. Some finished naturally between `Deinit`
   // closing the listen socket and reaching here (the accept thread's final
@@ -333,14 +424,23 @@ void Deinit()
     std::lock_guard lock(s_sessions_mutex);
     sessions.swap(s_sessions);
   }
+  for (const auto& handle : sessions)
+    ShutdownSocket(handle->client_fd);
   for (auto& handle : sessions)
   {
-    CloseSocket(handle->client_fd);
     if (handle->thread.joinable())
       handle->thread.join();
+    CloseSocket(handle->client_fd);
   }
 
   s_socket_context.reset();
+#ifndef _WIN32
+  if (!s_local_socket_path.empty())
+  {
+    unlink(s_local_socket_path.c_str());
+    s_local_socket_path.clear();
+  }
+#endif
   s_active.store(false);
   s_shutting_down.store(false);
 }

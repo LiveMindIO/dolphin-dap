@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <tuple>
@@ -287,6 +288,26 @@ public:
   bool CheckBreakPoints();
   // Evaluate the breakpoints in order to log and/or break. Returns whether it breaks.
   bool CheckAndHandleBreakPoints();
+  void SetSteppingMemchecksEnabled(bool enabled)
+  {
+    m_stepping_memchecks_enabled.store(enabled, std::memory_order_relaxed);
+  }
+  bool AreSteppingMemchecksEnabled() const
+  {
+    return m_stepping_memchecks_enabled.load(std::memory_order_relaxed);
+  }
+  void NotifySteppingMemcheckHit()
+  {
+    m_stepping_memcheck_hit.store(true, std::memory_order_relaxed);
+  }
+  void ClearSteppingMemcheckHit()
+  {
+    m_stepping_memcheck_hit.store(false, std::memory_order_relaxed);
+  }
+  bool DidSteppingMemcheckHit() const
+  {
+    return m_stepping_memcheck_hit.load(std::memory_order_relaxed);
+  }
   void RunLoop();
 
   u64 ReadFullTimeBaseValue() const;
@@ -321,6 +342,8 @@ private:
 
   BreakPoints m_breakpoints;
   MemChecks m_memchecks;
+  std::atomic<bool> m_stepping_memchecks_enabled{false};
+  std::atomic<bool> m_stepping_memcheck_hit{false};
   PPCSymbolDB m_symbol_db;
   PPCDebugInterface m_debug_interface;
   Core::BranchWatch m_branch_watch;

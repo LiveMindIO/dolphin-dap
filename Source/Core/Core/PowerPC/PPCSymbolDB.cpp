@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -35,6 +36,16 @@ PPCSymbolDB::PPCSymbolDB() = default;
 
 PPCSymbolDB::~PPCSymbolDB() = default;
 
+namespace
+{
+std::string SourceFileNameKey(const std::string_view path)
+{
+  std::string key = PathToFileName(path);
+  Common::ToLower(&key);
+  return key;
+}
+}  // namespace
+
 bool PPCSymbolDB::Clear(const char* prefix)
 {
   ClearSourceLineInfo();
@@ -50,8 +61,91 @@ u32 PPCSymbolDB::AddSourceFile(std::string file)
       return i;
   }
   const u32 index = static_cast<u32>(m_source_files.size());
+  m_resolved_source_files.push_back(ResolveSourcePathLocked(file));
   m_source_files.push_back(std::move(file));
   return index;
+}
+
+u32 PPCSymbolDB::AddSourceFileInstance(std::string file)
+{
+  std::lock_guard lock(m_mutex);
+  const u32 index = static_cast<u32>(m_source_files.size());
+  m_resolved_source_files.push_back(ResolveSourcePathLocked(file));
+  m_source_files.push_back(std::move(file));
+  return index;
+}
+
+void PPCSymbolDB::SetSourcePaths(std::vector<std::string> source_paths)
+{
+  constexpr size_t MAX_SOURCE_PATHS = 64;
+  constexpr size_t MAX_INDEXED_SOURCE_ENTRIES = 100000;
+  std::vector<std::string> roots;
+  for (std::string& source_path : source_paths)
+  {
+    if (roots.size() == MAX_SOURCE_PATHS)
+      break;
+    if (source_path.empty())
+      continue;
+    std::error_code error;
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(StringToPath(source_path), error).lexically_normal();
+    if (error)
+      continue;
+    source_path = PathToString(absolute);
+    if (File::IsDirectory(source_path) && std::ranges::find(roots, source_path) == roots.end())
+    {
+      roots.push_back(std::move(source_path));
+    }
+  }
+
+  std::vector<std::map<std::string, std::vector<std::string>>> host_files_by_root;
+  host_files_by_root.reserve(roots.size());
+  size_t remaining_entries = MAX_INDEXED_SOURCE_ENTRIES;
+  for (const std::string& root : roots)
+  {
+    std::map<std::string, std::vector<std::string>> host_files_by_name;
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator it(
+        StringToPath(root), std::filesystem::directory_options::skip_permission_denied, error);
+    const std::filesystem::recursive_directory_iterator end;
+    bool traversal_error = static_cast<bool>(error);
+    size_t entries = 0;
+    while (!traversal_error && it != end && entries < remaining_entries)
+    {
+      error.clear();
+      const bool is_regular_file = it->is_regular_file(error);
+      if (error)
+      {
+        traversal_error = true;
+        break;
+      }
+      if (is_regular_file)
+      {
+        std::string path = WithUnifiedPathSeparators(PathToString(it->path()));
+        host_files_by_name[SourceFileNameKey(path)].push_back(std::move(path));
+      }
+      error.clear();
+      it.increment(error);
+      ++entries;
+      if (error)
+        traversal_error = true;
+    }
+    remaining_entries -= entries;
+    if (traversal_error || it != end)
+    {
+      WARN_LOG_FMT(SYMBOLS, "Source path '{}' could not be completely indexed and was ignored",
+                   root);
+      host_files_by_name.clear();
+    }
+    host_files_by_root.push_back(std::move(host_files_by_name));
+  }
+
+  std::lock_guard lock(m_mutex);
+  m_host_source_files_by_root = std::move(host_files_by_root);
+  m_resolved_source_files.clear();
+  m_resolved_source_files.reserve(m_source_files.size());
+  for (const std::string& file : m_source_files)
+    m_resolved_source_files.push_back(ResolveSourcePathLocked(file));
 }
 
 void PPCSymbolDB::AddLineEntry(u32 address, u32 file_index, u32 line)
@@ -64,7 +158,22 @@ void PPCSymbolDB::ClearSourceLineInfo()
 {
   std::lock_guard lock(m_mutex);
   m_source_files.clear();
+  m_resolved_source_files.clear();
   m_line_table.clear();
+  m_dwarf_debug_info.reset();
+}
+
+void PPCSymbolDB::SetDwarfDebugInfo(Core::Debug::Dwarf::ParseResult info)
+{
+  std::ranges::sort(info.types, {}, &Core::Debug::Dwarf::Type::die_offset);
+  std::lock_guard lock(m_mutex);
+  m_dwarf_debug_info = std::make_shared<const Core::Debug::Dwarf::ParseResult>(std::move(info));
+}
+
+std::shared_ptr<const Core::Debug::Dwarf::ParseResult> PPCSymbolDB::GetDwarfDebugInfo() const
+{
+  std::lock_guard lock(m_mutex);
+  return m_dwarf_debug_info;
 }
 
 bool PPCSymbolDB::HasSourceLineInfo() const
@@ -75,116 +184,240 @@ bool PPCSymbolDB::HasSourceLineInfo() const
 
 std::optional<PPCSymbolDB::SourceLine> PPCSymbolDB::GetSourceLine(u32 addr) const
 {
-  std::lock_guard lock(m_mutex);
-  if (m_line_table.empty())
-    return std::nullopt;
+  SourceLine source_line;
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_line_table.empty())
+      return std::nullopt;
 
-  auto it = m_line_table.upper_bound(addr);
-  if (it == m_line_table.begin())
-    return std::nullopt;
+    auto it = m_line_table.upper_bound(addr);
+    if (it == m_line_table.begin())
+      return std::nullopt;
 
-  --it;
-  const LineEntry& entry = it->second;
-  if (entry.file_index >= m_source_files.size())
-    return std::nullopt;
+    --it;
+    const LineEntry& entry = it->second;
+    if (entry.file_index >= m_source_files.size())
+      return std::nullopt;
+    source_line = {it->first, entry.file_index, m_resolved_source_files[entry.file_index],
+                   entry.line};
+  }
 
-  return SourceLine{it->first, m_source_files[entry.file_index], entry.line};
+  // A sparse line table applies until the next row only within its function.
+  // Without this boundary, source-less code inherits an unrelated preceding
+  // row and source stepping jumps through misleading files and line numbers.
+  const Common::Symbol* current_symbol = GetSymbolFromAddr(addr);
+  const Common::Symbol* line_symbol = GetSymbolFromAddr(source_line.address);
+  if ((current_symbol || line_symbol) &&
+      (!current_symbol || !line_symbol || current_symbol->address != line_symbol->address))
+  {
+    return std::nullopt;
+  }
+
+  return source_line;
 }
 
 std::optional<u32> PPCSymbolDB::GetLineAddress(std::string_view file, u32 line) const
 {
   std::lock_guard lock(m_mutex);
-  if (m_line_table.empty() || m_source_files.empty())
-    return std::nullopt;
-
-  std::optional<u32> file_index;
-  for (u32 i = 0; i < m_source_files.size(); ++i)
-  {
-    if (m_source_files[i] == file)
-    {
-      file_index = i;
-      break;
-    }
-  }
+  const std::optional<u32> file_index = FindSourceFileIndexLocked(file);
   if (!file_index)
     return std::nullopt;
 
-  std::optional<u32> best_address;
+  return GetLineAddressLocked(*file_index, line);
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddress(const u32 file_index, const u32 line) const
+{
+  std::lock_guard lock(m_mutex);
+  return GetLineAddressLocked(file_index, line);
+}
+
+std::optional<u32> PPCSymbolDB::GetLineAddressLocked(const u32 file_index, const u32 line) const
+{
+  if (m_line_table.empty() || file_index >= m_source_files.size())
+    return std::nullopt;
+
+  std::optional<std::pair<u32, u32>> best;
   for (const auto& [address, entry] : m_line_table)
   {
-    if (entry.file_index != *file_index)
+    if (entry.file_index != file_index)
       continue;
     if (entry.line == line)
       return address;
-    if (entry.line < line)
-      best_address = address;
+    if (entry.line > line && (!best || entry.line < best->first))
+      best = std::pair{entry.line, address};
   }
-  return best_address;
+  return best ? std::make_optional(best->second) : std::nullopt;
 }
 
 namespace
 {
-bool SourcePathsMatch(std::string_view registered, std::string_view query)
+size_t SourcePathMatchQuality(std::string_view registered, std::string_view query)
 {
-  if (registered == query)
-    return true;
+  std::string registered_path{registered};
+  std::string query_path{query};
+  std::ranges::replace(registered_path, '\\', '/');
+  std::ranges::replace(query_path, '\\', '/');
+  registered = registered_path;
+  query = query_path;
 
-  const auto basename = [](std::string_view path) -> std::string_view {
-    const size_t slash = path.find_last_of("/\\");
-    return slash == std::string_view::npos ? path : path.substr(slash + 1);
+  if (Common::CaseInsensitiveEquals(registered, query))
+    return std::numeric_limits<size_t>::max();
+
+  const auto components = [](std::string_view path) {
+    std::vector<std::string_view> result;
+    while (!path.empty())
+    {
+      const size_t slash = path.find('/');
+      const std::string_view component = path.substr(0, slash);
+      if (!component.empty())
+        result.push_back(component);
+      if (slash == std::string_view::npos)
+        break;
+      path.remove_prefix(slash + 1);
+    }
+    return result;
   };
-
-  const std::string_view registered_name = basename(registered);
-  const std::string_view query_name = basename(query);
-  if (!registered_name.empty() && registered_name == query_name)
-    return true;
-
-  if (query.size() > registered.size())
+  const std::vector<std::string_view> registered_components = components(registered);
+  const std::vector<std::string_view> query_components = components(query);
+  size_t quality = 0;
+  while (quality < registered_components.size() && quality < query_components.size() &&
+         Common::CaseInsensitiveEquals(
+             registered_components[registered_components.size() - quality - 1],
+             query_components[query_components.size() - quality - 1]))
   {
-    const char separator = query[query.size() - registered.size() - 1];
-    if ((separator == '/' || separator == '\\') && query.substr(query.size() - registered.size()) == registered)
-      return true;
+    ++quality;
   }
-
-  return false;
+  return quality;
 }
 }  // namespace
+
+std::string PPCSymbolDB::ResolveSourcePathLocked(const std::string_view path) const
+{
+  if (path.empty())
+    return {};
+
+  std::string resolved{path};
+  if (m_host_source_files_by_root.empty())
+    return resolved;
+
+  if (File::Exists(resolved))
+  {
+    std::error_code error;
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(StringToPath(resolved), error).lexically_normal();
+    if (!error)
+      resolved = PathToString(absolute);
+    return resolved;
+  }
+
+  resolved = WithUnifiedPathSeparators(std::move(resolved));
+  std::ranges::replace(resolved, '\\', '/');
+
+  for (const auto& host_files_by_name : m_host_source_files_by_root)
+  {
+    const auto files = host_files_by_name.find(SourceFileNameKey(resolved));
+    if (files == host_files_by_name.end())
+      continue;
+
+    size_t best_quality = 0;
+    std::string best_path;
+    bool ambiguous = false;
+    for (const std::string& candidate : files->second)
+    {
+      const size_t quality = SourcePathMatchQuality(candidate, resolved);
+      if (quality > best_quality)
+      {
+        best_path = candidate;
+        best_quality = quality;
+        ambiguous = false;
+      }
+      else if (quality != 0 && quality == best_quality)
+      {
+        ambiguous = true;
+      }
+    }
+    return ambiguous ? resolved : best_path;
+  }
+  return resolved;
+}
 
 std::optional<u32> PPCSymbolDB::FindSourceFileIndex(const std::string_view file_query) const
 {
   std::lock_guard lock(m_mutex);
+  return FindSourceFileIndexLocked(file_query);
+}
+
+std::optional<u32> PPCSymbolDB::FindSourceFileIndexLocked(const std::string_view file_query) const
+{
   if (file_query.empty() || m_source_files.empty())
     return std::nullopt;
 
+  size_t best_quality = 0;
+  std::optional<u32> best_index;
+  bool ambiguous = false;
   for (u32 i = 0; i < m_source_files.size(); ++i)
   {
-    if (SourcePathsMatch(m_source_files[i], file_query))
-      return i;
+    const size_t quality = std::max(SourcePathMatchQuality(m_source_files[i], file_query),
+                                    SourcePathMatchQuality(m_resolved_source_files[i], file_query));
+    if (quality > best_quality)
+    {
+      best_quality = quality;
+      best_index = i;
+      ambiguous = false;
+    }
+    else if (quality != 0 && quality == best_quality)
+    {
+      ambiguous = true;
+    }
   }
-  return std::nullopt;
+  return best_index && !ambiguous ? best_index : std::nullopt;
 }
 
 std::optional<u32> PPCSymbolDB::GetLineAddressForQuery(const std::string_view file_query,
-                                                        const u32 line) const
+                                                       const u32 line) const
 {
-  const std::optional<u32> file_index = FindSourceFileIndex(file_query);
+  std::lock_guard lock(m_mutex);
+  const std::optional<u32> file_index = FindSourceFileIndexLocked(file_query);
   if (!file_index)
     return std::nullopt;
 
-  std::string file;
-  {
-    std::lock_guard lock(m_mutex);
-    if (*file_index >= m_source_files.size())
-      return std::nullopt;
-    file = m_source_files[*file_index];
-  }
-  return GetLineAddress(file, line);
+  return GetLineAddressLocked(*file_index, line);
 }
 
-const std::vector<std::string>& PPCSymbolDB::GetSourceFiles() const
+std::vector<std::string> PPCSymbolDB::GetSourceFiles() const
 {
   std::lock_guard lock(m_mutex);
-  return m_source_files;
+  return m_resolved_source_files;
+}
+
+std::optional<std::string> PPCSymbolDB::GetResolvedSourceFile(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  if (file_index >= m_resolved_source_files.size())
+    return std::nullopt;
+
+  const std::filesystem::path path = StringToPath(m_resolved_source_files[file_index]);
+  std::error_code error;
+  if (!path.is_absolute() || !std::filesystem::is_regular_file(path, error) || error)
+    return std::nullopt;
+  return PathToString(path);
+}
+
+std::map<u32, std::vector<u32>> PPCSymbolDB::GetExactLineAddresses(const u32 file_index) const
+{
+  std::lock_guard lock(m_mutex);
+  std::map<u32, std::vector<u32>> result;
+  if (file_index >= m_source_files.size())
+    return result;
+
+  // m_line_table is address ordered, so the first address remains the deterministic toggle target.
+  for (const auto& [address, entry] : m_line_table)
+  {
+    if (entry.file_index == file_index && entry.line != 0)
+      result[entry.line].push_back(address);
+  }
+  return result;
 }
 
 bool PPCSymbolDB::HasDenseLineInfoInRange(const u32 start, const u32 size) const
@@ -245,40 +478,39 @@ void PPCSymbolDB::AddKnownSymbol(const Core::CPUThreadGuard& guard, u32 startAdd
                                  Common::Symbol::Type type, XFuncMap* functions,
                                  XFuncPtrMap* checksum_to_function)
 {
-  auto iter = functions->find(startAddr);
-  if (iter != functions->end())
+  const auto [iter, inserted] = functions->try_emplace(startAddr, name);
+
+  Common::Symbol& symbol = iter->second;
+  symbol.object_name = object_name;
+  symbol.type = type;
+
+  if (!inserted)
   {
     // already got it, let's just update name, checksum & size to be sure.
-    Common::Symbol* tempfunc = &iter->second;
-    tempfunc->Rename(name);
-    tempfunc->object_name = object_name;
-    tempfunc->hash = HashSignatureDB::ComputeCodeChecksum(guard, startAddr, startAddr + size - 4);
-    tempfunc->type = type;
-    tempfunc->size = size;
+    symbol.Rename(name);
+    symbol.hash = HashSignatureDB::ComputeCodeChecksum(guard, startAddr, startAddr + size - 4);
+    symbol.size = size;
   }
   else
   {
     // new symbol. run analyze.
-    auto& new_symbol = functions->emplace(startAddr, name).first->second;
-    new_symbol.object_name = object_name;
-    new_symbol.type = type;
-    new_symbol.address = startAddr;
+    symbol.address = startAddr;
 
-    if (new_symbol.type == Common::Symbol::Type::Function)
+    if (symbol.type == Common::Symbol::Type::Function)
     {
-      PPCAnalyst::AnalyzeFunction(guard, startAddr, new_symbol, size);
+      PPCAnalyst::AnalyzeFunction(guard, startAddr, symbol, size);
       // Do not truncate symbol when a size is expected
-      if (size != 0 && new_symbol.size != size)
+      if (size != 0 && symbol.size != size)
       {
         WARN_LOG_FMT(SYMBOLS, "Analysed symbol ({}) size mismatch, {} expected but {} computed",
-                     name, size, new_symbol.size);
-        new_symbol.size = size;
+                     name, size, symbol.size);
+        symbol.size = size;
       }
-      (*checksum_to_function)[new_symbol.hash].insert(&new_symbol);
+      (*checksum_to_function)[symbol.hash].insert(&symbol);
     }
     else
     {
-      new_symbol.size = size;
+      symbol.size = size;
     }
   }
 }
@@ -291,24 +523,14 @@ void PPCSymbolDB::AddKnownNote(u32 start_addr, u32 size, const std::string& name
 
 void PPCSymbolDB::AddKnownNote(u32 start_addr, u32 size, const std::string& name, XNoteMap* notes)
 {
-  auto iter = notes->find(start_addr);
+  const auto [iter, inserted] = notes->try_emplace(start_addr);
 
-  if (iter != notes->end())
-  {
-    // Already got it, just update the name and size.
-    Common::Note* tempfunc = &iter->second;
-    tempfunc->name = name;
-    tempfunc->size = size;
-  }
-  else
-  {
-    Common::Note tf;
-    tf.name = name;
-    tf.address = start_addr;
-    tf.size = size;
+  Common::Note& note = iter->second;
+  note.name = name;
+  note.size = size;
 
-    (*notes)[start_addr] = tf;
-  }
+  if (inserted)
+    note.address = start_addr;
 }
 
 void PPCSymbolDB::DetermineNoteLayers()
@@ -801,6 +1023,12 @@ bool PPCSymbolDB::LoadMap(const Core::CPUThreadGuard& guard, std::string filenam
     }
   }
 
+  if (good_count == 0)
+  {
+    ERROR_LOG_FMT(SYMBOLS, "No valid symbols found in map file '{}'", filename);
+    return false;
+  }
+
   Index(&new_functions);
   DetermineNoteLayers(&new_notes);
   FillInCallers(&new_functions);
@@ -811,7 +1039,8 @@ bool PPCSymbolDB::LoadMap(const Core::CPUThreadGuard& guard, std::string filenam
   std::swap(m_checksum_to_function, checksum_to_function);
   std::swap(m_map_name, filename);
 
-  NOTICE_LOG_FMT(SYMBOLS, "{} symbols loaded, {} symbols ignored.", good_count, bad_count);
+  NOTICE_LOG_FMT(SYMBOLS, "{} symbols loaded, {} symbols ignored from map file '{}'.", good_count,
+                 bad_count, m_map_name);
   return true;
 }
 

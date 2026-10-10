@@ -11,13 +11,20 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
+#include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "../DWARF/DwarfTestFixture.h"
 #include "Common/CommonTypes.h"
+#include "Common/FileUtil.h"
+#include "Common/ScopeGuard.h"
 #include "Common/SymbolDB.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/DAP/DapDebugController.h"
@@ -26,11 +33,11 @@
 #include "Core/HW/CPU.h"
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/BreakPoints.h"
+#include "Core/PowerPC/Expression.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
-#include "../DWARF/DwarfTestFixture.h"
 
 namespace
 {
@@ -106,6 +113,121 @@ TEST_F(DapControllerTest, GetRegistersReflectsPpcState)
   EXPECT_EQ(snapshot.ctr, 0x00000042u);
   EXPECT_EQ(snapshot.cr, ppc_state.cr.Get());
   EXPECT_EQ(snapshot.xer, ppc_state.GetXER().Hex);
+}
+
+TEST_F(DapControllerTest, GetDebugVariablesResolvesFrameAndRegisterLocations)
+{
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
+  auto& state = System().GetPPCState();
+  state.pc = DwarfTestFixture::kFunctionAddress;
+  state.gpr[1] = DwarfTestFixture::kTypedDataAddress + 8;
+  state.gpr[3] = 0x12345678;
+  const std::array<u8, 8> point{{0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x40, 0x00}};
+  System().GetMemory().CopyToEmu(DwarfTestFixture::kTypedDataAddress, point.data(), point.size());
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::DebugVariable> locals = controller.GetDebugVariables(false);
+  ASSERT_EQ(locals.size(), 2U);
+  EXPECT_EQ(locals[0].name, "argument");
+  EXPECT_EQ(locals[0].value, "0x12345678");
+  EXPECT_EQ(locals[1].name, "local_point");
+  EXPECT_EQ(locals[1].value, "@ 0x00004000");
+  ASSERT_TRUE(locals[1].children);
+
+  const std::vector<DAP::DebugVariable> members =
+      controller.GetDebugVariableChildren(*locals[1].children);
+  ASSERT_EQ(members.size(), 2U);
+  EXPECT_EQ(members[0].name, "x");
+  EXPECT_EQ(members[0].value, "0x11223344");
+  EXPECT_EQ(members[1].name, "next");
+  EXPECT_EQ(members[1].value, "0x00004000");
+  ASSERT_TRUE(members[1].children);
+
+  const std::vector<DAP::DebugVariable> pointee =
+      controller.GetDebugVariableChildren(*members[1].children);
+  ASSERT_EQ(pointee.size(), 2U);
+  EXPECT_EQ(pointee[0].value, "0x11223344");
+
+  const std::vector<DAP::DebugVariable> globals = controller.GetDebugVariables(true);
+  ASSERT_EQ(globals.size(), 2U);
+  ASSERT_TRUE(globals[1].children);
+  const std::vector<DAP::DebugVariable> elements =
+      controller.GetDebugVariableChildren(*globals[1].children);
+  ASSERT_EQ(elements.size(), 3U);
+  EXPECT_EQ(elements[0].name, "[0]");
+}
+
+TEST_F(DapControllerTest, GetDebugVariablesFiltersLocalsByCurrentPc)
+{
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
+  System().GetPPCState().pc = DwarfTestFixture::kFunctionAddress + 0x20;
+
+  DAP::DapDebugController controller(System());
+  EXPECT_TRUE(controller.GetDebugVariables(false).empty());
+  ASSERT_EQ(controller.GetDebugVariables(true).size(), 2U);
+}
+
+TEST_F(DapControllerTest, CharArraysRenderAsEscapedStringsAndRemainExpandable)
+{
+  using namespace Core::Debug::Dwarf;
+  constexpr u32 char_array_offset = 0x300;
+  constexpr u32 escaped_array_offset = 0x301;
+  constexpr u32 int_array_offset = 0x302;
+  constexpr u32 text_address = DwarfTestFixture::kTypedDataAddress + 0x100;
+
+  ParseResult info;
+  info.types.push_back(
+      {char_array_offset, TypeKind::Array, {}, 11, TypeRef{FundamentalTypeRef{1}, {}}, {}, 11});
+  info.types.push_back(
+      {escaped_array_offset, TypeKind::Array, {}, 4, TypeRef{FundamentalTypeRef{1}, {}}, {}, 4});
+  info.types.push_back(
+      {int_array_offset, TypeKind::Array, {}, 8, TypeRef{FundamentalTypeRef{7}, {}}, {}, 2});
+  info.variables.push_back({"text",
+                            TypeRef{UserTypeRef{char_array_offset}, {}},
+                            {LocationKind::Address, text_address, 0},
+                            VariableKind::Global});
+  info.variables.push_back({"escaped",
+                            TypeRef{UserTypeRef{escaped_array_offset}, {}},
+                            {LocationKind::Address, text_address + 0x10, 0},
+                            VariableKind::Global});
+  info.variables.push_back({"numbers",
+                            TypeRef{UserTypeRef{int_array_offset}, {}},
+                            {LocationKind::Address, text_address + 0x20, 0},
+                            VariableKind::Global});
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(std::move(info));
+
+  constexpr std::array<u8, 11> text{{'P', 'l', 'M', 'r', 'N', 'r', '.', 'd', 'a', 't', 0}};
+  constexpr std::array<u8, 4> escaped{{'A', '\n', '\\', '"'}};
+  System().GetMemory().CopyToEmu(text_address, text.data(), text.size());
+  System().GetMemory().CopyToEmu(text_address + 0x10, escaped.data(), escaped.size());
+
+  DAP::DapDebugController controller(System());
+  const auto globals = controller.GetDebugVariables(true);
+  ASSERT_EQ(globals.size(), 3U);
+  EXPECT_EQ(globals[0].value, "\"PlMrNr.dat\"");
+  EXPECT_EQ(globals[1].value, "\"A\\n\\\\\\\"\"");
+  EXPECT_EQ(globals[2].value, "@ 0x00004120");
+  ASSERT_TRUE(globals[0].children);
+  EXPECT_EQ(controller.GetDebugVariableChildren(*globals[0].children).size(), 11U);
+}
+
+TEST_F(DapControllerTest, NullDebugPointerIsNotExpandable)
+{
+  System().GetPPCSymbolDB().SetDwarfDebugInfo(DwarfTestFixture::MakeTypedParseResult());
+  auto& state = System().GetPPCState();
+  state.pc = DwarfTestFixture::kFunctionAddress;
+  state.gpr[1] = DwarfTestFixture::kTypedDataAddress + 8;
+  const std::array<u8, 8> point{{0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0}};
+  System().GetMemory().CopyToEmu(DwarfTestFixture::kTypedDataAddress, point.data(), point.size());
+
+  DAP::DapDebugController controller(System());
+  const auto locals = controller.GetDebugVariables(false);
+  ASSERT_EQ(locals.size(), 2U);
+  ASSERT_TRUE(locals[1].children);
+  const auto members = controller.GetDebugVariableChildren(*locals[1].children);
+  ASSERT_EQ(members.size(), 2U);
+  EXPECT_EQ(members[1].value, "0x00000000");
+  EXPECT_FALSE(members[1].children);
 }
 
 TEST_F(DapControllerTest, SetRegisterGprRoundTrips)
@@ -321,6 +443,44 @@ TEST_F(DapControllerTest, ReadMemoryStopsAtEndOfRam)
   EXPECT_EQ(controller.ReadMemory(start, 8).size(), 2u);
 }
 
+TEST_F(DapControllerTest, ResolvePointerChainReturnsIntermediateSteps)
+{
+  const std::array<u8, 4> first{{0x00, 0x00, 0x40, 0x20}};
+  const std::array<u8, 4> second{{0x00, 0x00, 0x50, 0x20}};
+  System().GetMemory().CopyToEmu(0x4000, first.data(), first.size());
+  System().GetMemory().CopyToEmu(0x4030, second.data(), second.size());
+
+  DAP::DapDebugController controller(System());
+  const std::array<s32, 2> offsets{{0x10, -4}};
+  const auto resolved = controller.ResolvePointerChain(0x4000, offsets);
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(resolved->final_address, 0x501cu);
+  ASSERT_EQ(resolved->steps.size(), 2u);
+  EXPECT_EQ(resolved->steps[0].address, 0x4000u);
+  EXPECT_EQ(resolved->steps[0].pointer_value, 0x4020u);
+  EXPECT_EQ(resolved->steps[0].result_address, 0x4030u);
+  EXPECT_EQ(resolved->steps[1].address, 0x4030u);
+  EXPECT_EQ(resolved->steps[1].pointer_value, 0x5020u);
+  EXPECT_EQ(resolved->steps[1].offset, -4);
+}
+
+TEST_F(DapControllerTest, ResolvePointerChainRejectsUnreadablePointerAndOverflow)
+{
+  DAP::DapDebugController controller(System());
+  const std::array<s32, 1> no_offset{{0}};
+  EXPECT_FALSE(controller.ResolvePointerChain(INVALID_ADDRESS, no_offset).has_value());
+
+  const std::array<u8, 4> pointer{{0xff, 0xff, 0xff, 0xff}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, pointer.data(), pointer.size());
+  const std::array<s32, 1> positive_offset{{1}};
+  EXPECT_FALSE(controller.ResolvePointerChain(TEST_ADDRESS, positive_offset).has_value());
+
+  const std::array<u8, 4> zero_pointer{{0x00, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, zero_pointer.data(), zero_pointer.size());
+  const std::array<s32, 1> negative_offset{{-1}};
+  EXPECT_FALSE(controller.ResolvePointerChain(TEST_ADDRESS, negative_offset).has_value());
+}
+
 TEST_F(DapControllerTest, WriteMemoryPersistsToRam)
 {
   const std::array<u8, 4> payload{{0xca, 0xfe, 0xd0, 0x0d}};
@@ -408,8 +568,7 @@ TEST_F(DapControllerTest, UpdateSourceBreakpointsMergesAcrossSources)
   }
 
   const DAP::SourceBreakpointContext first_context{.source_reference = 1};
-  controller.UpdateSourceBreakpoints("ref:1", first_context,
-                                     {{.line = 1}, {.line = 2}});
+  controller.UpdateSourceBreakpoints("ref:1", first_context, {{.line = 1}, {.line = 2}});
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kFunctionAddress));
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(DwarfTestFixture::kLineTwoAddress));
 
@@ -440,10 +599,61 @@ TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesDwarfLineTable)
   EXPECT_EQ(*address, DwarfTestFixture::kLineTwoAddress);
 }
 
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointUsesNextExecutableDwarfLine)
+{
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  const u32 file = symbol_db.AddSourceFile("test.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, file, 10);
+  symbol_db.AddLineEntry(TEST_ADDRESS + 0x10, file, 20);
+  DAP::DapDebugController controller(System());
+  const DAP::SourceBreakpointContext context{.source_reference = file + 1};
+
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 5), TEST_ADDRESS);
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(context, 15), TEST_ADDRESS + 0x10);
+  EXPECT_FALSE(controller.ResolveSourceLineBreakpoint(context, 21));
+}
+
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointDoesNotTreatDwarfFileHandleAsAddress)
+{
+  DAP::DapDebugController controller(System());
+  {
+    Core::CPUThreadGuard guard(System());
+    ASSERT_TRUE(Core::Debug::ImportDwarf(guard, System().GetPowerPC().GetSymbolDB(),
+                                         DwarfTestFixture::kDebugSection,
+                                         DwarfTestFixture::kLineSection));
+    System().GetPowerPC().GetSymbolDB().AddSourceFile("missing.c");
+  }
+
+  const DAP::SourceBreakpointContext context{.source_reference = 2};
+  EXPECT_FALSE(controller.ResolveSourceLineBreakpoint(context, 3));
+}
+
+TEST_F(DapControllerTest, ResolveSourceLineBreakpointRejectsAmbiguousBasename)
+{
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  const u32 first = symbol_db.AddSourceFileInstance("foo.c");
+  const u32 second = symbol_db.AddSourceFileInstance("foo.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, first, 7);
+  symbol_db.AddLineEntry(TEST_ADDRESS + 0x100, second, 7);
+  DAP::DapDebugController controller(System());
+
+  const DAP::SourceBreakpointContext ambiguous{.source_path = "/workspace/src/foo.c"};
+  EXPECT_FALSE(controller.ResolveSourceLineBreakpoint(ambiguous, 7));
+
+  const DAP::SourceBreakpointContext exact{.source_id = second + 1};
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(exact, 7), TEST_ADDRESS + 0x100);
+
+  const DAP::SourceBreakpointContext handle{.source_reference = second + 1};
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(handle, 7), TEST_ADDRESS + 0x100);
+  const auto locations = controller.GetBreakpointLocations(second + 1, 7, 7);
+  ASSERT_EQ(locations.size(), 1U);
+  EXPECT_EQ(locations[0].line, 7);
+}
+
 TEST_F(DapControllerTest, ResolveSourceLineBreakpointFallbackRejectsOverflowingLine)
 {
   // DESNOTE(jbarber, 2026-07-22): When DWARF line lookup fails, the fallback
-  // computes `*base + line * 4`. Computing in 32-bit would silently wrap
+  // computes `*base + (line - 1) * 4`. Computing in 32-bit would silently wrap
   // for a large `line` paired with a high base, installing a breakpoint at
   // a nonsense PC. The 64-bit guard returns nullopt instead so the
   // breakpoint is reported unresolved. Bugbot #63.
@@ -451,19 +661,16 @@ TEST_F(DapControllerTest, ResolveSourceLineBreakpointFallbackRejectsOverflowingL
   // base near the top of the 32-bit space; a line that pushes base+line*4
   // past u32 max should fail to resolve.
   const DAP::SourceBreakpointContext context{.source_name = "0xFFFFFFF0"};
-  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 4u);
+  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 5u);
   EXPECT_FALSE(address.has_value());
 }
 
 TEST_F(DapControllerTest, ResolveSourceLineBreakpointFallbackAcceptsBoundaryLine)
 {
-  // A line whose base+line*4 exactly equals u32 max should resolve.
-  // base = 0xFFFFFFFC, line = 3 -> 0xFFFFFFFC + 12 = 0x100000008 > u32 max,
-  // so this should NOT resolve. Pick base = 0xFFFFFFF0, line = 3 ->
-  // 0xFFFFFFF0 + 12 = 0xFFFFFFFC (in range).
+  // A line whose base+(line-1)*4 exactly equals the last aligned u32 should resolve.
   DAP::DapDebugController controller(System());
   const DAP::SourceBreakpointContext context{.source_name = "0xFFFFFFF0"};
-  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 3u);
+  const std::optional<u32> address = controller.ResolveSourceLineBreakpoint(context, 4u);
   ASSERT_TRUE(address.has_value());
   EXPECT_EQ(*address, 0xFFFFFFFCu);
 }
@@ -473,10 +680,10 @@ TEST_F(DapControllerTest, SetCodeBreakpointsStoresCondition)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "r3 == 0"}});
 
-  const TBreakPoint* bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = System().GetPowerPC().GetBreakPoints().GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   ASSERT_TRUE(bp->condition.has_value());
-  EXPECT_EQ(bp->condition->GetText(), "r3 == 0");
+  EXPECT_EQ(bp->condition->GetText(), "r3==0");
 }
 
 TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
@@ -484,10 +691,13 @@ TEST_F(DapControllerTest, SetDataBreakpointsAddsReadWriteWatchpoint)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}})
+          .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_break_on_read);
   EXPECT_FALSE(check->is_break_on_write);
@@ -500,8 +710,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsReplacesPreviousWatchpoints)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 4, .read = false, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 4, .read = false, .write = true}})
+          .has_value());
 
   EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 4), nullptr);
@@ -512,10 +726,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsRangedInstallsIsRangedMemcheck)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .length = 0x100, .read = false, .write = true}});
+  ASSERT_TRUE(controller
+                  .SetDataBreakpoints(
+                      {{.address = TEST_ADDRESS, .length = 0x100, .read = false, .write = true}})
+                  .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_ranged);
   EXPECT_EQ(check->start_address, TEST_ADDRESS);
@@ -529,10 +745,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsSingleByteIsNotRanged)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .length = 1, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints({{.address = TEST_ADDRESS, .length = 1, .read = true, .write = true}})
+          .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->is_ranged);
   EXPECT_EQ(check->start_address, TEST_ADDRESS);
@@ -547,10 +765,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsRangedOverflowClampsEndAddress)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = NEAR_MAX, .length = 0x100, .read = false, .write = true}});
+  ASSERT_TRUE(controller
+                  .SetDataBreakpoints(
+                      {{.address = NEAR_MAX, .length = 0x100, .read = false, .write = true}})
+                  .has_value());
 
-  const TMemCheck* check = memchecks.GetMemCheck(NEAR_MAX);
+  const auto check = memchecks.GetMemCheck(NEAR_MAX);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->is_ranged);
   EXPECT_EQ(check->start_address, NEAR_MAX);
@@ -563,10 +783,12 @@ TEST_F(DapControllerTest, SetDataBreakpointsEmptyClearsExisting)
   auto& memchecks = System().GetPowerPC().GetMemChecks();
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
 
-  controller.SetDataBreakpoints({});
+  ASSERT_TRUE(controller.SetDataBreakpoints({}).has_value());
   EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
   EXPECT_FALSE(memchecks.HasAny());
 }
@@ -580,7 +802,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsInvalidConditionAddsUnconditionalBre
   // unconditional stop rather than silently disappearing.
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = "not a condition"}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -592,7 +814,7 @@ TEST_F(DapControllerTest, SetCodeBreakpointsEmptyConditionIsUnconditional)
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS, .condition = ""}});
 
-  const TBreakPoint* bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
+  const auto bp = breakpoints.GetRegularBreakpoint(TEST_ADDRESS);
   ASSERT_NE(bp, nullptr);
   EXPECT_FALSE(bp->condition.has_value());
 }
@@ -646,10 +868,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckFiresWhenExpressionTrue)
   System().GetPPCState().gpr[3] = 1;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
 }
@@ -660,10 +885,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckSuppressedWhenExpressionFalse)
   System().GetPPCState().gpr[3] = 0;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = false, .write = true, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
 }
@@ -675,10 +903,13 @@ TEST_F(DapControllerTest, ConditionalMemCheckRespectsAccessType)
 
   DAP::DapDebugController controller(System());
   // Read-only watchpoint must not fire on a write even when the condition is true.
-  controller.SetDataBreakpoints(
-      {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}});
+  ASSERT_TRUE(
+      controller
+          .SetDataBreakpoints(
+              {{.address = TEST_ADDRESS, .read = true, .write = false, .condition = "r3 == 1"}})
+          .has_value());
 
-  TMemCheck* check = memchecks.GetMemCheck(TEST_ADDRESS);
+  const auto check = memchecks.GetMemCheck(TEST_ADDRESS);
   ASSERT_NE(check, nullptr);
   EXPECT_FALSE(check->Action(System(), 0, TEST_ADDRESS, true, 4, TEST_ADDRESS));
   EXPECT_TRUE(check->Action(System(), 0, TEST_ADDRESS, false, 4, TEST_ADDRESS));
@@ -732,6 +963,78 @@ TEST_F(DapControllerTest, EvaluateExpressionWritesBackToRegisters)
   EXPECT_EQ(ppc_state.gpr[3], 42u);
 }
 
+TEST_F(DapControllerTest, MutatingExpressionsNotifyOtherDebuggersButReadsDoNot)
+{
+  DAP::DapDebugController writer(System());
+  DAP::DapDebugController observer(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  observer.SetExecutionEventCallback([&](auto event) { events.push_back(std::move(event)); });
+  System().GetPPCState().gpr[3] = 1;
+  EXPECT_TRUE(writer.EvaluateExpression("r3 == 1"));
+  EXPECT_TRUE(writer.EvaluateExpression("streq(\"write_u32\", \"write_u32\")"));
+  EXPECT_FALSE(writer.EvaluateExpression("("));
+  EXPECT_TRUE(events.empty());
+
+  EXPECT_TRUE(writer.EvaluateExpression("r3 = r3 + 1"));
+  EXPECT_EQ(System().GetPPCState().gpr[3], 2U);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[0]->origin, writer.GetExecutionClientId());
+  EXPECT_TRUE(writer.EvaluateExpression("1 + write_u32(42, 0x3100)"));
+  EXPECT_EQ(System().GetMemory().Read_U32(TEST_ADDRESS), 42U);
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events[1]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[1]->origin, writer.GetExecutionClientId());
+  EXPECT_TRUE(writer.EvaluateExpression("read_u32(0x3100) == 42"));
+  EXPECT_EQ(events.size(), 2U);
+}
+
+TEST_F(DapControllerTest, MemoryWritesNotifyOtherDebuggersOfActualWrittenRange)
+{
+  DAP::DapDebugController writer(System());
+  DAP::DapDebugController observer(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> events;
+  observer.SetExecutionEventCallback([&](auto event) { events.push_back(std::move(event)); });
+  const std::array<u8, 4> payload{1, 2, 3, 4};
+  EXPECT_EQ(writer.WriteMemory(TEST_ADDRESS, payload), 4U);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0]->kind, Core::Debug::ExecutionEventKind::ValuesChanged);
+  EXPECT_EQ(events[0]->origin, writer.GetExecutionClientId());
+  EXPECT_EQ(events[0]->data_address, TEST_ADDRESS);
+  EXPECT_EQ(events[0]->data_size, 4U);
+
+  const u32 end_address = System().GetMemory().GetRamSizeReal() - 2;
+  EXPECT_EQ(writer.WriteMemory(end_address, payload), 2U);
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events[1]->data_address, end_address);
+  EXPECT_EQ(events[1]->data_size, 2U);
+  EXPECT_EQ(writer.WriteMemory(INVALID_ADDRESS, payload), 0U);
+  EXPECT_EQ(writer.WriteMemory(TEST_ADDRESS, {}), 0U);
+  EXPECT_EQ(events.size(), 2U);
+}
+
+TEST_F(DapControllerTest, ExpressionMutationDetectionUsesParsedNodes)
+{
+  const std::array<std::pair<std::string_view, bool>, 9> cases{{
+      {"r3 == 1", false},
+      {"streq(\"write_u32\", \"r3 = 1\")", false},
+      {"read_u32(0x3100)", false},
+      {"r3 = 1", true},
+      {"1 + (r3 = 1)", true},
+      {"0 && write_u8(1, 0x3100)", true},
+      {"read_u32(write_u32(0x3100, 0x4000))", true},
+      {"write_f64(1.5, 0x3100)", true},
+      {"-(r3 = 1)", true},
+  }};
+  for (const auto& [text, expected] : cases)
+  {
+    SCOPED_TRACE(text);
+    const auto expression = Expression::TryParse(text);
+    ASSERT_TRUE(expression);
+    EXPECT_EQ(expression->MayWriteState(), expected);
+  }
+}
+
 TEST_F(DapControllerTest, StepIntoAdvancesPc)
 {
   const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
@@ -744,6 +1047,526 @@ TEST_F(DapControllerTest, StepIntoAdvancesPc)
   DAP::DapDebugController controller(System());
   controller.StepInto();
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
+}
+
+TEST_F(DapControllerTest, SourceStepIntoAdvancesUntilLineChanges)
+{
+  const std::array<u8, 12> code{
+      {0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 8, file, 2);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 8);
+}
+
+TEST_F(DapControllerTest, SourceStepIntoStopsWhenDuplicateFilenameIdentityChanges)
+{
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 first = symbols.AddSourceFileInstance("step.c");
+  const u32 second = symbols.AddSourceFileInstance("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, first, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 4, second, 1);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+}
+
+TEST_F(DapControllerTest, SourceNextStepsOverCallAndStopsAtNextLine)
+{
+  const std::array<u8, 12> caller{
+      {0x48, 0x00, 0x00, 0x41, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  const std::array<u8, 4> callee{{0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, caller.data(), caller.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS + 0x40, callee.data(), callee.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 8, file, 2);
+  symbols.AddLineEntry(TEST_ADDRESS + 0x40, file, 10);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(true, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 8);
+}
+
+TEST_F(DapControllerTest, SourceStepIntoStopsAfterEnteringTakenCall)
+{
+  const std::array<u8, 4> caller{{0x48, 0x00, 0x00, 0x41}};
+  const std::array<u8, 4> callee{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, caller.data(), caller.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS + 0x40, callee.data(), callee.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 0x40, file, 10);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
+}
+
+TEST_F(DapControllerTest, SourceStepIntoStopsAtSourceLessCallee)
+{
+  const std::array<u8, 8> caller{{0x48, 0x00, 0x00, 0x41, 0x60, 0x00, 0x00, 0x00}};
+  const std::array<u8, 8> callee{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, caller.data(), caller.size());
+  System().GetMemory().CopyToEmu(TEST_ADDRESS + 0x40, callee.data(), callee.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 4, file, 2);
+  Core::CPUThreadGuard guard(System());
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS, static_cast<u32>(caller.size()), "caller", "step.c");
+  symbols.AddKnownSymbol(guard, TEST_ADDRESS + 0x40, static_cast<u32>(callee.size()), "callee",
+                         "asm.o");
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 0x40);
+}
+
+TEST_F(DapControllerTest, SourceStepStopsAtCodeBreakpointBeforeLineChanges)
+{
+  const std::array<u8, 12> code{
+      {0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 8, file, 2);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepInto, &cancelled);
+  ASSERT_TRUE(operation);
+  controller.PublishStepContinued(*operation);
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(stops[0]->code_breakpoint_address, TEST_ADDRESS + 4);
+}
+
+enum class NonBreakingDestination
+{
+  Disabled,
+  FalseCondition,
+  LogOnly,
+  BreakingDisabled,
+};
+
+class DapStepCompletionTest
+    : public DapControllerTest,
+      public ::testing::WithParamInterface<std::tuple<NonBreakingDestination, bool>>
+{
+};
+
+TEST_P(DapStepCompletionTest, NonBreakingDestinationRetainsStepCause)
+{
+  const auto [destination, instruction_step] = GetParam();
+  System().GetMemory().Write_U32(0x60000000, TEST_ADDRESS);
+  System().GetMemory().Write_U32(0x60000000, TEST_ADDRESS + 4);
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& symbols = System().GetPPCSymbolDB();
+  const u32 file = symbols.AddSourceFile("step.c");
+  symbols.AddLineEntry(TEST_ADDRESS, file, 1);
+  symbols.AddLineEntry(TEST_ADDRESS + 4, file, 2);
+
+  TBreakPoint breakpoint;
+  breakpoint.address = TEST_ADDRESS + 4;
+  breakpoint.is_enabled = destination != NonBreakingDestination::Disabled;
+  breakpoint.break_on_hit = true;
+  if (destination == NonBreakingDestination::FalseCondition)
+    breakpoint.condition = Expression::TryParse("0");
+  if (destination == NonBreakingDestination::LogOnly)
+  {
+    breakpoint.break_on_hit = false;
+    breakpoint.log_on_hit = true;
+  }
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(std::move(breakpoint)));
+  breakpoints.EnableBreaking(destination != NonBreakingDestination::BreakingDisabled);
+  Common::ScopeGuard restore_breaking{[&] { breakpoints.EnableBreaking(true); }};
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepInto, &cancelled);
+  ASSERT_TRUE(operation);
+  controller.PublishStepContinued(*operation);
+  if (instruction_step)
+    ASSERT_TRUE(controller.StepInto());
+  else
+    ASSERT_EQ(controller.StepSource(false, cancelled), Core::Debug::PPCStepResult::Stepped);
+  ASSERT_TRUE(stops.empty());
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::Step);
+  EXPECT_FALSE(stops[0]->code_breakpoint_address);
+  EXPECT_EQ(stops[0]->pc, TEST_ADDRESS + 4);
+  EXPECT_EQ(stops[0]->operation_id, *operation);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Breakpoints, DapStepCompletionTest,
+    ::testing::Combine(::testing::Values(NonBreakingDestination::Disabled,
+                                         NonBreakingDestination::FalseCondition,
+                                         NonBreakingDestination::LogOnly,
+                                         NonBreakingDestination::BreakingDisabled),
+                       ::testing::Bool()));
+
+TEST_F(DapControllerTest, InstructionStepEvaluatesDestinationConditionOnlyOnce)
+{
+  System().GetMemory().Write_U32(0x60000000, TEST_ADDRESS);
+  System().GetPPCState().pc = TEST_ADDRESS;
+  System().GetPPCState().gpr[3] = 0;
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4, .condition = "r3 = r3 + 1"}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepInto);
+  ASSERT_TRUE(operation);
+  ASSERT_TRUE(controller.StepInto());
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(stops[0]->code_breakpoint_address, TEST_ADDRESS + 4);
+  EXPECT_EQ(System().GetPPCState().gpr[3], 1U);
+}
+
+enum class StepOverReturnBreakpoint
+{
+  None,
+  Enabled,
+  Disabled,
+  FalseCondition,
+  TrueCondition,
+  LogOnly,
+};
+
+class DapTemporaryStepTest : public DapControllerTest,
+                             public ::testing::WithParamInterface<StepOverReturnBreakpoint>
+{
+protected:
+  void SetUp() override
+  {
+    Config::Init();
+    Config::Set(Config::LayerType::CurrentRun, Config::MAIN_ENABLE_DEBUGGING, true);
+    DapControllerTest::SetUp();
+  }
+  void TearDown() override
+  {
+    DapControllerTest::TearDown();
+    Config::Shutdown();
+  }
+};
+
+TEST_P(DapTemporaryStepTest, InterpreterReturnDistinguishesTemporaryAndUserHits)
+{
+  auto& system = System();
+  system.GetMemory().Write_U32(0x48000041, TEST_ADDRESS);
+  system.GetMemory().Write_U32(0x4e800020, TEST_ADDRESS + 0x40);
+  auto& state = system.GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.gpr[3] = 0;
+  DAP::DapDebugController controller(system);
+  const auto destination = GetParam();
+  if (destination != StepOverReturnBreakpoint::None)
+  {
+    TBreakPoint breakpoint;
+    breakpoint.address = TEST_ADDRESS + 4;
+    breakpoint.is_enabled = destination != StepOverReturnBreakpoint::Disabled;
+    breakpoint.break_on_hit = destination != StepOverReturnBreakpoint::LogOnly;
+    breakpoint.log_on_hit = destination == StepOverReturnBreakpoint::LogOnly;
+    if (destination == StepOverReturnBreakpoint::FalseCondition)
+      breakpoint.condition = Expression::TryParse("(r3 = r3 + 1) == 2");
+    if (destination == StepOverReturnBreakpoint::TrueCondition ||
+        destination == StepOverReturnBreakpoint::LogOnly)
+      breakpoint.condition = Expression::TryParse("r3 = r3 + 1");
+    ASSERT_TRUE(system.GetPowerPC().GetBreakPoints().Add(std::move(breakpoint)));
+  }
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(), DAP::StepOverResult::Continuing);
+  auto& power_pc = system.GetPowerPC();
+  const auto old_mode = power_pc.GetMode();
+  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+  Common::ScopeGuard restore_mode{[&] { power_pc.SetMode(old_mode); }};
+  power_pc.RunLoop();
+  controller.CompleteStep(*operation);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 4);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->operation_id, *operation);
+  const bool real_hit = destination == StepOverReturnBreakpoint::Enabled ||
+                        destination == StepOverReturnBreakpoint::TrueCondition;
+  EXPECT_EQ(stops[0]->stop_cause, real_hit ? Core::Debug::ExecutionStopCause::CodeBreakpoint :
+                                             Core::Debug::ExecutionStopCause::Step);
+  EXPECT_EQ(stops[0]->code_breakpoint_address,
+            real_hit ? std::optional<u32>(TEST_ADDRESS + 4) : std::nullopt);
+  const bool evaluated = destination == StepOverReturnBreakpoint::FalseCondition ||
+                         destination == StepOverReturnBreakpoint::TrueCondition ||
+                         destination == StepOverReturnBreakpoint::LogOnly;
+  EXPECT_EQ(state.gpr[3], evaluated ? 1U : 0U);
+  EXPECT_FALSE(power_pc.GetBreakPoints().GetSnapshot()->temporary_breakpoint);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ReturnSites, DapTemporaryStepTest,
+    ::testing::Values(StepOverReturnBreakpoint::None, StepOverReturnBreakpoint::Enabled,
+                      StepOverReturnBreakpoint::Disabled, StepOverReturnBreakpoint::FalseCondition,
+                      StepOverReturnBreakpoint::TrueCondition, StepOverReturnBreakpoint::LogOnly));
+
+TEST_F(DapControllerTest, StepOutEvaluatesReturnDestinationConditionOnlyOnce)
+{
+  System().GetMemory().Write_U32(0x4e800020, TEST_ADDRESS);
+  auto& state = System().GetPPCState();
+  state.pc = TEST_ADDRESS;
+  LR(state) = TEST_ADDRESS + 0x100;
+  state.gpr[3] = 0;
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 0x100, .condition = "r3 = r3 + 1"}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOut, &cancelled);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
+  controller.CompleteStep(*operation);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 0x100);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::CodeBreakpoint);
+  EXPECT_EQ(stops[0]->code_breakpoint_address, TEST_ADDRESS + 0x100);
+  EXPECT_EQ(stops[0]->operation_id, *operation);
+  EXPECT_EQ(state.gpr[3], 1U);
+}
+
+class DapStepOutCompletionTest : public DapControllerTest,
+                                 public ::testing::WithParamInterface<NonBreakingDestination>
+{
+};
+
+TEST_P(DapStepOutCompletionTest, NonBreakingReturnDestinationRetainsStepCause)
+{
+  System().GetMemory().Write_U32(0x4e800020, TEST_ADDRESS);
+  auto& state = System().GetPPCState();
+  state.pc = TEST_ADDRESS;
+  LR(state) = TEST_ADDRESS + 0x100;
+  TBreakPoint breakpoint;
+  breakpoint.address = TEST_ADDRESS + 0x100;
+  breakpoint.is_enabled = GetParam() != NonBreakingDestination::Disabled;
+  breakpoint.break_on_hit = true;
+  if (GetParam() == NonBreakingDestination::FalseCondition)
+    breakpoint.condition = Expression::TryParse("0");
+  if (GetParam() == NonBreakingDestination::LogOnly)
+  {
+    breakpoint.break_on_hit = false;
+    breakpoint.log_on_hit = true;
+  }
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(std::move(breakpoint)));
+  breakpoints.EnableBreaking(GetParam() != NonBreakingDestination::BreakingDisabled);
+  Common::ScopeGuard restore_breaking{[&] { breakpoints.EnableBreaking(true); }};
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOut, &cancelled);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::Step);
+  EXPECT_FALSE(stops[0]->code_breakpoint_address);
+  EXPECT_EQ(stops[0]->pc, TEST_ADDRESS + 0x100);
+}
+
+INSTANTIATE_TEST_SUITE_P(Breakpoints, DapStepOutCompletionTest,
+                         ::testing::Values(NonBreakingDestination::Disabled,
+                                           NonBreakingDestination::FalseCondition,
+                                           NonBreakingDestination::LogOnly,
+                                           NonBreakingDestination::BreakingDisabled));
+
+class DapSourceInterruptionTest : public DapControllerTest,
+                                  public ::testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(DapSourceInterruptionTest, DestinationPredicateDoesNotRunAfterInterruption)
+{
+  auto& system = System();
+  system.GetMemory().Write_U32(0x60000000, TEST_ADDRESS);
+  auto& state = system.GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.downcount = 0;
+  state.gpr[3] = 0;
+  const auto file = system.GetPPCSymbolDB().AddSourceFile("interrupted.c");
+  system.GetPPCSymbolDB().AddLineEntry(TEST_ADDRESS, file, 1);
+  system.GetPPCSymbolDB().AddLineEntry(TEST_ADDRESS + 4, file, 1);
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(system);
+  controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4, .condition = "r3 = r3 + 1"}});
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::SourceStepInto, &cancelled);
+  ASSERT_TRUE(operation);
+  bool interrupted = false;
+  auto* event_type =
+      system.GetCoreTiming().RegisterEvent("InterruptSourceStep", [&](Core::System&, u64, s64) {
+        interrupted = true;
+        if (GetParam())
+          cancelled.store(true);
+        else
+          system.GetCPU().GetExecutionState().PublishStopped(
+              {.cause = Core::Debug::ExecutionStopCause::UserPause, .pc = TEST_ADDRESS});
+      });
+  system.GetCoreTiming().ScheduleEvent(0, event_type);
+  controller.StepSource(false, cancelled);
+  ASSERT_TRUE(interrupted);
+  EXPECT_EQ(state.pc, TEST_ADDRESS + 4);
+  EXPECT_EQ(state.gpr[3], 0U);
+  if (GetParam())
+    EXPECT_TRUE(stops.empty());
+  else
+  {
+    controller.CompleteStep(*operation);
+    ASSERT_EQ(stops.size(), 1U);
+    EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::UserPause);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(CancellationAndPause, DapSourceInterruptionTest, ::testing::Bool());
+
+TEST_F(DapControllerTest, SourceStepWithoutLineInfoFallsBackToOneInstruction)
+{
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+}
+
+TEST_F(DapControllerTest, SourceStepHonorsCancellationBeforeFirstInstruction)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{true};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, SourceStepHonorsInstructionCap)
+{
+  const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  const u32 file = System().GetPPCSymbolDB().AddSourceFile("step.c");
+  System().GetPPCSymbolDB().AddLineEntry(TEST_ADDRESS, file, 1);
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  controller.StepSource(false, cancelled, std::chrono::seconds(1), 1);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS + 4);
+}
+
+TEST_F(DapControllerTest, SourceStepStopsOnDataBreakpoint)
+{
+  constexpr u32 data_address = TEST_ADDRESS + 0x100;
+  const std::array<u8, 8> code{{0x90, 0x64, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  auto& state = System().GetPPCState();
+  state.pc = TEST_ADDRESS;
+  state.gpr[3] = 0x12345678;
+  state.gpr[4] = data_address;
+
+  std::atomic<bool> cancelled{false};
+  DAP::DapDebugController controller(System());
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = data_address, .write = true}}).has_value());
+  std::vector<std::shared_ptr<const Core::Debug::ExecutionEvent>> stops;
+  controller.SetExecutionEventCallback([&](auto event) {
+    if (event->kind == Core::Debug::ExecutionEventKind::Stopped)
+      stops.push_back(std::move(event));
+  });
+  const auto operation =
+      controller.BeginStep(Core::Debug::ExecutionOperationKind::StepInto, &cancelled);
+  ASSERT_TRUE(operation);
+  controller.PublishStepContinued(*operation);
+  controller.StepSource(false, cancelled);
+  controller.CompleteStep(*operation);
+  ASSERT_EQ(stops.size(), 1U);
+  EXPECT_EQ(stops[0]->stop_cause, Core::Debug::ExecutionStopCause::DataBreakpoint);
+  EXPECT_EQ(stops[0]->data_address, data_address);
+  EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::DataBreakpoint);
+}
+
+TEST_F(DapControllerTest, StepOutHonorsCancellationBeforeFirstInstruction)
+{
+  const std::array<u8, 4> nop{{0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+
+  std::atomic<bool> cancelled{true};
+  DAP::DapDebugController controller(System());
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
+  EXPECT_EQ(System().GetPPCState().pc, TEST_ADDRESS);
 }
 
 TEST_F(DapControllerTest, StepIntoWhenNotSteppingIsNoOp)
@@ -779,7 +1602,8 @@ TEST_F(DapControllerTest, StepOutWhenNotSteppingIsNoOp)
   System().GetCPU().SetStepping(false);
 
   DAP::DapDebugController controller(System());
-  controller.StepOut();
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::NotStepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS);
 }
 
@@ -815,6 +1639,43 @@ TEST_F(DapControllerTest, StepOverBranchSetsTemporaryAndContinues)
   EXPECT_NE(System().GetPowerPC().GetBreakPoints().GetBreakpoint(TEST_ADDRESS + 4), nullptr);
 }
 
+TEST_F(DapControllerTest, CancellingContinuingStepOverClearsOnlyTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+  ASSERT_TRUE(breakpoints.Add(TEST_ADDRESS + 8));
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  ASSERT_TRUE(controller.CancelActiveStep());
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+  EXPECT_NE(breakpoints.GetRegularBreakpoint(TEST_ADDRESS + 8), nullptr);
+}
+
+TEST_F(DapControllerTest, ExternalStopClearsContinuingStepOverTemporaryBreakpoint)
+{
+  const std::array<u8, 8> code{{0x48, 0x00, 0x00, 0x01, 0x60, 0x00, 0x00, 0x00}};
+  System().GetMemory().CopyToEmu(TEST_ADDRESS, code.data(), code.size());
+  System().GetPPCState().pc = TEST_ADDRESS;
+  auto& breakpoints = System().GetPowerPC().GetBreakPoints();
+
+  DAP::DapDebugController controller(System());
+  const auto operation = controller.BeginStep(Core::Debug::ExecutionOperationKind::StepOver);
+  ASSERT_TRUE(operation);
+  ASSERT_EQ(controller.StepOver(*operation), DAP::StepOverResult::Continuing);
+  ASSERT_NE(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+
+  System().GetCPU().GetExecutionState().PublishStopped(
+      {.cause = Core::Debug::ExecutionStopCause::Exception, .pc = TEST_ADDRESS});
+  EXPECT_EQ(breakpoints.GetBreakpoint(TEST_ADDRESS + 4), nullptr);
+}
+
 TEST_F(DapControllerTest, StepOutRunsUntilReturn)
 {
   const std::array<u8, 8> code{{0x60, 0x00, 0x00, 0x00, 0x4e, 0x80, 0x00, 0x20}};
@@ -826,7 +1687,8 @@ TEST_F(DapControllerTest, StepOutRunsUntilReturn)
   ASSERT_TRUE(System().GetCPU().IsStepping());
 
   DAP::DapDebugController controller(System());
-  controller.StepOut();
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -845,7 +1707,8 @@ TEST_F(DapControllerTest, StepOutStopsAtBreakpointBeforeReturn)
 
   DAP::DapDebugController controller(System());
   controller.SetCodeBreakpoints({{.address = TEST_ADDRESS + 4}});
-  controller.StepOut();
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled), Core::Debug::PPCStepResult::Stepped);
 
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 4u);
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS + 0x200u);
@@ -864,7 +1727,9 @@ TEST_F(DapControllerTest, StepOutTimesOutOnNonReturningCode)
   ASSERT_TRUE(System().GetCPU().IsStepping());
 
   DAP::DapDebugController controller(System());
-  controller.StepOut(std::chrono::milliseconds(5));
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::milliseconds(5)),
+            Core::Debug::PPCStepResult::NotStepped);
 
   // The branch loops back to itself, so the bounded step-out returns with the
   // PC still parked on the branch instead of hanging.
@@ -884,7 +1749,9 @@ TEST_F(DapControllerTest, StepOutReturnsImmediatelyWhenPcIsOnReturn)
   ASSERT_TRUE(System().GetCPU().IsStepping());
 
   DAP::DapDebugController controller(System());
-  controller.StepOut(std::chrono::seconds(1));
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
   EXPECT_EQ(ppc_state.pc, TEST_ADDRESS + 0x100u);
 }
 
@@ -903,7 +1770,9 @@ TEST_F(DapControllerTest, StepOutStepsOverNestedCall)
   ASSERT_TRUE(System().GetCPU().IsStepping());
 
   DAP::DapDebugController controller(System());
-  controller.StepOut(std::chrono::seconds(1));
+  std::atomic<bool> cancelled{false};
+  EXPECT_EQ(controller.StepOut(cancelled, std::chrono::seconds(1)),
+            Core::Debug::PPCStepResult::Stepped);
 
   // bl sets LR to TEST_ADDRESS + 4; the callee returns there, so the inner loop
   // ends on the instruction after the call rather than parking inside the
@@ -994,7 +1863,9 @@ TEST_F(DapControllerTest, GetStopInfoWithWatchpointButNoHitFlagIsStep)
   ppc_state.pc = TEST_ADDRESS;
 
   DAP::DapDebugController controller(System());
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
 
   EXPECT_EQ(controller.GetStopInfo().reason, DAP::StopReason::Step);
 }
@@ -1063,9 +1934,9 @@ TEST_F(DapControllerTest, GetLoadedSourcesListsFunctionSymbols)
   DAP::DapDebugController controller(System());
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
-  EXPECT_EQ(sources[0].source_reference, static_cast<int>(TEST_ADDRESS));
+  EXPECT_EQ(sources[0].source_reference, DAP::MakeDisassemblySourceReference(TEST_ADDRESS));
   EXPECT_EQ(sources[0].name, "game.elf");
-  EXPECT_EQ(sources[0].path, "0x00003100");
+  EXPECT_TRUE(sources[0].path.empty());
 }
 
 TEST_F(DapControllerTest, GetSourceReturnsDisassembly)
@@ -1074,7 +1945,7 @@ TEST_F(DapControllerTest, GetSourceReturnsDisassembly)
   System().GetMemory().CopyToEmu(TEST_ADDRESS, nop.data(), nop.size());
 
   DAP::DapDebugController controller(System());
-  const auto source = controller.GetSource(TEST_ADDRESS, 0, 0);
+  const auto source = controller.GetSource(DAP::MakeDisassemblySourceReference(TEST_ADDRESS), 0, 0);
   ASSERT_TRUE(source.has_value());
   EXPECT_EQ(source->mime_type, "text/x-disassembly");
   EXPECT_NE(source->content.find("nop"), std::string::npos);
@@ -1083,17 +1954,18 @@ TEST_F(DapControllerTest, GetSourceReturnsDisassembly)
 TEST_F(DapControllerTest, GetSourceRejectsInvalidBase)
 {
   DAP::DapDebugController controller(System());
-  EXPECT_FALSE(controller.GetSource(INVALID_ADDRESS, 0, 0).has_value());
+  EXPECT_FALSE(
+      controller.GetSource(DAP::MakeDisassemblySourceReference(INVALID_ADDRESS), 0, 0).has_value());
 }
 
 TEST_F(DapControllerTest, GetBreakpointLocationsStopsAtInvalidMemory)
 {
   DAP::DapDebugController controller(System());
   const std::vector<DAP::BreakpointLocation> locations =
-      controller.GetBreakpointLocations(TEST_ADDRESS, 0, 3);
+      controller.GetBreakpointLocations(DAP::MakeDisassemblySourceReference(TEST_ADDRESS), 1, 4);
   ASSERT_EQ(locations.size(), 4u);
-  EXPECT_EQ(locations[0].line, 0);
-  EXPECT_EQ(locations[3].line, 3);
+  EXPECT_EQ(locations[0].line, 1);
+  EXPECT_EQ(locations[3].line, 4);
 }
 
 TEST_F(DapControllerTest, GetStackTraceIncludesSourceForKnownSymbol)
@@ -1111,7 +1983,7 @@ TEST_F(DapControllerTest, GetStackTraceIncludesSourceForKnownSymbol)
   ASSERT_EQ(trace.frames.size(), 1u);
   ASSERT_TRUE(trace.frames[0].source_base.has_value());
   EXPECT_EQ(*trace.frames[0].source_base, TEST_ADDRESS);
-  EXPECT_EQ(trace.frames[0].source_line, 2);
+  EXPECT_EQ(trace.frames[0].source_line, 3);
 }
 
 TEST_F(DapControllerTest, RestartResetsPpcState)
@@ -1121,7 +1993,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
   ppc_state.gpr[3] = 0xdeadbeef;
 
   DAP::DapDebugController controller(System());
-  controller.Restart();
+  ASSERT_TRUE(controller.Restart().has_value());
 
   EXPECT_NE(ppc_state.pc, TEST_ADDRESS);
   EXPECT_EQ(ppc_state.gpr[3], 0u);
@@ -1130,7 +2002,7 @@ TEST_F(DapControllerTest, RestartResetsPpcState)
 TEST_F(DapControllerTest, TerminateBreaksCpu)
 {
   DAP::DapDebugController controller(System());
-  controller.Terminate();
+  ASSERT_TRUE(controller.Terminate().has_value());
   EXPECT_TRUE(System().GetCPU().IsStepping());
 }
 
@@ -1149,9 +2021,11 @@ TEST_F(DapControllerTest, ClearBreakpointsRemovesCodeAndDataBreakpoints)
   // UpdateSourceBreakpoints and UpdateInstructionBreakpoints merge: both
   // contribute to the global BreakPoints store via ReapplyCodeBreakpoints.
   const DAP::SourceBreakpointContext context{.source_name = "0x00003100"};
-  controller.UpdateSourceBreakpoints("test:1", context, {{.line = 0}});
+  controller.UpdateSourceBreakpoints("test:1", context, {{.line = 1}});
   controller.UpdateInstructionBreakpoints({{.address = TEST_ADDRESS + 0x100}});
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}});
+  ASSERT_TRUE(
+      controller.SetDataBreakpoints({{.address = TEST_ADDRESS, .read = true, .write = true}})
+          .has_value());
 
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS));
   EXPECT_TRUE(breakpoints.IsAddressBreakPoint(TEST_ADDRESS + 0x100));
@@ -1173,8 +2047,8 @@ TEST_F(DapControllerTest, ClearBreakpointsIsIdempotent)
   DAP::DapDebugController controller(System());
   controller.ClearBreakpoints();
   controller.ClearBreakpoints();
-  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints().empty());
-  EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks().empty());
+  EXPECT_TRUE(System().GetPowerPC().GetBreakPoints().GetBreakPoints()->empty());
+  EXPECT_TRUE(System().GetPowerPC().GetMemChecks().GetMemChecks()->empty());
 }
 
 TEST_F(DapControllerTest, ClearBreakpointsAllowsReinstallAfter)
@@ -1226,7 +2100,7 @@ TEST_F(DapControllerTest, GetLoadedSourcesListsDwarfFiles)
   const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
   ASSERT_EQ(sources.size(), 1u);
   EXPECT_EQ(sources[0].path, DwarfTestFixture::kCompileUnitName);
-  EXPECT_EQ(sources[0].source_reference, 1);
+  EXPECT_EQ(sources[0].source_reference, 0);
 }
 
 TEST_F(DapControllerTest, GetLoadedSourcesStripsPathToBasename)
@@ -1241,6 +2115,150 @@ TEST_F(DapControllerTest, GetLoadedSourcesStripsPathToBasename)
   ASSERT_EQ(sources.size(), 1u);
   EXPECT_EQ(sources[0].path, "src/melee/gm/gm_1BA8.c");
   EXPECT_EQ(sources[0].name, "gm_1BA8.c");
+}
+
+TEST_F(DapControllerTest, SourcePathsResolveDwarfSourcesToFullPaths)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_root = temp_dir + "/src";
+  const std::string source_path = source_root + "/melee/gm/gm_test.c";
+  ASSERT_TRUE(File::CreateFullPath(source_path));
+  ASSERT_TRUE(File::WriteStringToFile(source_path, "test line\n"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile("melee/gm/gm_test.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 7);
+  System().GetPPCState().pc = TEST_ADDRESS;
+  LR(System().GetPPCState()) = 0;
+
+  DAP::DapDebugController controller(System());
+  symbol_db.SetSourcePaths({source_root});
+
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
+  EXPECT_EQ(sources[0].source_reference, 1u);
+
+  const DAP::StackTraceResult trace = controller.GetStackTrace();
+  ASSERT_EQ(trace.frames.size(), 1u);
+  EXPECT_EQ(trace.frames[0].source_file,
+            std::filesystem::path(source_path).lexically_normal().generic_string());
+  EXPECT_TRUE(controller.GetSource(1, 1, 1).has_value());
+
+  DAP::SourceBreakpointContext breakpoint;
+  breakpoint.source_path = source_path;
+  EXPECT_EQ(controller.ResolveSourceLineBreakpoint(breakpoint, 7), TEST_ADDRESS);
+}
+
+TEST_F(DapControllerTest, GetSourcePreservesLinesLongerThanReadBuffer)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_path = temp_dir + "/long-line.c";
+  const std::string long_line(5000, 'a');
+  ASSERT_TRUE(File::WriteStringToFile(source_path, long_line + "\nsecond line\n"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile(source_path);
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  const auto source = controller.GetSource(1, 1, 2);
+  ASSERT_TRUE(source.has_value());
+  EXPECT_EQ(source->content, long_line + "\nsecond line");
+}
+
+TEST_F(DapControllerTest, SourcePathsResolveSourcesImportedLater)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_root = temp_dir + "/src";
+  const std::string source_path = source_root + "/later.c";
+  ASSERT_TRUE(File::CreateFullPath(source_path));
+  ASSERT_TRUE(File::CreateEmptyFile(source_path));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.SetSourcePaths({source_root});
+  symbol_db.AddSourceFile("later.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
+}
+
+TEST_F(DapControllerTest, SourcePathsPreferTheFirstMatchingRoot)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string first_root = temp_dir + "/first";
+  const std::string second_root = temp_dir + "/second";
+  ASSERT_TRUE(File::CreateFullPath(first_root + "/duplicate.c"));
+  ASSERT_TRUE(File::CreateFullPath(second_root + "/duplicate.c"));
+  ASSERT_TRUE(File::CreateEmptyFile(first_root + "/duplicate.c"));
+  ASSERT_TRUE(File::CreateEmptyFile(second_root + "/duplicate.c"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile("duplicate.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  symbol_db.SetSourcePaths({"", first_root, second_root});
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path,
+            std::filesystem::path(first_root + "/duplicate.c").lexically_normal().generic_string());
+  EXPECT_EQ(sources[0].source_reference, 1u);
+}
+
+TEST_F(DapControllerTest, SourcePathsLeaveAmbiguousBasenamesWithinOneRootUnresolved)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_root = temp_dir + "/src";
+  ASSERT_TRUE(File::CreateFullPath(source_root + "/first/duplicate.c"));
+  ASSERT_TRUE(File::CreateFullPath(source_root + "/second/duplicate.c"));
+  ASSERT_TRUE(File::CreateEmptyFile(source_root + "/first/duplicate.c"));
+  ASSERT_TRUE(File::CreateEmptyFile(source_root + "/second/duplicate.c"));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile("duplicate.c");
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  symbol_db.SetSourcePaths({source_root});
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, "duplicate.c");
+  EXPECT_EQ(sources[0].source_reference, 0u);
+}
+
+TEST_F(DapControllerTest, SourcePathsResolveWindowsStyleDwarfPaths)
+{
+  const std::string temp_dir = File::CreateTempDir();
+  ASSERT_FALSE(temp_dir.empty());
+  Common::ScopeGuard cleanup{[&temp_dir] { File::DeleteDirRecursively(temp_dir); }};
+  const std::string source_root = temp_dir + "/src";
+  const std::string source_path = source_root + "/melee/gm/gm_test.c";
+  ASSERT_TRUE(File::CreateFullPath(source_path));
+  ASSERT_TRUE(File::CreateEmptyFile(source_path));
+
+  auto& symbol_db = System().GetPowerPC().GetSymbolDB();
+  symbol_db.AddSourceFile(R"(C:\BUILD\MELEE\GM\GM_TEST.C)");
+  symbol_db.AddLineEntry(TEST_ADDRESS, 0, 1);
+
+  DAP::DapDebugController controller(System());
+  symbol_db.SetSourcePaths({source_root});
+  const std::vector<DAP::LoadedSource> sources = controller.GetLoadedSources();
+  ASSERT_EQ(sources.size(), 1u);
+  EXPECT_EQ(sources[0].path, std::filesystem::path(source_path).lexically_normal().generic_string());
 }
 
 TEST_F(DapControllerTest, GetStackTraceUsesNearestPrecedingDwarfLine)
@@ -1271,12 +2289,10 @@ TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfMapsResolvableLines)
                                        DwarfTestFixture::kLineSection));
 
   DAP::DapDebugController controller(System());
-  const std::vector<DAP::BreakpointLocation> locations =
-      controller.GetBreakpointLocations(1, 1, 3);
-  ASSERT_EQ(locations.size(), 3u);
+  const std::vector<DAP::BreakpointLocation> locations = controller.GetBreakpointLocations(1, 1, 3);
+  ASSERT_EQ(locations.size(), 2u);
   EXPECT_EQ(locations[0].line, 1);
   EXPECT_EQ(locations[1].line, 2);
-  EXPECT_EQ(locations[2].line, 3);
 }
 
 TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfSkipsLinesBeforeFirstEntry)
@@ -1287,8 +2303,7 @@ TEST_F(DapControllerTest, GetBreakpointLocationsWithDwarfSkipsLinesBeforeFirstEn
                                        DwarfTestFixture::kLineSection));
 
   DAP::DapDebugController controller(System());
-  const std::vector<DAP::BreakpointLocation> locations =
-      controller.GetBreakpointLocations(1, 0, 0);
+  const std::vector<DAP::BreakpointLocation> locations = controller.GetBreakpointLocations(1, 0, 0);
   EXPECT_TRUE(locations.empty());
 }
 
@@ -1507,8 +2522,7 @@ TEST_F(DapControllerTest, DetourPatchesTargetAndInstallsTrampoline)
   // Trampoline sits right after detour body + appended tail branch.
   EXPECT_EQ(result->trampoline_address, DETOUR_BASE + 8u);
   // originalInstruction echoes the 4 bytes that lived at the target.
-  EXPECT_EQ(result->original_instruction,
-            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(result->original_instruction, (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 
   // The target now holds `b DETOUR_BASE` rather than the no-op.
   const std::vector<u8> target_bytes = controller.ReadMemory(INJECT_BASE, 4);
@@ -1566,12 +2580,10 @@ TEST_F(DapControllerTest, DetourEncodesForwardAndBackwardBranchesExactly)
   ASSERT_TRUE(result.has_value());
 
   // Forward branch at the target site (detour patch).
-  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
-            (std::vector<u8>{0x48, 0x00, 0x40, 0x00}));
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), (std::vector<u8>{0x48, 0x00, 0x40, 0x00}));
 
   // Short forward branch at the tail (detour body -> trampoline).
-  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE + 4u, 4),
-            (std::vector<u8>{0x48, 0x00, 0x00, 0x04}));
+  EXPECT_EQ(controller.ReadMemory(DETOUR_BASE + 4u, 4), (std::vector<u8>{0x48, 0x00, 0x00, 0x04}));
 
   // Backward branch at the trampoline return (trampoline -> target+4).
   // The trampoline is 8 bytes: [original 4 bytes][return branch 4 bytes].
@@ -1602,8 +2614,7 @@ TEST_F(DapControllerTest, DetourRejectsExplicitCaveAtInvalidAddress)
   auto result = controller.Detour(INJECT_BASE, INVALID_ADDRESS, body);
   EXPECT_FALSE(result.has_value());
   // Target must be untouched (rejection happens before any writes).
-  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
-            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 }
 
 TEST_F(DapControllerTest, DetourRejectsOutOfRangeBranchDisplacement)
@@ -1708,8 +2719,7 @@ TEST_F(DapControllerTest, DetourRejectsEmptyBody)
   auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, {});
   EXPECT_FALSE(result.has_value());
   // Target untouched.
-  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
-            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 }
 
 TEST_F(DapControllerTest, DetourRejectsNonMultipleOfFourBody)
@@ -1724,8 +2734,7 @@ TEST_F(DapControllerTest, DetourRejectsNonMultipleOfFourBody)
   auto result = controller.Detour(INJECT_BASE, DETOUR_BASE, body);
   EXPECT_FALSE(result.has_value());
   // Target untouched.
-  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
-            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
   // Detour region untouched (no rollback needed since reject is before writes).
   const std::vector<u8> detour_region = controller.ReadMemory(DETOUR_BASE, 4);
   // Whatever was there before (zeroed RAM on init), it's still zeroed.
@@ -1791,16 +2800,15 @@ TEST_F(DapControllerTest, DetourTrampolineReturnBranchesToTargetPlusFour)
   // Decode the branch: opcode 0x49000000 | (LI << 2) for `b` (AA=0).
   const u32 branch = (static_cast<u32>(ret_bytes[0]) << 24) |
                      (static_cast<u32>(ret_bytes[1]) << 16) |
-                     (static_cast<u32>(ret_bytes[2]) << 8) |
-                     static_cast<u32>(ret_bytes[3]);
+                     (static_cast<u32>(ret_bytes[2]) << 8) | static_cast<u32>(ret_bytes[3]);
   // The destination = trampoline_return_addr + 4 + (LI << 2) where LI is the
   // signed 24-bit field. Compute what the branch should target.
   const u32 ret_addr = result->trampoline_address + 4u;
   const u32 expected_target = kTarget + 4u;
   // PPC `b`: bits 6-29 are LI (signed, /4). Extract and sign-extend the 24-bit field.
   const u32 li_raw = (branch & 0x03FFFFFC) >> 2;
-  const s32 li = (li_raw & 0x00800000u) ? static_cast<s32>(li_raw | 0xFF000000u) :
-                                              static_cast<s32>(li_raw);
+  const s32 li =
+      (li_raw & 0x00800000u) ? static_cast<s32>(li_raw | 0xFF000000u) : static_cast<s32>(li_raw);
   const u32 decoded_target = ret_addr + static_cast<u32>(li * 4);
   EXPECT_EQ(decoded_target, expected_target);
 }
@@ -1865,8 +2873,8 @@ TEST_F(DapControllerTest, DetourRestoresTargetAndDetourRegionOnTrampolineWriteFa
   // trampoline_addr = ram_size (past RAM).
   const u32 detour_addr = ram_size - 12;
   // Seed the body+tail region with distinct bytes so we can verify rollback.
-  const std::vector<u8> seed = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                                0x99, 0xAA, 0xBB, 0xCC};
+  const std::vector<u8> seed = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                                0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC};
   (void)controller.WriteMemory(detour_addr, std::span<const u8>{seed});
 
   WriteRam(INJECT_BASE, {0x60, 0x00, 0x00, 0x00});
@@ -1877,8 +2885,7 @@ TEST_F(DapControllerTest, DetourRestoresTargetAndDetourRegionOnTrampolineWriteFa
   // Body+tail region restored to pre-detour seed.
   EXPECT_EQ(controller.ReadMemory(detour_addr, 12), seed);
   // Target unpatched.
-  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4),
-            (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
+  EXPECT_EQ(controller.ReadMemory(INJECT_BASE, 4), (std::vector<u8>{0x60, 0x00, 0x00, 0x00}));
 }
 
 TEST_F(DapControllerTest, DetourRestoresEverythingOnTargetPatchWriteFailure)
@@ -1928,7 +2935,7 @@ TEST_F(DapControllerTest, WriteMemoryInvalidatesInstructionCacheRange)
 }
 
 // DESNOTE(jbarber, 2026-07-22): Tests for MMU-level write suppression via
-// `is_freeze` TMemCheck. When a freeze is installed, emulated CPU stores
+// private MemChecks freeze range. When a freeze is installed, emulated CPU stores
 // (through MMU::Write<T>) to the frozen range are silently dropped — the
 // frozen value persists in RAM. HostWrite (debugger/cheat writes) is NOT
 // suppressed because it bypasses the Memcheck path. The field-rate Tick
@@ -1975,8 +2982,7 @@ TEST_F(DapControllerTest, FreezeDoesNotSuppressHostWrite)
 
   // WriteMemory uses HostWrite under the hood, which bypasses Memcheck.
   const std::vector<u8> new_value = {0xCA, 0xFE, 0xBA, 0xBE};
-  EXPECT_EQ(controller.WriteMemory(TEST_ADDRESS, std::span<const u8>{new_value}),
-            new_value.size());
+  EXPECT_EQ(controller.WriteMemory(TEST_ADDRESS, std::span<const u8>{new_value}), new_value.size());
   EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), new_value);
 
   // After HostWrite, the freeze memcheck is still active — an emulated CPU
@@ -2046,18 +3052,12 @@ TEST_F(DapControllerTest, ClearFreezesRemovesAllFreezeMemchecks)
     System().GetMMU().Write<u32>(0x11223344, TEST_ADDRESS);
     System().GetMMU().Write<u32>(0x55667788, TEST_ADDRESS + 0x100);
   }
-  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4),
-            (std::vector<u8>{0x11, 0x22, 0x33, 0x44}));
+  EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS, 4), (std::vector<u8>{0x11, 0x22, 0x33, 0x44}));
   EXPECT_EQ(controller.ReadMemory(TEST_ADDRESS + 0x100, 4),
             (std::vector<u8>{0x55, 0x66, 0x77, 0x88}));
 }
 
-// DESNOTE(jbarber, 2026-07-26): SetDataBreakpoints calls memchecks.Clear(),
-// which wipes freeze memchecks from the global store. The m_freezes tracking
-// vector must also be cleared so a later RemoveFreeze safely returns false
-// instead of calling MemChecks::Remove at a stale address and deleting an
-// unrelated data watchpoint. Bugbot #77.
-TEST_F(DapControllerTest, SetDataBreakpointsClearsFreezeTracking)
+TEST_F(DapControllerTest, SetDataBreakpointsPreservesFreezeTracking)
 {
   DAP::DapDebugController controller(System());
   auto& memchecks = System().GetPowerPC().GetMemChecks();
@@ -2068,14 +3068,15 @@ TEST_F(DapControllerTest, SetDataBreakpointsClearsFreezeTracking)
   const u32 freeze_id = controller.InstallFreeze(TEST_ADDRESS, 4, frozen);
   ASSERT_NE(freeze_id, 0u);
 
-  // SetDataBreakpoints wipes all memchecks (including the freeze) and installs
-  // a data watchpoint at TEST_ADDRESS + 0x100.
-  controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 0x100, .write = true}});
+  // The authoritative watchpoint replacement is independent of freezes.
+  ASSERT_TRUE(controller.SetDataBreakpoints({{.address = TEST_ADDRESS + 0x100, .write = true}})
+                  .has_value());
   ASSERT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
 
-  // RemoveFreeze should return false (freeze tracking was cleared) and must
-  // NOT remove the data watchpoint at TEST_ADDRESS + 0x100.
-  EXPECT_FALSE(controller.RemoveFreeze(freeze_id));
+  EXPECT_EQ(memchecks.GetMemCheck(TEST_ADDRESS), nullptr);
+  EXPECT_TRUE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(TEST_ADDRESS, 4));
+  EXPECT_TRUE(controller.RemoveFreeze(freeze_id));
+  EXPECT_FALSE(memchecks.GetSnapshot()->OverlapsPrivateFreeze(TEST_ADDRESS, 4));
   EXPECT_NE(memchecks.GetMemCheck(TEST_ADDRESS + 0x100), nullptr);
 }
 
@@ -2093,7 +3094,17 @@ TEST_F(DapControllerTest, GetSourceLineCountNoOverflowOnOmittedEndLine)
   // the important thing is that we don't crash/UB from the overflow.
   // If it does return content, line_count must be <= 256.
   if (result.has_value())
+  {
     EXPECT_LE(result->content.size(), 256u * 4096u);
+  }
   // No crash = pass.
+}
+
+TEST_F(DapControllerTest, ExtremeSourceLineDoesNotWrapDisassemblyAddress)
+{
+  DAP::DapDebugController controller(System());
+  EXPECT_FALSE(controller.GetSource(TEST_ADDRESS, std::numeric_limits<int>::max(), -1));
+  EXPECT_TRUE(
+      controller.GetBreakpointLocations(TEST_ADDRESS, std::numeric_limits<int>::max(), -1).empty());
 }
 }  // namespace

@@ -6,11 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Core/Boot/ElfReader.h"
-#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/Debugger/DWARF/DwarfReader.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
@@ -25,16 +23,7 @@ bool ApplyParseResult(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
   std::vector<u32> file_indices;
   file_indices.reserve(parsed.files.size());
   for (const std::string& file : parsed.files)
-    file_indices.push_back(symbol_db.AddSourceFile(file));
-
-  auto file_index_for = [&](const std::string& file) -> u32 {
-    for (size_t i = 0; i < parsed.files.size(); ++i)
-    {
-      if (parsed.files[i] == file)
-        return file_indices[i];
-    }
-    return symbol_db.AddSourceFile(file);
-  };
+    file_indices.push_back(symbol_db.AddSourceFileInstance(file));
 
   for (const Dwarf::Function& function : parsed.functions)
   {
@@ -46,7 +35,10 @@ bool ApplyParseResult(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
 
   for (const Dwarf::LineEntry& line : parsed.lines)
   {
-    symbol_db.AddLineEntry(line.address, file_index_for(line.file), line.line);
+    const u32 file_index = line.file_index < file_indices.size() ?
+                               file_indices[line.file_index] :
+                               symbol_db.AddSourceFile(line.file);
+    symbol_db.AddLineEntry(line.address, file_index, line.line);
   }
 
   symbol_db.Index();
@@ -64,15 +56,21 @@ bool ImportDwarf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
 
   NOTICE_LOG_FMT(SYMBOLS, "Imported DWARF: {} functions, {} line entries, {} source files",
                  parsed->functions.size(), parsed->lines.size(), parsed->files.size());
-  return ApplyParseResult(guard, symbol_db, *parsed, object_name);
+  if (!ApplyParseResult(guard, symbol_db, *parsed, object_name))
+    return false;
+  symbol_db.SetDwarfDebugInfo(std::move(*parsed));
+  return true;
 }
 
 bool ImportDwarfFromElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
                         const std::string& elf_path)
 {
   ElfReader elf(elf_path);
-  if (!elf.IsValid())
+  if (!elf.IsValid() || elf.GetMachine() != EM_PPC)
+  {
+    WARN_LOG_FMT(SYMBOLS, "{} is not a valid 32-bit big-endian PowerPC ELF", elf_path);
     return false;
+  }
 
   const SectionID debug_section = elf.GetSectionByName(".debug");
   const SectionID line_section = elf.GetSectionByName(".line");
@@ -93,20 +91,5 @@ bool ImportDwarfFromElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db,
   return ImportDwarf(guard, symbol_db, {debug_data, debug_size},
                      line_data ? std::span<const u8>{line_data, line_size} : std::span<const u8>{},
                      elf_path);
-}
-
-bool ImportConfiguredDwarfElf(const CPUThreadGuard& guard, PPCSymbolDB& symbol_db)
-{
-  const std::string& path = Config::Get(Config::MAIN_DEBUG_DWARF_ELF);
-  if (path.empty())
-    return false;
-
-  if (!File::Exists(path))
-  {
-    WARN_LOG_FMT(SYMBOLS, "Configured DWARF ELF not found: {}", path);
-    return false;
-  }
-
-  return ImportDwarfFromElf(guard, symbol_db, path);
 }
 }  // namespace Core::Debug

@@ -44,7 +44,7 @@ public:
       m_values.emplace_back(Config::MAIN_ENABLE_DEBUGGING.GetLocation(), ValueToString(true));
 
     if (!debug_elf.empty())
-      m_values.emplace_back(Config::MAIN_DEBUG_DWARF_ELF.GetLocation(), std::move(debug_elf));
+      m_values.emplace_back(Config::MAIN_DEBUG_ELF_FILE.GetLocation(), std::move(debug_elf));
 
     if (!debug_entrypoints.empty())
     {
@@ -125,11 +125,12 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
       .type("string")
       .help("Load the initial save state");
 
+  parser->add_option("-d", "--debugger")
+      .action("store_true")
+      .help("Enable core debugging (also shows debugger panes in the GUI)");
+
   if (options == ParserOptions::IncludeGUIOptions)
   {
-    parser->add_option("-d", "--debugger")
-        .action("store_true")
-        .help("Show the debugger pane and additional View menu options");
     parser->add_option("-l", "--logger").action("store_true").help("Open the logger");
     parser->add_option("-b", "--batch")
         .action("store_true")

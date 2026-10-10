@@ -1,7 +1,7 @@
 # DAP Server Capabilities
 
-Operations supported by the Dolphin DAP server. Each command below is a link
-target — the [Features](README.md#features) table links into this document.
+Operations supported by the Dolphin DAP server. Use the table of contents below
+to find a request and its payload.
 
 For build/run instructions, tests, known limitations, and source awareness, see
 [`README.md`](README.md).
@@ -36,6 +36,16 @@ the server for responses/events.
   - [`dolphin_findFreeMemory`](#dolphin_findfreememory)
   - [`dolphin_injectCode`](#dolphin_injectcode)
   - [`dolphin_detour`](#dolphin_detour)
+  - [`dolphin_memoryRegions`](#dolphin_memoryregions)
+  - [`dolphin_memoryScanStart`](#dolphin_memoryscanstart)
+  - [`dolphin_memoryScanRefine`](#dolphin_memoryscanrefine)
+  - [`dolphin_memoryScanStatus`](#dolphin_memoryscanstatus)
+  - [`dolphin_memoryScanResults`](#dolphin_memoryscanresults)
+  - [`dolphin_memoryScanCancel`](#dolphin_memoryscancancel)
+  - [`dolphin_memoryScanDispose`](#dolphin_memoryscandispose)
+  - [`dolphin_memoryScanUndo`](#dolphin_memoryscanundo)
+  - [`dolphin_memoryScanRemoveResults`](#dolphin_memoryscanremoveresults)
+  - [`dolphin_resolvePointerChain`](#dolphin_resolvepointerchain)
 
 # Standard requests
 
@@ -51,7 +61,7 @@ Dolphin-specific extensions it supports.
 // ← server response (excerpt)
 {"seq": 2, "type": "response", "command": "initialize", "request_seq": 1,
  "success": true,
- "body": {"capabilities": {
+  "body": {
    "supportsConfigurationDoneRequest": true,
    "supportsDisassembleRequest": true,
    "supportsReadMemoryRequest": true,
@@ -69,8 +79,11 @@ Dolphin-specific extensions it supports.
    "supportsDolphinFreeze": true,
    "supportsDolphinFindFreeMemory": true,
    "supportsDolphinInjectCode": true,
-   "supportsDolphinDetour": true
-  }}}
+   "supportsDolphinDetour": true,
+   "supportsDolphinMemoryRegions": true,
+   "supportsDolphinMemoryScan": true,
+   "supportsDolphinPointerChain": true
+  }}
 
 // ← then an "initialized" event (means "ready for setBreakpoints / launch")
 {"seq": 3, "type": "event", "event": "initialized", "body": {}}
@@ -79,20 +92,19 @@ Dolphin-specific extensions it supports.
 ## `launch` / `attach`
 
 ```jsonc
-{"command": "launch", "arguments": {}}      // boot the configured ISO/DOL, then stop at entry
+{"command": "launch", "arguments": {}}      // begin debugging the game already booted by Dolphin
 {"command": "attach", "arguments": {}}      // attach to an already-running core
 ```
 
-Response is empty `{}`. Server then emits a `stopped` event with
+Response is empty `{}`. Neither request selects a game or starts a Dolphin process;
+configure and boot the game through Dolphin's CLI or GUI first. With stop-on-entry
+enabled, after configuration completes the server emits a `stopped` event with
 `reason: "entry"` (launch) or `reason: "attach"`.
 
-**`stopOnEntry`** (standard DAP field): controls whether the core breaks at
-entry. While a DAP debugger is attached the core starts paused
-(see `CPUSetInitialExecutionState` in `Core.cpp`); with `stopOnEntry: true`
-the server emits a `stopped`/`entry` (or `stopped`/`attach`) event and the
-client proceeds to set breakpoints. With `stopOnEntry: false` the server skips
-the entry stop and resumes the core — the client receives a `continued` event
-(via the CPU state hook) instead, and the game runs immediately.
+**`stopOnEntry`** (standard DAP field): controls whether the game pauses before
+it begins. With `stopOnEntry: true`, the client can set breakpoints before
+continuing. With `stopOnEntry: false`, the game runs immediately and the client
+receives a `continued` event.
 
 When the field is **omitted** from the request, the session falls back to the
 `Dolphin.General.DAPStopOnEntry` config (default `true`, set at dolphin launch
@@ -121,8 +133,8 @@ hasn't already.
 //  → {"command": "pause"}
 //  → {"event": "stopped", "body": {"reason": "pause", "threadId": 1}}
 
-{"command": "next",      "arguments": {"threadId": 1}}   // step over
-{"command": "stepIn",    "arguments": {"threadId": 1}}
+{"command": "next",      "arguments": {"threadId": 1, "granularity": "line"}}
+{"command": "stepIn",    "arguments": {"threadId": 1, "granularity": "instruction"}}
 {"command": "stepOut",   "arguments": {"threadId": 1}}
 //  → {"event": "stopped", "body": {"reason": "step", "threadId": 1}}
 ```
@@ -131,17 +143,40 @@ On a spontaneous stop (breakpoint hit / watchpoint hit / step completion) the
 reason is classified: `"breakpoint"`, `"data breakpoint"`, or `"step"`.
 `hitBreakpointIds` is populated for code breakpoints.
 
+Omitted, `"statement"`, and `"line"` granularity run asynchronously in
+interpreter mode until the `(source file, line)` changes. `next` consumes linking
+calls through their return address while `stepIn` enters them. `"instruction"`
+preserves single-opcode stepping. When the current PC has no source row, source
+stepping falls back to one opcode (`stepIn`) or one logical call-over (`next`).
+Source stepping checks code breakpoints after every opcode and is bounded by a
+5-second deadline and 1000000 instructions; continue, pause, and disconnect cancel
+an in-flight step, and overlapping step requests are rejected.
+
 ## `setBreakpoints`
 
-A Dolphin "source" is anchored at an address encoded as a hex string in
-`source.name` or `source.path`; each breakpoint's address is `base + line*4`.
+For a real source file, provide its path and one-based source lines. Dolphin
+resolves them using loaded DWARF or entrypoint information. Lines without a
+resolvable address are returned as unverified. Each request replaces this
+client's breakpoints for that source, not breakpoints belonging to other sources
+or clients.
+
+```jsonc
+{"command": "setBreakpoints", "arguments": {
+  "source": {"path": "/path/to/project/src/example.c"},
+  "breakpoints": [{"line": 42, "condition": "r3 == 0"}]
+}}
+```
+
+For a disassembly pseudo-source, encode the base address as a hex string in
+`source.name` or `source.path`. Its lines are also one-based; the address is
+`base + (line - 1) * 4`. Line zero is invalid.
 
 ```jsonc
 {"command": "setBreakpoints", "arguments": {
   "source": {"name": "0x80003100"},
   "breakpoints": [
-    {"line": 0,  "condition": "r3 == 0"},
-    {"line": 4}
+    {"line": 1, "condition": "r3 == 0"},
+    {"line": 2}
   ]
 }}
 //  → {"breakpoints": [
@@ -152,8 +187,8 @@ A Dolphin "source" is anchored at an address encoded as a hex string in
 
 ## `setInstructionBreakpoints`
 
-Directly sets code breakpoints by address. Replaces the whole code-breakpoint
-list (mirrors the GDB stub).
+Directly sets code breakpoints by address. Replaces this client's instruction
+breakpoint list, leaving source breakpoints and other clients' breakpoints intact.
 
 ```jsonc
 {"command": "setInstructionBreakpoints", "arguments": {
@@ -176,12 +211,9 @@ specified address is read or written. `accessType` is one of
 }}
 ```
 
-**Ranged watchpoints (Dolphin extension).** The DAP spec has no notion of a
-watchpoint region — `dataId` is a single address. Dolphin's `TMemCheck` natively
-supports ranges, so this server accepts an optional **`length`** field on each
-data breakpoint. When `length > 1`, the controller installs a ranged watchpoint
-over `[address, address+length-1]`. Omitting `length` (or `length: 1`) preserves
-standard single-byte behavior — spec-compliant clients are unaffected.
+**Ranged watchpoints (Dolphin extension).** Standard DAP watchpoints identify one
+address. Dolphin also accepts an optional **`length`** field to watch several
+bytes. Omitting `length` or setting it to `1` keeps the standard behavior.
 
 ```jsonc
 // watch the 0x100-byte region starting at 0xdeadb33f for writes
@@ -210,7 +242,7 @@ On a watchpoint hit, the server emits:
 ```jsonc
 // read 4 bytes at 0x80004000
 {"command": "readMemory", "arguments": {"memoryReference": "0x80004000", "count": 4}}
-//  → {"address": "0x80004000", "data": "AAAA"}   // base64
+//  → {"address": "0x80004000", "data": "AAAAAA=="}   // base64 for four zero bytes
 
 // write 3 bytes ("Man") at 0x80004000
 {"command": "writeMemory", "arguments":
@@ -246,7 +278,8 @@ rather than wrapping and disassembling unrelated low memory.
 ```jsonc
 {"command": "stackTrace", "arguments": {"threadId": 1, "startFrame": 0, "levels": 20}}
 {"command": "threads"}
-{"command": "scopes", "arguments": {"frameId": 0}}     // → ["Registers", "PC"]
+{"command": "scopes", "arguments": {"frameId": 0}}
+// → ["Registers", "PC", "Locals", "Globals"] when typed DWARF is loaded
 {"command": "variables", "arguments": {"variablesReference": 1000}}  // 1000 = Registers
 {"command": "setVariable", "arguments":
   {"variablesReference": 1000, "name": "r3", "value": "0x12345678"}}
@@ -255,6 +288,24 @@ rather than wrapping and disassembling unrelated low memory.
 Frame `source.path`/`source.name` carry either a real source file path (when
 DWARF/entrypoints line info is loaded) or a hex anchor address for a
 disassembly pseudo-source.
+
+`Locals` and `Globals` are available only for frame 0 and only when MWCC DWARF
+1.1 debug information is loaded. `variables` can expand supported typedefs,
+pointers, fixed-size arrays, structures, and unions to at most 32 levels and 1000
+children. It resolves absolute, supported PPC-register (`r0`-`r31`, `lr`, `ctr`, or `xer`),
+base-register-plus-constant, and constant member-offset locations. Scalar displays
+generally use raw hexadecimal; supported writable scalars can be edited with
+`setVariable`. Location
+lists, arbitrary DWARF expressions, bit fields, inheritance, dynamic arrays, and
+unwinding locals for older frames are not implemented. Expansion references are
+invalidated by resume, stepping, restart, terminate, and value edits through the
+GUI or any DAP client, including `writeMemory` (even a partial write reported as
+an error) and `evaluate` expressions containing assignments or memory-write
+functions. Such expressions conservatively invalidate references even if a
+conditional branch skips the mutation; read-only evaluations retain references.
+Re-request scope variables after an edit rather than reusing
+old expansion references. A new expansion reference returned by `setVariable`
+remains valid until a subsequent edit or execution change.
 
 ## `evaluate`
 
@@ -269,15 +320,17 @@ breakpoint conditions.
 ## `goto` / `gotoTargets`
 
 ```jsonc
-{"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 0}}
-//  → {"targets": [{"id": 2147501824, "label": "0x80003100",
+{"command": "gotoTargets", "arguments": {"source": {"name": "0x80003100"}, "line": 1}}
+//  → {"targets": [{"id": 2147496192, "label": "0x80003100",
 //                  "instructionPointerReference": "0x80003100"}]}
 
-{"command": "goto", "arguments": {"threadId": 1, "targetId": 2147501824}}
+{"command": "goto", "arguments": {"threadId": 1, "targetId": 2147496192}}
 //  → {}  then a stopped/event with reason "goto"
 ```
 
-The address doubles as the target id so `goto` is stateless. The core is paused
+Use the `id` returned by `gotoTargets` as `targetId`; do not copy an ID from this
+example when jumping elsewhere. The address doubles as the target id so `goto` is
+stateless. The core is paused
 first so the post-goto stopped event is truthful — if the client called `goto`
 while emulation was running, the CPU would otherwise keep executing at the new
 PC while the adapter told the client emulation halted.
@@ -290,7 +343,7 @@ PC while the adapter told the client emulation halted.
 
 {"command": "source", "arguments": {"sourceReference": 1, "startLine": 0, "endLine": -1}}
 {"command": "breakpointLocations",
- "arguments": {"source": {"name": "0x80003100"}, "line": 0, "endLine": 20}}
+ "arguments": {"source": {"name": "0x80003100"}, "line": 1, "endLine": 20}}
 ```
 
 `source` line emission is capped at 256 lines and `breakpointLocations`
@@ -308,13 +361,11 @@ inputs.
 
 ```jsonc
 {"command": "terminate"}          // → emits {"event": "terminated", "body": {"restart": false}}
-{"command": "restart"}           // → core reset + Break + State::Paused, then a stopped/"restart" event
+{"command": "restart"}           // → reset, pause, then emit a stopped/"restart" event
 {"command": "disconnect"}         // → session ends, sockets torn down
 ```
 
-`restart` forces `CPU::Break()` + `Core::State::Paused` after the PPC reset so
-the post-restart `stopped`/`"restart"` event is truthful even when the client
-had continued execution before the restart.
+`restart` leaves the game paused and emits a `stopped`/`"restart"` event.
 
 # Dolphin-specific custom requests
 
@@ -324,14 +375,10 @@ DAP-aware editor that wants to use them needs a small client-side extension
 
 ## `dolphin_realtimeWatch`
 
-Subscribes to changes in a memory region. Unlike `setDataBreakpoints` (which
-**pauses** on access), a realtime watch **streams** the new value to the client
-on every change without halting emulation. Sampling happens at field rate
-(~60 Hz NTSC / ~50 Hz PAL) via the `vi_end_field_event` CPU-thread hook — the
-same signal the Qt `MemoryViewWidget` and `CheatsManager` use — so the watch
-never stalls the core. Changes are diffed against the last-seen snapshot; only
-genuinely changed regions emit events, and the initial subscribe is seeded with
-the current contents so the first frame doesn't echo back as a spurious change.
+Subscribes to changes in a memory region. Unlike `setDataBreakpoints`, which
+pauses the game on access, a realtime watch streams changed values without
+stopping. Values are checked once per video field, and unchanged regions do not
+produce events.
 
 ```jsonc
 // subscribe
@@ -399,24 +446,10 @@ created via `dolphin_realtimeWatch` or `dolphin_freeze`):
 //  → error response  if watchId is unknown or data length != watch count
 ```
 
-The frozen canon (`data`) must always be exactly `count` bytes long. The
-adapter enforces the freeze with two layers:
-
-1. **MMU write suppression** — an `is_freeze` memcheck is installed on the
-   watched range. Emulated CPU stores (`MMU::Write<T>`) that hit the range
-   are silently dropped before reaching RAM, so the game's own writes are
-   perfectly unobservable (no ~16 ms window).
-2. **Field-rate Tick fallback** — at each video field, `Tick()` re-applies
-   the canon if the region drifted. With layer 1 active, drift only comes
-   from DMA/peripheral writes that bypass `MMU::Write` (PI/DVD transfers,
-   `Memory::CopyToEmu`, etc.). The ~16 ms window is DMA-only, not CPU.
-
-HostWrite (debugger/cheat writes, including DAP `WriteMemory`) bypasses the
-memcheck by design, so the DAP client can update the frozen value itself
-without first unfreezing. The canon is written into guest RAM immediately at
-subscribe/Freeze time (under `CPUThreadGuard`) via `HostWrite` so the freeze
-takes effect at once even when the core is paused — the watched bytes are
-not left at the game value waiting for the next field.
+The frozen value (`data`) must always be exactly `count` bytes long. A freeze
+takes effect immediately and blocks normal game writes. Hardware-driven writes
+may appear briefly before the value is restored on the next video field. The DAP
+client can replace the value with `writeMemory` without unfreezing it first.
 
 `dolphin_memoryChanged` events are suppressed for frozen subscriptions (the
 freeze *is* the response).
@@ -438,9 +471,15 @@ succeeds.
 ## `dolphin_findFreeMemory`
 
 Scans MEM1 (real RAM size, `GetRamSizeReal`) for the smallest 4-byte-aligned
-run of zero words of at least `count` bytes and returns its address. Used by
-integrators that want to inject code but don't know the game's memory layout —
-the server picks a safe address.
+run of zero words of at least `count` bytes and returns its address. This finds a
+**candidate code cave**, not an allocation from the game's heap. Zero-filled memory
+can belong to live buffers, globals, or other game state. The scan neither proves
+that the region is unused nor reserves it against future game writes.
+
+Before injecting, verify the region against the game's memory layout and keep a
+copy of the original bytes. Prefer an explicitly reserved region in your debug
+build. Pausing the game prevents concurrent execution, but does not establish
+ownership of the memory.
 
 ```jsonc
 {"command": "dolphin_findFreeMemory", "arguments": {"count": 64}}
@@ -451,10 +490,10 @@ the server picks a safe address.
 
 ## `dolphin_injectCode`
 
-Writes PPC machine code at an explicit or server-allocated address. The
+Writes PPC machine code at an explicit or server-selected address. The
 client supplies raw big-endian bytes (base64-encoded); the server does not
-assemble. `memoryReference` is optional — when omitted, the server allocates a
-region via `dolphin_findFreeMemory` and writes there; when present, it writes
+assemble. `memoryReference` is optional — when omitted, the server selects a
+candidate region via `dolphin_findFreeMemory` and writes there; when present, it writes
 at that address. `WriteMemory`'s iCache + JIT invalidation ensures the
 injected bytes are observed by the next fetch in both interpreter and JIT
 modes.
@@ -462,21 +501,25 @@ modes.
 ```jsonc
 // write at an explicit address
 {"command": "dolphin_injectCode", "arguments":
-  {"memoryReference": "0x8000c000", "code": "AAAAAAAA"}}
+   {"memoryReference": "0x8000c000", "code": "YAAAAA=="}}
 //  → {"address": "0x8000c000", "count": 4}
 
-// let the server pick a code cave
-{"command": "dolphin_injectCode", "arguments": {"code": "AAAAAAAA"}}
-//  → {"address": "0x8012d3c0", "count": 4}   (allocated address)
+// let the server find a candidate zero-filled region (not guaranteed unused)
+{"command": "dolphin_injectCode", "arguments": {"code": "YAAAAA=="}}
+//  → {"address": "0x8012d3c0", "count": 4}   (selected address)
 //  → error response "no free region of that size" if no cave exists
 ```
+
+`YAAAAA==` encodes the four big-endian bytes `60 00 00 00` (`nop`). These examples
+write one instruction; they do not redirect execution to it. Replace the example
+address only after verifying that you own the destination memory.
 
 `code` must be a non-empty multiple of 4 bytes (PPC instruction alignment);
 otherwise the request is rejected as invalid arguments. The server does not
 validate the instructions themselves — PC alignment of trailing data is the
-client's responsibility. When no address is supplied, free memory is allocated
-ONCE and threaded through to the inject call so the response is truthful (no
-second scan that could disagree with the pre-check under a running core).
+client's responsibility. When no address is supplied, the candidate address is
+selected once and passed to the write; this is not a reservation in the game's
+allocator.
 
 ### Overwriting existing memory
 
@@ -505,10 +548,10 @@ directly:
   rollback semantics (write-through-until-revert), snapshot the bytes
   yourself with `readMemory` before injecting.
 
-When `memoryReference` is **omitted**, the server allocates via
-`dolphin_findFreeMemory` which scans for a zero-run — so auto-allocated
-regions are guaranteed to be unused (as of the scan). Explicit addresses
-carry no such guarantee.
+When `memoryReference` is **omitted**, the server selects a destination via
+`dolphin_findFreeMemory`, which only scans for a zero-run. Neither automatic
+selection nor an explicit address guarantees that the destination is unused.
+Automatic selection also does not reserve the region in the game's allocator.
 
 ## `dolphin_detour`
 
@@ -523,9 +566,18 @@ Installs a transparent detour at a 4-byte instruction target. The server:
    followed by `b targetAddress + 4`.
 5. Patches `targetAddress` with `b detourAddress`.
 
-The patched-out instruction still executes (via the trampoline) so the detour
-is transparent. The detour body should end with `b trampolineAddress` (or
-fall through to the implicit appended one) to resume after the patch site.
+The patched-out instruction executes from the trampoline, **not its original
+address**, and is copied unchanged. The server does not relocate it or reject
+instructions that depend on their original location. A relative `b` or `bc`
+can therefore branch to the wrong address; a linking branch can also change the
+observable link-register value. Choose a displaced instruction whose behavior
+you have verified is safe at the trampoline address. A detour is not generally
+transparent just because it installs successfully.
+
+The detour body should fall through to the appended `b trampolineAddress` to
+resume after the patch site, or supply its own appropriate control flow.
+If no `detourAddress` is supplied, the same candidate-memory caveats as
+[`dolphin_findFreeMemory`](#dolphin_findfreememory) apply.
 All writes invalidate the iCache + JIT. If the call fails after any write,
 previously-written regions are restored in reverse so the caller is returned
 to the pre-detour byte layout (no partially-patched target/trampoline left
@@ -585,11 +637,229 @@ or constrain it. What your body can do depends on what you do at the end:
   functions: save `lr`, set up a stack frame on `r1`, preserve non-volatile
   registers (`r13`–`r31`, `cr2`–`cr4`, etc.) if appropriate.
 
-The detour mechanism itself is **call-transparent and minimal**. The server
-patches exactly four bytes (`b detour_addr`) at the target; the trampoline
-preserves the patched instruction's observable effect; everything else — what
-the body reads, writes, or calls — is up to the PPC code you supply. The body
+The detour mechanism is minimal, not a general-purpose instruction relocator.
+The server patches exactly four bytes (`b detour_addr`) at the target; the
+trampoline replays the original bytes from a different address. Correctness
+depends on that instruction being safe to relocate and on your body preserving
+the registers and other state required by the original code. The body
 **must not** assume the patched memory layout stays alive across a `restart`
 or another `dolphin_detour` call that touches the same regions; the patched
 bytes don't survive PPC reset, and the rollback on a failed detour only
 restores regions touched by *that* detour.
+
+## `dolphin_memoryRegions`
+
+Returns target metadata and the canonical regions accepted by memory scans.
+GameCube exposes MEM1 and ARAM; Wii exposes MEM1 and MEM2 when initialized.
+
+```jsonc
+{"command":"dolphin_memoryRegions"}
+// -> {"platform":"gamecube", "pointerSize":4,
+//     "byteOrder":"big", "regions":[
+//       {"id":"mem1", "name":"MEM1", "baseAddress":"0x80000000",
+//        "size":25165824, "readable":true, "writable":true, "scannable":true}
+//     ]}
+```
+
+## `dolphin_memoryScanStart`
+
+Starts an asynchronous typed scan. Supported `dataType` values are `u8`, `u16`,
+`u32`, `u64`, `s8`, `s16`, `s32`, `s64`, `f32`, `f64`, `bytes`, `string`, and
+`ppcInstruction`.
+Initial filters are `exact`, `notEqual`, `between`, `greaterThan`,
+`greaterOrEqual`, `lessThan`, `lessOrEqual`, and `unknown`.
+Ranges are half-open (`[start,end)`). Omitted or empty `regions` selects MEM1;
+explicit ranges must be wholly contained in one of the selected regions.
+Adjacent ranges in the same region are treated as one continuous range, and
+requests are limited to 1024 ranges and three unique region IDs.
+
+`dataType:"bytes"` performs a fixed-width raw pattern scan. `value` is canonical
+base64 containing 1 to 4096 bytes. Initial filters are `exact` and `notEqual`;
+refinements also support `changed` and `unchanged`. Exact/not-equal refinements
+must provide a base64 value with the original width. With `aligned:true`, the
+pattern width is the stride; with `false`, overlapping matches are possible.
+Byte results return the current pattern as base64 in both `scannedValue` and
+`raw`. Aligned candidates are anchored to absolute addresses where
+`address % width == 0`. A changed byte can affect multiple overlapping windows.
+
+`dataType:"string"` uses the same fixed-width engine with a plain JSON string
+`value`. `encoding` is `utf8` (default) or `ascii`; ASCII rejects non-ASCII
+input and UTF-8 rejects malformed input. Encoded width is 1 to 4096 bytes.
+`caseSensitive` defaults to `true`. Case-insensitive matching folds only
+ASCII `A`-`Z`; non-ASCII UTF-8 bytes remain exact. Exact/not-equal refinements
+inherit encoding and case sensitivity and must keep the original encoded width.
+Changed/unchanged compare raw bytes. `scannedValue` is valid UTF-8 with malformed
+result bytes replaced by U+FFFD; `raw` always preserves exact bytes as base64.
+
+`dataType:"ppcInstruction"` scans absolute 4-byte-aligned instruction words.
+Initial filters are `exact` (numeric instruction word), `mnemonic` (the exact,
+case-sensitive first token of canonical disassembly, including aliases such as
+`nop` and `blr`), and `validInstruction` (an encoding supported by Dolphin's
+Gekko execution tables and accepted by the canonical disassembler). Refinements
+also support raw-word `changed` and `unchanged`. Results include the word as
+`scannedValue`, exact bytes in `raw`, and canonical address-aware Gekko
+`disassembly`. The type always enforces 4-byte alignment.
+Mnemonic and validity scans are limited to 4,194,304 instruction candidates.
+
+```jsonc
+{"command":"dolphin_memoryScanStart", "arguments":{
+  "regions":["mem1"],
+  "ranges":[{"start":"0x80000000", "end":"0x81800000"}],
+  "dataType":"u32", "filter":"exact", "value":"100",
+  "aligned":true, "pauseDuringScan":false
+}}
+// -> {"scanId":1, "jobId":1, "state":"running", "pauseDuringScan":false}
+```
+
+Every scan pauses CPU, DSP, and FIFO while all requested ranges are copied into
+one consistent snapshot. With `pauseDuringScan:false` (the default), emulation
+resumes before the immutable snapshot is filtered. With `true`, execution stays
+paused through filtering and atomic result commit. A core that was already
+paused remains paused.
+While a `pauseDuringScan:true` job owns the core, requests other than memory
+region, scan status/results/cancel/dispose/undo/result-removal, and disconnect
+are rejected. Undo and result removal remain safe to receive but reject while
+the job is active.
+
+The accepted response is followed by exactly one terminal event. Clients do
+not need to poll status:
+
+```jsonc
+{"event":"dolphin_memoryScanCompleted", "body":{
+  "scanId":1, "jobId":1, "generation":1, "resultCount":42,
+  "durationMilliseconds":183, "pauseDuringScan":false
+}}
+```
+
+Failures emit `dolphin_memoryScanFailed` with `message`; cancellation emits
+`dolphin_memoryScanCancelled`. Failed or cancelled refinements leave the last
+committed generation available.
+
+## `dolphin_memoryScanRefine`
+
+Filters a completed generation using a fresh consistent snapshot. In addition
+to value filters, refinement supports `changed`, `unchanged`, `increased`,
+`decreased`, `increasedBy`, and `decreasedBy`.
+
+```jsonc
+{"command":"dolphin_memoryScanRefine", "arguments":{
+  "scanId":1, "filter":"decreased"
+}}
+```
+
+Omitting `pauseDuringScan` inherits the value from `dolphin_memoryScanStart`;
+an explicit boolean overrides it for that refinement job.
+
+## `dolphin_memoryScanStatus`
+
+Optional diagnostics/recovery request. Normal clients should wait for terminal
+events instead.
+
+```jsonc
+{"command":"dolphin_memoryScanStatus", "arguments":{"scanId":1}}
+// -> {"scanId":1, "jobId":2, "generation":1, "state":"running",
+//     "phase":"filtering", "pauseDuringScan":true,
+//     "emulationPaused":true, "resultCount":42}
+```
+
+Phases are `waiting`, `capturing`, `filtering`, `committing`, `completed`,
+`cancelled`, or `failed`.
+
+## `dolphin_memoryScanResults`
+
+Returns up to 4096 committed results. Results remain readable while a refinement
+builds the next generation privately.
+
+```jsonc
+{"command":"dolphin_memoryScanResults", "arguments":{
+  "scanId":1, "start":0, "count":256
+}}
+// -> {"scanId":1, "generation":1, "totalResults":42, "start":0,
+//     "results":[{"address":"0x80401234", "scannedValue":"100",
+//                  "raw":"AAAAZA=="}]}
+```
+
+## `dolphin_memoryScanCancel`
+
+```jsonc
+{"command":"dolphin_memoryScanCancel", "arguments":{"scanId":1}}
+```
+
+Cancellation is cooperative. The original job still emits its mandatory
+`dolphin_memoryScanCancelled` terminal event once it has released any scan-owned
+pause.
+
+## `dolphin_memoryScanDispose`
+
+```jsonc
+{"command":"dolphin_memoryScanDispose", "arguments":{"scanId":1}}
+```
+
+Releases retained snapshots and results. Disposing an active scan requests
+cancellation; its worker still emits a terminal event. Completion can win if
+the generation has already entered its atomic commit.
+
+Limits: one active scan job per DAP session, eight retained scans, 256 MiB of
+snapshot plus candidate state process-wide, 256 MiB of snapshot input per job,
+non-overlapping ranges, at most 1 GiB of estimated byte-pattern comparison
+work, 128-byte numeric literals, and 4096 results per page. Wide byte-pattern
+result pages are reduced to at most 1 MiB of raw result bytes, so fewer than the
+requested count may return.
+
+## `dolphin_memoryScanUndo`
+
+Restores the previous committed result generation. Successful refinements and
+result removals retain up to 16 undo generations. Undo is synchronous, emits no
+terminal event, and is rejected while any scan job in the session is active.
+
+```jsonc
+{"command":"dolphin_memoryScanUndo", "arguments":{"scanId":1}}
+// -> {"scanId":1, "generation":1, "resultCount":42,
+//     "removedCount":0, "canUndo":false}
+```
+
+Generation numbers identify immutable states and are not reused. Undo restores
+the original generation number; the next refinement or removal receives a new,
+larger number. Refinement generations retain their snapshots and candidate
+bitmaps; removal generations share snapshots but retain their own bitmaps.
+Budget admission counts the complete live retained set plus the in-flight
+generation, before any 16-generation history eviction.
+
+## `dolphin_memoryScanRemoveResults`
+
+Removes up to 4096 explicit result addresses. A successful removal creates a
+new immutable generation without copying the retained snapshot. Duplicate,
+unknown, unaligned, and already-removed addresses are ignored. If no supplied
+address is an active result, no generation is created.
+
+```jsonc
+{"command":"dolphin_memoryScanRemoveResults", "arguments":{
+  "scanId":1, "addresses":["0x80401234","0x80405678"]
+}}
+// -> {"scanId":1, "generation":3, "resultCount":40,
+//     "removedCount":2, "canUndo":true}
+```
+
+## `dolphin_resolvePointerChain`
+
+Resolves up to 64 big-endian 32-bit pointer dereferences from one consistent
+snapshot. `offsets` must contain one to 64 JSON integers in
+`[-2147483648, 2147483647]`. For each offset, Dolphin reads the pointer at the
+current address and adds the offset to find the next address.
+
+```jsonc
+{"command":"dolphin_resolvePointerChain", "arguments":{
+  "baseAddress":"0x80004000", "offsets":[16,-4]
+}}
+// -> {"finalAddress":"0x8000601c", "steps":[
+//   {"address":"0x80004000", "pointerValue":"0x80005000",
+//    "offset":16, "resultAddress":"0x80005010"},
+//   {"address":"0x80005010", "pointerValue":"0x80006020",
+//    "offset":-4, "resultAddress":"0x8000601c"}
+// ]}
+```
+
+The request fails if any four-byte pointer is unreadable, an offset leaves the
+32-bit address space, the offset list is empty, or it exceeds 64 entries. The
+final address is range-checked but not dereferenced or otherwise required to be
+readable.

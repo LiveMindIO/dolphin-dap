@@ -45,6 +45,7 @@
 #include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
 #include "Core/DSPEmulator.h"
+#include "Core/Debugger/DAP/DAP.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/FreeLookManager.h"
@@ -66,7 +67,6 @@
 #include "Core/NetPlayClient.h"
 #include "Core/NetPlayProto.h"
 #include "Core/PatchEngine.h"
-#include "Core/Debugger/DAP/DAP.h"
 #include "Core/PowerPC/GDBStub.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/PowerPC/PowerPC.h"
@@ -254,9 +254,7 @@ bool Init(Core::System& system, std::unique_ptr<BootParameters> boot, const Wind
 
 static void ResetRumble()
 {
-#if defined(__LIBUSB__)
   GCAdapter::ResetRumble();
-#endif
   if (!Pad::IsInitialized())
     return;
   for (int i = 0; i < 4; ++i)
@@ -468,8 +466,7 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
   }
   else
   {
-    // FIFO log does not contain any frames, cannot continue.
-    PanicAlertFmt("FIFO file is invalid, cannot playback.");
+    PanicAlertFmt("FIFO file doesn't contain any frame, cannot playback.");
     system.GetFifoPlayer().Close();
     return;
   }
@@ -910,6 +907,9 @@ void Callback_FramePresented(const PresentInfo& present_info)
       present_info.actual_present_time - present_info.intended_present_time;
   perf_metrics.SetLatestFramePresentationOffset(presentation_offset);
 
+  perf_metrics.SetLatestFrameBufferSize(present_info.frame_buffer_width,
+                                        present_info.frame_buffer_height);
+
   if (present_info.reason == PresentInfo::PresentReason::VideoInterfaceDuplicate)
     return;
 
@@ -931,7 +931,8 @@ void Callback_NewField(Core::System& system)
     if (s_stop_frame_step.load())
     {
       s_frame_step = false;
-      system.GetCPU().Break();
+      system.GetCPU().Break(
+          {.cause = Core::Debug::ExecutionStopCause::Step, .pc = system.GetPPCState().pc});
       NotifyStateChanged(Core::GetState(system));
     }
   }

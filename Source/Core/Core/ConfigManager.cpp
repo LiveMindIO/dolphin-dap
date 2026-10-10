@@ -4,6 +4,7 @@
 #include "Core/ConfigManager.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,8 +13,6 @@
 #include <variant>
 
 #include <Core/Core.h>
-
-#include <fmt/format.h>
 
 #include "AudioCommon/AudioCommon.h"
 
@@ -28,13 +27,13 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
-#include "Core/Debugger/DWARF/DwarfImport.h"
-#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
+#include "Core/Boot/ElfReader.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigLoaders/GameConfigLoader.h"
 #include "Core/Core.h"
+#include "Core/Debugger/Entrypoints/EntrypointsImport.h"
 #include "Core/DolphinAnalytics.h"
 #include "Core/FifoPlayer/FifoDataFile.h"
 #include "Core/HLE/HLE.h"
@@ -133,6 +132,27 @@ const std::string SConfig::GetGameTDBID() const
   return m_gametdb_id;
 }
 
+const std::string SConfig::GetGameIDElfDol() const
+{
+  std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
+  return m_game_id_elf_dol;
+}
+
+const std::string SConfig::GetGameIDForTextures() const
+{
+  return GetGameIDsForTextures().front();
+}
+
+const std::vector<std::string> SConfig::GetGameIDsForTextures() const
+{
+  std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
+
+  if (m_game_id_elf_dol.empty())
+    return {m_game_id};
+
+  return {fmt::format("{}-{}", m_game_id_elf_dol, m_game_id), m_game_id};
+}
+
 const std::string SConfig::GetTitleName() const
 {
   std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
@@ -157,27 +177,36 @@ u16 SConfig::GetRevision() const
   return m_revision;
 }
 
+u32 SConfig::GetSimulatedMemorySize() const
+{
+  std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
+  return m_simulated_memory_size;
+}
+
 void SConfig::ResetRunningGameMetadata()
 {
   std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
-  SetRunningGameMetadata("00000000", "", 0, 0, DiscIO::Region::Unknown);
+  SetRunningGameMetadata("00000000", "", 0, 0, DiscIO::Region::Unknown, 0);
+  SetElfDolID("");
 }
 
 void SConfig::SetRunningGameMetadata(const DiscIO::Volume& volume,
                                      const DiscIO::Partition& partition)
 {
   std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
+
   if (partition == volume.GetGamePartition())
   {
     SetRunningGameMetadata(volume.GetGameID(), volume.GetGameTDBID(),
                            volume.GetTitleID().value_or(0), volume.GetRevision().value_or(0),
-                           volume.GetRegion());
+                           volume.GetRegion(), volume.GetSimulatedMemorySize());
   }
   else
   {
     SetRunningGameMetadata(volume.GetGameID(partition), volume.GetGameTDBID(partition),
                            volume.GetTitleID(partition).value_or(0),
-                           volume.GetRevision(partition).value_or(0), volume.GetRegion());
+                           volume.GetRevision(partition).value_or(0), volume.GetRegion(),
+                           volume.GetSimulatedMemorySize());
   }
 
   // Set Slippi specific metadata
@@ -218,26 +247,29 @@ void SConfig::SetRunningGameMetadata(const IOS::ES::TMDReader& tmd, DiscIO::Plat
   {
     // If not launching a disc game, just read everything from the TMD.
     SetRunningGameMetadata(tmd.GetGameID(), tmd.GetGameTDBID(), tmd_title_id, tmd.GetTitleVersion(),
-                           tmd.GetRegion());
+                           tmd.GetRegion(), 0);
   }
 }
 
 void SConfig::SetRunningGameMetadata(const std::string& game_id)
 {
   std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
-  SetRunningGameMetadata(game_id, "", 0, 0, DiscIO::Region::Unknown);
+  SetRunningGameMetadata(game_id, "", 0, 0, DiscIO::Region::Unknown, 0);
 }
 
 void SConfig::SetRunningGameMetadata(const std::string& game_id, const std::string& gametdb_id,
-                                     u64 title_id, u16 revision, DiscIO::Region region)
+                                     u64 title_id, u16 revision, DiscIO::Region region,
+                                     u32 simulated_memory_size)
 {
   std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
   const bool was_changed = m_game_id != game_id || m_gametdb_id != gametdb_id ||
-                           m_title_id != title_id || m_revision != revision;
+                           m_title_id != title_id || m_revision != revision ||
+                           m_simulated_memory_size != simulated_memory_size;
   m_game_id = game_id;
   m_gametdb_id = gametdb_id;
   m_title_id = title_id;
   m_revision = revision;
+  m_simulated_memory_size = simulated_memory_size;
 
   if (game_id.length() == 6)
   {
@@ -284,6 +316,12 @@ void SConfig::SetRunningGameMetadata(const std::string& game_id, const std::stri
     DolphinAnalytics::Instance().ReportGameStart();
 }
 
+void SConfig::SetElfDolID(const std::string& game_id)
+{
+  std::lock_guard<std::recursive_mutex> lock(m_metadata_lock);
+  m_game_id_elf_dol = game_id;
+}
+
 void SConfig::OnESTitleChanged()
 {
   auto& system = Core::System::GetInstance();
@@ -297,7 +335,7 @@ void SConfig::OnESTitleChanged()
   ReloadTextures(system);
 }
 
-void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
+void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard, bool load_debug_elf)
 {
   auto& system = guard.GetSystem();
   if (!Core::IsRunningOrStarting(system))
@@ -305,30 +343,46 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
 
   auto& ppc_symbol_db = system.GetPPCSymbolDB();
 
-  // DESNOTE(jbarber, 2026-07-22): Clear source line info before any sidecar
-  // import so a previously-booted title's DWARF/entrypoints data doesn't
-  // merge with this title's. LoadMap below atomic-swaps m_functions /
-  // m_notes (so stale function symbols are handled there), but the PPC-
-  // specific m_source_files / m_line_table are additive and only ever
-  // populated by ImportConfiguredDwarfElf / ImportConfiguredEntrypoints
-  // below — without this clear, switching games leaves the previous title's
-  // line info sitting in the DB and DAP source mapping can hand back stale
-  // file/line lookups. The executable boot path already clears via the
-  // explicit PPCSymbolDB::Clear() in CBoot; this is a no-op there and
-  // covers Disc/WAD/NAND/IPL/MIOS boots (which never clear before reaching
-  // here).
-  ppc_symbol_db.ClearSourceLineInfo();
+  const bool had_source_line_info = ppc_symbol_db.HasSourceLineInfo();
+  bool symbols_changed = ppc_symbol_db.Clear() || had_source_line_info;
+  ppc_symbol_db.SetSourcePaths(SplitString(Config::Get(Config::MAIN_DEBUG_SOURCE_PATHS), ';'));
 
-  bool symbols_changed = false;
-  if (ppc_symbol_db.LoadMapOnBoot(guard))
+  const std::string symbol_map = Config::Get(Config::MAIN_DEBUG_SYMBOL_MAP);
+  if (symbol_map.empty())
+  {
+    if (ppc_symbol_db.LoadMapOnBoot(guard))
+      symbols_changed = true;
+  }
+  else if (ppc_symbol_db.LoadMap(guard, symbol_map))
+  {
     symbols_changed = true;
-  if (Core::Debug::ImportConfiguredDwarfElf(guard, ppc_symbol_db))
+  }
+  else
+  {
+    ERROR_LOG_FMT(SYMBOLS, "Failed to load configured symbol map '{}'", symbol_map);
+  }
+  const std::string elf_file = Config::Get(Config::MAIN_DEBUG_ELF_FILE);
+  if (!elf_file.empty() && load_debug_elf)
+  {
+    const ElfReader reader(elf_file);
+    if (reader.IsValid() && reader.GetMachine() == EM_PPC &&
+        reader.LoadSymbols(guard, ppc_symbol_db, PathToFileName(elf_file)))
+    {
+      symbols_changed = true;
+    }
+    else
+    {
+      ERROR_LOG_FMT(SYMBOLS, "Failed to load configured ELF file '{}'", elf_file);
+    }
+  }
+  if (load_debug_elf && Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
+  {
     symbols_changed = true;
-  if (Core::Debug::ImportConfiguredEntrypoints(guard, ppc_symbol_db))
-    symbols_changed = true;
+  }
+  HLE::Reload(system);
+
   if (symbols_changed)
     Host_PPCSymbolsChanged();
-  HLE::Reload(system);
 
   PatchEngine::Reload(system);
   WC24PatchEngine::Reload();
@@ -393,18 +447,36 @@ struct SetGameMetadata
     if (!executable.reader->IsValid())
       return false;
 
-    *region = DiscIO::Region::Unknown;
     system.SetIsWii(executable.reader->IsWii());
 
     // Strip the .elf/.dol file extension and directories before the name
     SplitPath(executable.path, nullptr, &config->m_debugger_game_id, nullptr);
 
-    // Set DOL/ELF game ID appropriately
-    std::string executable_path = executable.path;
-    constexpr char BACKSLASH = '\\';
-    constexpr char FORWARDSLASH = '/';
-    std::ranges::replace(executable_path, BACKSLASH, FORWARDSLASH);
-    config->SetRunningGameMetadata(SConfig::MakeGameID(PathToFileName(executable_path)));
+    if (executable.boot_with_default_disc)
+    {
+      const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
+      std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDiscForCore(default_iso);
+      if (!disc)
+        return false;
+
+      *region = disc->GetRegion();
+      const bool disc_is_wii = disc->GetVolumeType() == DiscIO::Platform::WiiDisc;
+      if (disc_is_wii != system.IsWii())
+        return false;
+      config->SetRunningGameMetadata(*disc, disc->GetGamePartition());
+    }
+    else
+    {
+      *region = DiscIO::Region::Unknown;
+      // Set DOL/ELF game ID appropriately
+      std::string executable_path = executable.path;
+      constexpr char BACKSLASH = '\\';
+      constexpr char FORWARDSLASH = '/';
+      std::ranges::replace(executable_path, BACKSLASH, FORWARDSLASH);
+      const std::string made_game_id = SConfig::MakeGameID(PathToFileName(executable_path));
+      config->SetRunningGameMetadata(made_game_id);
+      config->SetElfDolID(made_game_id);
+    }
 
     Host_TitleChanged();
 

@@ -398,8 +398,11 @@ extern const Info<bool> MAIN_DEBUG_JIT_SYSTEM_REGISTERS_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
-extern const Info<std::string> MAIN_DEBUG_DWARF_ELF;
+extern const Info<std::string> MAIN_DEBUG_SYMBOL_MAP;
+extern const Info<std::string> MAIN_DEBUG_ELF_FILE;
+extern const Info<bool> MAIN_DEBUG_REPLACE_DISC_EXECUTABLE;
 extern const Info<std::string> MAIN_DEBUG_ENTRYPOINTS;
+extern const Info<std::string> MAIN_DEBUG_SOURCE_PATHS;
 
 // Main.BluetoothPassthrough
 
@@ -441,6 +444,14 @@ static constexpr std::size_t WIIMOTE_SPEAKER_COUNT = 4;
 extern const Info<bool> MAIN_WIIMOTE_AUDIO_ROUTING_ENABLED;
 extern const std::array<Info<bool>, WIIMOTE_SPEAKER_COUNT> MAIN_WIIMOTE_AUDIO_OUTPUT_ENABLED;
 extern const std::array<Info<std::string>, WIIMOTE_SPEAKER_COUNT> MAIN_WIIMOTE_AUDIO_OUTPUT_DEVICE;
+
+// Main.GBAAudioRouting
+
+static constexpr std::size_t GBA_SPEAKER_COUNT = 4;
+
+extern const Info<bool> MAIN_GBA_AUDIO_ROUTING_ENABLED;
+extern const std::array<Info<bool>, GBA_SPEAKER_COUNT> MAIN_GBA_AUDIO_OUTPUT_ENABLED;
+extern const std::array<Info<std::string>, GBA_SPEAKER_COUNT> MAIN_GBA_AUDIO_OUTPUT_DEVICE;
 
 // GameCube path utility functions
 

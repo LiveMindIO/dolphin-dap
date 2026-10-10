@@ -34,6 +34,7 @@
 #include "Common/GekkoDisassembler.h"
 
 #include <array>
+#include <mutex>
 #include <string>
 
 #include <fmt/format.h>
@@ -2271,6 +2272,8 @@ u32* GekkoDisassembler::DoDisassembly(bool big_endian)
 std::string GekkoDisassembler::Disassemble(u32 opcode, u32 current_instruction_address,
                                            bool big_endian)
 {
+  static std::mutex disassembly_mutex;
+  std::lock_guard lock(disassembly_mutex);
   u32 opc = opcode;
   u32 addr = current_instruction_address;
 
