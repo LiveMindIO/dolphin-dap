@@ -21,6 +21,29 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[3]
 
 
+class AnalyticsPolicyTests(unittest.TestCase):
+    def test_analytics_cannot_be_enabled_by_cached_build_options(self):
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        policy = re.search(r"^set\(ENABLE_ANALYTICS OFF CACHE BOOL .* FORCE\)$",
+                           cmake, re.MULTILINE)
+        self.assertIsNotNone(policy)
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "check.cmake"
+            script.write_text(policy.group() + '\nif(ENABLE_ANALYTICS)\n'
+                              '  message(FATAL_ERROR "Analytics enabled")\nendif()\n')
+            subprocess.run(["cmake", "-DENABLE_ANALYTICS=ON", "-P", str(script)],
+                           check=True, capture_output=True, text=True)
+
+    def test_fork_does_not_install_an_upstream_reporting_backend(self):
+        source = (ROOT / "Source/Core/Core/DolphinAnalytics.cpp").read_text()
+        reload_config = source.split("void DolphinAnalytics::ReloadConfig()", 1)[1]
+        reload_config = reload_config.split("void DolphinAnalytics::GenerateNewIdentity()", 1)[0]
+        self.assertIn("m_reporter.SetBackend(nullptr);", reload_config)
+        self.assertNotIn("HttpAnalyticsBackend", source)
+        self.assertNotIn("analytics.dolphin-emu.org", source)
+        self.assertNotIn("GenerateNewIdentity()", reload_config)
+
+
 @unittest.skipUnless(yaml, "workflow checks require PyYAML")
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
