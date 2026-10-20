@@ -96,7 +96,10 @@ ElfReader::~ElfReader() = default;
 bool ElfReader::Initialize()
 {
   if (m_bytes.size() < sizeof(Elf32_Ehdr))
+  {
+    ERROR_LOG_FMT(BOOT, "ELF file is too small.");
     return false;
+  }
 
   base = reinterpret_cast<char*>(m_bytes.data());
   header = reinterpret_cast<Elf32_Ehdr*>(m_bytes.data());
@@ -107,6 +110,7 @@ bool ElfReader::Initialize()
       ident[EI_VERSION] != EV_CURRENT)
   {
     header = nullptr;
+    ERROR_LOG_FMT(BOOT, "Invalid ELF header.");
     return false;
   }
 
@@ -123,6 +127,7 @@ bool ElfReader::Initialize()
       (header->e_shstrndx != SHN_UNDEF && header->e_shstrndx >= header->e_shnum))
   {
     header = nullptr;
+    ERROR_LOG_FMT(BOOT, "Invalid ELF header table.");
     return false;
   }
 
@@ -139,6 +144,7 @@ bool ElfReader::Initialize()
       header = nullptr;
       segments = nullptr;
       sections = nullptr;
+      ERROR_LOG_FMT(BOOT, "Invalid ELF program header {}.", i);
       return false;
     }
   }
@@ -153,6 +159,7 @@ bool ElfReader::Initialize()
       header = nullptr;
       segments = nullptr;
       sections = nullptr;
+      ERROR_LOG_FMT(BOOT, "Invalid ELF section header {}.", i);
       return false;
     }
   }
@@ -170,7 +177,9 @@ const char* ElfReader::GetSectionName(int section) const
   }
 
   if (sections[section].sh_type == SHT_NULL)
+  {
     return nullptr;
+  }
 
   const u32 name_offset = sections[section].sh_name;
   const Elf32_Shdr& string_section = sections[header->e_shstrndx];
@@ -363,6 +372,7 @@ bool ElfReader::LoadSymbols(const Core::CPUThreadGuard& guard, PPCSymbolDB& ppc_
         if (name_offset >= string_size ||
             !std::memchr(string_base + name_offset, '\0', string_size - name_offset))
         {
+          ERROR_LOG_FMT(BOOT, "Invalid ELF symbol name {}.", sym);
           continue;
         }
         const char* name = string_base + name_offset;
@@ -382,6 +392,10 @@ bool ElfReader::LoadSymbols(const Core::CPUThreadGuard& guard, PPCSymbolDB& ppc_
         ppc_symbol_db.AddKnownSymbol(guard, value, size, name, filename, symtype);
         ++loaded_symbols;
       }
+    }
+    else
+    {
+      ERROR_LOG_FMT(BOOT, "Invalid ELF symbol table or symbol string table.");
     }
   }
   ppc_symbol_db.Index();
