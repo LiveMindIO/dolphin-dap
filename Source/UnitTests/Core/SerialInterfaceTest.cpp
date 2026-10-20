@@ -7,9 +7,11 @@
 #include <memory>
 #include <string_view>
 
+#ifndef _WIN32
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 
 #include "Common/ChunkFile.h"
 #include "Common/Config/Config.h"
@@ -27,7 +29,9 @@
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
+#ifndef _WIN32
 #include "InputCommon/ControllerInterface/Pipes/Pipes.h"
+#endif
 #include "InputCommon/InputConfig.h"
 
 namespace
@@ -80,6 +84,7 @@ private:
   SerialInterface::DataResponse m_response = SerialInterface::DataResponse::Success;
 };
 
+#ifndef _WIN32
 class PipeBackedSIDevice final : public SerialInterface::ISIDevice
 {
 public:
@@ -106,6 +111,7 @@ private:
   std::shared_ptr<ciface::Pipes::PipeDevice> m_pipe;
   u32 m_get_data_count = 0;
 };
+#endif
 
 class SerialInterfaceTest : public testing::Test
 {
@@ -228,6 +234,7 @@ TEST_F(SerialInterfaceTest, OnSIReadDefersAndLatchesOnePoll)
   EXPECT_EQ(m_devices[0]->GetDataCount(), 2u);
 }
 
+#ifndef _WIN32
 TEST_F(SerialInterfaceTest, OnSIReadReflectsLatePipeBatchesInCurrentResponse)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
@@ -334,6 +341,8 @@ TEST_F(SerialInterfaceTest, OnSIReadReflectsBookendAfterPreviousResponseWasLatch
   EXPECT_EQ(m_devices[1]->GetDataCount(), 2u);
 }
 
+#endif
+
 TEST_F(SerialInterfaceTest, OnSIReadDefersNewRequestBetweenChannelReads)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
@@ -375,6 +384,7 @@ TEST_F(SerialInterfaceTest, OnSIReadLeavesCoalescedMenuRequestForNextGeneration)
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());
 }
 
+#ifndef _WIN32
 TEST_F(SerialInterfaceTest, OnSIReadRefreshesScheduledResponseBeforeItIsLatched)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
@@ -430,6 +440,8 @@ TEST_F(SerialInterfaceTest, OnSIReadRefreshesScheduledResponseBeforeItIsLatched)
   EXPECT_EQ(si_device_ptr->GetDataCount(), 2u);
 }
 
+#endif
+
 TEST_F(SerialInterfaceTest, ConsolePollingBehaviorIsUnchanged)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"Console"});
@@ -465,6 +477,7 @@ TEST_F(SerialInterfaceTest, DefaultPollingMatchesLegacySlippi)
   EXPECT_EQ(Config::MAIN_POLLING_METHOD.GetDefaultValue(), "OnSIRead");
 }
 
+#ifndef _WIN32
 TEST_F(SerialInterfaceTest, NonblockingGameplayConsumesEachBatchOnlyAtGuestRead)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
@@ -613,6 +626,7 @@ TEST_P(FallbackPipePollingTest, ScheduledAndHostUpdatesConsumeWhenGuestSamplingI
 }
 
 INSTANTIATE_TEST_SUITE_P(ConsoleAndMovieRecording, FallbackPipePollingTest, testing::Bool());
+#endif
 
 TEST_F(SerialInterfaceTest, LeavingOnSIReadClearsDeferredPoll)
 {

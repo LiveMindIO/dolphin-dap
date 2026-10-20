@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import subprocess
@@ -162,6 +163,40 @@ class WindowsConfigureTests(unittest.TestCase):
 
 
 class WindowsProjectTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("c++"), "requires a C++ preprocessor")
+    def test_windows_si_translation_unit_retains_portable_tests_without_posix_pipes(self):
+        source = ROOT / "Source/UnitTests/Core/SerialInterfaceTest.cpp"
+        text = source.read_text()
+        # Isolate this translation unit's platform guards, not dependencies' host-platform guards.
+        # Deliberately provide no POSIX headers or PipeDevice declaration.
+        forbidden = {"fcntl.h", "sys/ioctl.h", "unistd.h",
+                     "InputCommon/ControllerInterface/Pipes/Pipes.h"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for header in re.findall(r'^#include [<"]([^>"]+)[>"]', text, re.MULTILINE):
+                if header not in forbidden:
+                    path = root / header
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+            result = subprocess.run(
+                ["c++", "-E", "-P", "-nostdinc", "-nostdinc++", "-D_WIN32",
+                 "-I", str(root), str(source)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        tests = set(re.findall(r"TEST_F\(SerialInterfaceTest, (\w+)\)", result.stdout))
+        self.assertEqual(tests, {
+            "HostUpdateDoesNotConsumeSlippiRequest", "OnSIReadDefersAndLatchesOnePoll",
+            "OnSIReadDefersNewRequestBetweenChannelReads",
+            "OnSIReadLeavesCoalescedMenuRequestForNextGeneration",
+            "ConsolePollingBehaviorIsUnchanged", "OnSIReadDoesNotRequireBlockingPipes",
+            "DefaultPollingMatchesLegacySlippi", "LeavingOnSIReadClearsDeferredPoll",
+            "OnSIReadAppliesResponseErrorsAtFirstRead", "SaveStateRestoresDeferredPollAndPipeRequest",
+            "SaveStateRestoresInputReadyForReadTimeRefresh",
+        })
+        self.assertNotRegex(result.stdout, r"\b(?:pipe|fcntl|ioctl|write|close|PipeBackedSIDevice)\s*\(")
+        cmake = (ROOT / "Source/UnitTests/Core/CMakeLists.txt").read_text()
+        self.assertIn("add_dolphin_test(SerialInterfaceTest SerialInterfaceTest.cpp)",
+                      cmake.split("if(NOT WIN32)", 1)[0])
+
     @unittest.skipUnless(shutil.which("c++"), "requires a C++ compiler")
     def test_slippi_code_kinds_have_linkable_storage_in_debug_builds(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -229,6 +264,60 @@ class WindowsProjectTests(unittest.TestCase):
         self.assertIn('"$build/Binaries/Slippi_Dolphin.app"', mac)
         self.assertIn("for binary in Slippi_Dolphin dolphin-emu-nogui", mac)
         self.assertNotIn("DolphinQt.app", mac)
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("cmake"), "requires CMake on POSIX")
+class MacBundleBuildTests(unittest.TestCase):
+    def test_all_target_uses_qt_target_bundle_and_executable_names(self):
+        cmake = (ROOT / "Source/Core/CMakeLists.txt").read_text()
+        final_bundle = cmake[cmake.index("if (APPLE AND ENABLE_QT)"):]
+        for name in ("Slippi_Dolphin", "DolphinQt"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                build = root / "build with spaces"
+                binaries = build / "Binaries/Release"
+                bundle = binaries / (name + ".app")
+                executable = bundle / "Contents/MacOS" / name
+                stale = binaries / "Dolphin.app/stale"
+                stale.parent.mkdir(parents=True)
+                stale.touch()
+                tools = root / "tools"
+                tools.mkdir()
+                plutil = tools / "plutil"
+                plutil.write_text(
+                    "#!/usr/bin/env python3\nimport plistlib, pathlib, sys\n"
+                    "assert sys.argv[1:5] == ['-replace', 'CFBundleExecutable', '-string', 'Dolphin']\n"
+                    "path = pathlib.Path(sys.argv[5])\n"
+                    "data = plistlib.loads(path.read_bytes())\n"
+                    "data['CFBundleExecutable'] = sys.argv[4]\npath.write_bytes(plistlib.dumps(data))\n")
+                plutil.chmod(0o755)
+                (root / "CMakeLists.txt").write_text(
+                    'cmake_minimum_required(VERSION 3.15)\nproject(Bundle C)\n'
+                    # Build a real bundle with the host linker, without requiring an Apple SDK.
+                    'set(CMAKE_C_LINK_EXECUTABLE "<CMAKE_C_COMPILER> <OBJECTS> -o <TARGET>")\n'
+                    'set(APPLE TRUE)\nset(ENABLE_QT TRUE)\n'
+                    'set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Binaries/Release")\n'
+                    'add_executable(dolphin-emu main.c)\n'
+                    'set_target_properties(dolphin-emu PROPERTIES MACOSX_BUNDLE TRUE '
+                    'OUTPUT_NAME "' + name + '")\n' + final_bundle)
+                (root / "main.c").write_text("int main(void) { return 0; }\n")
+                configure = subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                                            "-DCMAKE_SYSTEM_NAME=Darwin", "-DCMAKE_C_COMPILER_WORKS=TRUE"],
+                                           capture_output=True, text=True)
+                self.assertEqual(configure.returncode, 0, configure.stdout + configure.stderr)
+                result = subprocess.run(["cmake", "--build", str(build)],
+                                        env=dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"]),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                final = binaries / "Dolphin.app"
+                copied = final / "Contents/MacOS/Dolphin"
+                self.assertEqual(copied.read_bytes(), executable.read_bytes())
+                subprocess.run([str(copied)], check=True)
+                self.assertEqual(plistlib.loads((final / "Contents/Info.plist").read_bytes())[
+                    "CFBundleExecutable"], "Dolphin")
+                self.assertFalse(stale.exists())
+                self.assertFalse((final / "Contents/MacOS" / name).exists())
+                self.assertTrue(executable.exists())
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "requires PowerShell on POSIX")
