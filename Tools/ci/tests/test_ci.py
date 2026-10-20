@@ -284,6 +284,46 @@ class RustPackageTests(unittest.TestCase):
                     finally:
                         hidden.rename(library)
 
+    def test_gentoo_configure_uses_portage_active_abi_libdir(self):
+        source = (ROOT / "Tools/ci/linux-packages/build-native.sh").read_text()
+        setup = source.split('case "$format" in', 1)[0]
+        setup = setup[setup.index("version="):]
+        gentoo = source.split("  gpkg)", 1)[1].split("    # Use generic", 1)[0]
+        configure = source.split("# Each distro compiles", 1)[1]
+        configure = configure[configure.index("cmake -S"):].split("cmake --build", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for command in ("emerge-webrsync", "eselect"):
+                path = root / command
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+            portageq = root / "portageq"
+            portageq.write_text(
+                '#!/bin/sh\ncase "$*" in\n'
+                '"envvar ABI") echo "$TEST_ABI";;\n'
+                '"envvar LIBDIR_$TEST_ABI") echo "$TEST_LIBDIR";;\n'
+                '*) exit 9;;\nesac\n')
+            portageq.chmod(0o755)
+            cmake = root / "cmake"
+            cmake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            cmake.chmod(0o755)
+            for abi, libdir in (("amd64", "lib64"), ("x86", "lib")):
+                with self.subTest(abi=abi):
+                    result = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", setup + gentoo + configure],
+                        env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                                 PACKAGE_VERSION="1.0", TEST_ABI=abi, TEST_LIBDIR=libdir),
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"-DCMAKE_INSTALL_LIBDIR={libdir}", result.stdout.splitlines())
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", setup + gentoo + configure],
+                env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                         PACKAGE_VERSION="1.0", TEST_ABI="unknown", TEST_LIBDIR=""),
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("-DCMAKE_INSTALL_PREFIX", result.stdout)
+
     def test_flatpak_vendors_locked_crates_for_offline_sdk_build(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

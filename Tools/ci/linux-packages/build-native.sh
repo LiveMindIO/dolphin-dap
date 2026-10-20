@@ -5,6 +5,7 @@ format=${1:?deb, rpm, arch, gpkg, or appimage}
 export DEBIAN_FRONTEND=noninteractive QT_QPA_PLATFORM=offscreen
 jobs=${BUILD_JOBS:-2}
 version=${PACKAGE_VERSION:?numeric package version required}
+install_libdir=lib
 case "$format" in
   deb|appimage)
     # Minimal Ubuntu images exclude locale files even during package installation.
@@ -31,6 +32,9 @@ case "$format" in
     # Desktop defaults keep Qt/ALSA/PulseAudio USE dependencies consistent, while
     # the minimal image avoids preinstalled desktop packages from an older tree.
     eselect profile set default/linux/amd64/23.0/desktop/systemd
+    # Portage's active ABI owns library placement (lib64 on amd64).
+    install_libdir=$(portageq envvar "LIBDIR_$(portageq envvar ABI)")
+    test -n "$install_libdir"
     # Use generic x86-64 code rather than optimizations for the ephemeral CI host.
     cat >> /etc/portage/make.conf <<'EOF'
 CFLAGS="-O2 -pipe -march=x86-64 -mtune=generic"
@@ -58,7 +62,7 @@ cargo --version
 
 # Each distro compiles its own binaries. Do not use the Ubuntu CI tarball here.
 cmake -S /source -B /work/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+  -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR="$install_libdir" \
   -DENABLE_QT=ON -DENABLE_NOGUI=ON -DENABLE_TESTS=ON -DENABLE_AUTOUPDATE=OFF \
   -DENABLE_CLI_TOOL=ON \
   -DDISTRIBUTOR=LiveMindIO -DUSE_SYSTEM_LIBS=OFF -DENABLE_LLVM=OFF \
