@@ -1,10 +1,12 @@
 """Contracts for distro-native builds, isolation, and Flatpak permissions."""
 from pathlib import Path
 import os
+import runpy
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 try:
     import yaml
@@ -151,8 +153,11 @@ class FlatpakManifestTests(unittest.TestCase):
     def test_fork_identity_tests_and_sandbox(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "manifest.yml"
-            subprocess.run(["python3", str(SCRIPTS / "prepare-flatpak.py"), str(output)],
-                           check=True)
+            # Manifest checks stay offline; the separate Rust-package regression
+            # exercises the real vendor subprocess boundary.
+            with patch("sys.argv", ["prepare-flatpak.py", str(output)]), \
+                    patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="")):
+                runpy.run_path(str(SCRIPTS / "prepare-flatpak.py"), run_name="__main__")
             manifest = yaml.safe_load(output.read_text())
         self.assertEqual(manifest["app-id"], "io.github.LiveMindIO.DolphinDAP")
         self.assertEqual(manifest["runtime-version"], "6.10")

@@ -166,7 +166,7 @@ if(LIBEVDEV_FOUND AND LIBUDEV_FOUND)
   )
 endif()
 
-if(UNIX OR WIN32)
+if(UNIX)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Pipes/Pipes.cpp
     ControllerInterface/Pipes/Pipes.h

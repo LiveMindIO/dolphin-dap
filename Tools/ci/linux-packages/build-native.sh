@@ -20,11 +20,11 @@ case "$format" in
       qt6-qtbase-private-devel \
       qt6-qtsvg-devel libevdev-devel systemd-devel libXrandr-devel libXi-devel bluez-libs-devel \
       alsa-lib-devel pulseaudio-libs-devel mesa-libGL-devel mesa-libEGL-devel libusb1-devel \
-      rpm-build rpmdevtools git
+      rpm-build rpmdevtools git curl ca-certificates
     ;;
   arch)
     pacman -Syu --noconfirm --needed base-devel cmake ninja pkgconf gettext qt6-base qt6-svg \
-      libevdev systemd libxrandr libxi bluez-libs alsa-lib libpulse mesa libusb git
+      libevdev systemd libxrandr libxi bluez-libs alsa-lib libpulse mesa libusb git curl ca-certificates
     ;;
   gpkg)
     emerge-webrsync
@@ -42,11 +42,19 @@ EOF
     emerge --getbinpkg --usepkg --autounmask=n dev-vcs/git dev-build/cmake dev-build/ninja dev-util/pkgconf \
       sys-devel/gettext dev-qt/qtbase:6 dev-qt/qtsvg:6 dev-libs/libevdev virtual/libudev \
       x11-libs/libXrandr x11-libs/libXi net-wireless/bluez media-libs/alsa-lib \
-      media-libs/libpulse media-libs/mesa dev-libs/libusb
+      media-libs/libpulse media-libs/mesa dev-libs/libusb net-misc/curl app-misc/ca-certificates
     ;;
   *) echo "Unsupported format: $format" >&2; exit 2 ;;
 esac
 git config --global --add safe.directory /source
+
+# Match the pinned Slippi workspace toolchain, including on Ubuntu 24.04 whose
+# distribution Rust predates the workspace's minimum supported version.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+  sh -s -- -y --profile minimal --default-toolchain 1.88.0 --no-modify-path
+export PATH="$HOME/.cargo/bin:$PATH"
+rustc --version
+cargo --version
 
 # Each distro compiles its own binaries. Do not use the Ubuntu CI tarball here.
 cmake -S /source -B /work/build -G Ninja -DCMAKE_BUILD_TYPE=Release \

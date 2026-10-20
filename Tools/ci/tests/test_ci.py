@@ -162,7 +162,91 @@ class WindowsConfigureTests(unittest.TestCase):
                 self.assertIn("-DFASTLOG=" + fastlog, args)
 
 
+@unittest.skipUnless(yaml, "requires PyYAML")
+class RustPackageTests(unittest.TestCase):
+    def test_flatpak_vendors_locked_crates_for_offline_sdk_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo = root / "cargo"
+            cargo.write_text(
+                '#!/usr/bin/env python3\nimport json, os, pathlib, sys\n'
+                'pathlib.Path(os.environ["CARGO_ARGS"]).write_text(json.dumps(sys.argv[1:]))\n'
+                'vendor = pathlib.Path(sys.argv[-1]); vendor.mkdir()\n'
+                'print(\'[source.crates-io]\\nreplace-with = "vendored-sources"\\n\''
+                '      \'[source.vendored-sources]\\ndirectory = "\' + str(vendor) + \'"\')\n')
+            cargo.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                       CARGO_ARGS=str(root / "args.json"))
+            manifest_path = root / "manifest.yml"
+            subprocess.run([shutil.which("python3"),
+                            str(ROOT / "Tools/ci/linux-packages/prepare-flatpak.py"),
+                            str(manifest_path)], env=env, check=True, capture_output=True)
+            args = json.loads((root / "args.json").read_text())
+            self.assertEqual(args[:3], ["vendor", "--locked", "--versioned-dirs"])
+            manifest = yaml.safe_load(manifest_path.read_text())
+            self.assertEqual(manifest["sdk-extensions"],
+                             ["org.freedesktop.Sdk.Extension.rust-stable"])
+            module = manifest["modules"][-1]
+            self.assertIn("/usr/lib/sdk/rust-stable/bin", module["build-options"]["append-path"])
+            self.assertEqual(module["build-options"]["env"]["CARGO_HOME"],
+                             "/run/build/dolphin-emu/cargo-home")
+            self.assertEqual({s.get("dest") for s in module["sources"][1:]},
+                             {"cargo-vendor", "cargo-home"})
+            config = (root / "cargo-config/config.toml").read_text()
+            self.assertIn('directory = "/run/build/dolphin-emu/cargo-vendor"', config)
+            self.assertIn("offline = true", config)
+            self.assertNotIn(str(root), config)
+
+    def test_native_package_bootstrap_exports_pinned_rust_before_configure(self):
+        source = (ROOT / "Tools/ci/linux-packages/build-native.sh").read_text()
+        toolchain = source.split("curl --proto", 1)[1].split("# Each distro", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bindir = root / "bin"
+            bindir.mkdir()
+            curl = bindir / "curl"
+            curl.write_text(
+                '#!/bin/sh\ncat <<\'SCRIPT\'\n'
+                'test "$*" = "-y --profile minimal --default-toolchain 1.88.0 --no-modify-path" || exit 7\n'
+                'mkdir -p "$HOME/.cargo/bin"\n'
+                'for tool in rustc cargo; do\n'
+                'printf \'#!/bin/sh\\necho %s-1.88.0\\n\' "$tool" > "$HOME/.cargo/bin/$tool"\n'
+                'chmod +x "$HOME/.cargo/bin/$tool"\ndone\nSCRIPT\n')
+            curl.chmod(0o755)
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", "curl --proto" + toolchain],
+                                    env=dict(os.environ, HOME=str(root),
+                                             PATH=str(bindir) + os.pathsep + os.environ["PATH"]),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), ["rustc-1.88.0", "cargo-1.88.0"])
+        self.assertLess(source.index("rustc --version"), source.index("cmake -S /source"))
+        for case in ("deb|appimage)", "rpm)", "arch)", "gpkg)"):
+            section = source.split(case, 1)[1].split(";;", 1)[0]
+            self.assertIn("curl", section)
+            self.assertIn("ca-certificates", section)
+
+
 class WindowsProjectTests(unittest.TestCase):
+    def test_pipe_backend_sources_follow_the_enabled_unix_backend(self):
+        cmake = (ROOT / "Source/Core/InputCommon/CMakeLists.txt").read_text()
+        block = re.search(r"if\([^\n]+\)\n  target_sources\(inputcommon PRIVATE\n"
+                          r"    ControllerInterface/Pipes/Pipes.cpp.*?endif\(\)",
+                          cmake, re.DOTALL).group()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for unix, windows in (("FALSE", "TRUE"), ("TRUE", "FALSE")):
+                script = root / "platform.cmake"
+                script.write_text(
+                    f"set(UNIX {unix})\nset(WIN32 {windows})\n"
+                    'function(target_sources)\nfile(WRITE "${CMAKE_CURRENT_LIST_DIR}/sources" "${ARGN}")\n'
+                    "endfunction()\n" + block)
+                output = root / "sources"
+                output.unlink(missing_ok=True)
+                subprocess.run(["cmake", "-P", str(script)], check=True, capture_output=True)
+                self.assertEqual(output.exists(), unix == "TRUE")
+                if output.exists():
+                    self.assertIn("ControllerInterface/Pipes/Pipes.cpp", output.read_text())
+
     @unittest.skipUnless(shutil.which("c++"), "requires a C++ preprocessor")
     def test_windows_si_translation_unit_retains_portable_tests_without_posix_pipes(self):
         source = ROOT / "Source/UnitTests/Core/SerialInterfaceTest.cpp"
@@ -237,24 +321,45 @@ class WindowsProjectTests(unittest.TestCase):
         self.assertIn('-C "$<CONFIG>"',
                       (ROOT / "Source/UnitTests/CMakeLists.txt").read_text())
 
-    def test_rust_dll_copy_uses_build_configuration(self):
+    def test_rust_dll_copy_uses_corrosion_artifacts_for_each_configuration(self):
         cmake = (ROOT / "CMakeLists.txt").read_text()
-        self.assertIn('set(CMAKE_BUILD_TYPE_LOWER "$<LOWER_CASE:$<CONFIG>>")', cmake)
+        block = cmake.split("if (WIN32)\n", 1)[1].split("\nendif()", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "CMakeLists.txt").write_text(
-                'cmake_minimum_required(VERSION 3.15)\nproject(Config NONE)\n'
-                'set(CMAKE_BUILD_TYPE_LOWER "$<LOWER_CASE:$<CONFIG>>")\n'
-                'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/config.txt" '
-                'CONTENT "cargo/build/x86_64-pc-windows-msvc/${CMAKE_BUILD_TYPE_LOWER}/slippi_rust_extensions.dll")\n')
+            # Execute the production target against Corrosion-style staged artifacts,
+            # not an invented Cargo work-directory layout.
             for configuration in ("Release", "Debug"):
-                build = root / configuration
-                subprocess.run(["cmake", "-S", str(root), "-B", str(build),
-                                "-DCMAKE_BUILD_TYPE=" + configuration],
+                artifacts = root / configuration
+                artifacts.mkdir()
+                for suffix in ("dll", "dll.lib", "pdb"):
+                    (artifacts / ("slippi_rust_extensions." + suffix)).write_text(configuration + suffix)
+            (root / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.20)\nset(CMAKE_SYSTEM_NAME Windows)\nproject(Config NONE)\n'
+                'set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Binaries")\n'
+                'set(CMAKE_PDB_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/$<CONFIG>")\n'
+                'add_custom_target(common)\n'
+                'add_library(slippi_rust_extensions-shared SHARED IMPORTED GLOBAL)\n'
+                'set_target_properties(slippi_rust_extensions-shared PROPERTIES\n'
+                'IMPORTED_LOCATION_RELEASE "${CMAKE_SOURCE_DIR}/Release/slippi_rust_extensions.dll"\n'
+                'IMPORTED_LOCATION_DEBUG "${CMAKE_SOURCE_DIR}/Debug/slippi_rust_extensions.dll"\n'
+                'IMPORTED_IMPLIB_RELEASE "${CMAKE_SOURCE_DIR}/Release/slippi_rust_extensions.dll.lib"\n'
+                'IMPORTED_IMPLIB_DEBUG "${CMAKE_SOURCE_DIR}/Debug/slippi_rust_extensions.dll.lib")\n'
+                + block + '\n')
+            for generator in ("Ninja", "Ninja Multi-Config"):
+                build = root / generator
+                subprocess.run(["cmake", "-S", str(root), "-B", str(build), "-G", generator,
+                                "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CONFIGURATION_TYPES=Release;Debug"],
                                check=True, capture_output=True, text=True)
-                self.assertEqual((build / "config.txt").read_text(),
-                                 "cargo/build/x86_64-pc-windows-msvc/" +
-                                 configuration.lower() + "/slippi_rust_extensions.dll")
+                for configuration in ("Release", "Debug"):
+                    if generator == "Ninja":
+                        subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                                        "-DCMAKE_BUILD_TYPE=" + configuration],
+                                       check=True, capture_output=True)
+                    subprocess.run(["cmake", "--build", str(build), "--config", configuration],
+                                   check=True, capture_output=True, text=True)
+                    for suffix in ("dll", "dll.lib", "pdb"):
+                        self.assertEqual((build / "Binaries" / ("slippi_rust_extensions." + suffix))
+                                         .read_text(), configuration + suffix)
 
     def test_packaging_matches_slippi_cmake_names(self):
         qt = (ROOT / "Source/Core/DolphinQt/CMakeLists.txt").read_text()
