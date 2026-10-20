@@ -1,8 +1,10 @@
 # Annals index
 
-Reverse chronological. Recording branch: `dolphin-dap-slippi`; recording HEAD: `764647ad2ee8cb0820225c2a75fed8f2e10f43b4`; nearest describe: `v1.0.1+upstream-f87e849-568-g764647ad2e`.
+Reverse chronological. Recording branch: `dolphin-dap-slippi`; recording HEAD: `322ae530c977d762ce630d74c11ad548b46d4dc9`; nearest describe: `v1.0.3+upstream-f87e849-593-g322ae530c9`.
 
+- [2026-10-19: Sync Slippi upstream and personal-fork master](2026-10-19-sync-slippi-and-fork-master.md) - implemented - ordered Slippi/upstream-fork synchronization and conflict policy - `322ae530c977d762ce630d74c11ad548b46d4dc9`.
 - [2026-10-10: Merge master into the Slippi fork while retaining Slippi behavior](2026-10-10-merge-master-into-slippi.md) - implemented - Slippi/master integration and fork behavior preservation - `764647ad2ee8cb0820225c2a75fed8f2e10f43b4`.
+- [2026-10-09: Publish validated cross-platform Dolphin DAP release](2026-10-09-publish-validated-cross-platform-dap-release.md) - implemented - complete checksum-verified cross-platform release - `312bf66b19d8851e5f4631defca4c4bf1820bad9` / `v1.0.1+upstream-f87e849`.
 - [2026-10-05: Source-step interruption guards and temporary step-over breakpoint classification](2026-10-05-source-step-interruption-and-temporary-step-over-classification.md) — proposed — Source-row destination predicates, temporary step-over classification — open findings at `8297b5057d`.
 - [2026-10-05: Step-out return-destination breakpoint evaluation (implemented)](2026-10-05-stepout-return-destination-fix.md) — implemented — DAP/Qt step-out destination predicates — `8297b5057d`.
 - [2026-10-05: Step-out skips evaluation of the breakpoint at its return destination](2026-10-05-stepout-return-destination-breakpoint-gap.md) — implemented — DAP/Qt step-out destination predicates — finding at `88a5ddc3b9`; fixed in `8297b5057d`.

@@ -62,3 +62,7 @@ This imports, but does not supersede, the master release decision in [Publish va
 - No issue, pull request, or architecture record for this merge was supplied or found locally.
 - The complete conflict-resolution transcript and the command output substantiating the exact 1,964-test/89-suite count and both version checks were unavailable.
 - The configured `origin` remote is not sufficient evidence that it is the canonical remote for the Slippi branch.
+
+## Subsequent developments (2026-10-19)
+
+The branch was subsequently synchronized with `slippi/slippi` `9d13b39188` and then `origin/master` `ed0db5096e`. The ordered merge retained the product-boundary approach documented here; see [Sync Slippi upstream and personal-fork master](2026-10-19-sync-slippi-and-fork-master.md). This is a subsequent implementation, not a supersession or refutation of this record.

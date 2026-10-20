@@ -47,7 +47,7 @@ The chosen tag was the version increment `v1.0.1+upstream-f87e849`, preserving t
 
 ## Relationship to prior records
 
-This fulfills the open validation and release obligations in [Cross-platform CI packaging validation fixes](2026-10-08-cross-platform-ci-packaging-validation-fixes.md), [Packaging fixes local unit validation completed](2026-10-08-packaging-fixes-local-unit-validation-complete.md), and [Retry CI clears Linux packaging failures; Windows and macOS portability work remains](2026-10-08-retry-ci-clears-linux-packaging.md). Their retained-full-matrix decision is confirmed, not superseded; their time-bounded claims of incomplete CI validation are superseded by the successful runs above.
+This fulfills the open validation and release obligations in `Cross-platform CI packaging validation fixes`, `Packaging fixes local unit validation completed`, and `Retry CI clears Linux packaging failures; Windows and macOS portability work remains`. Their retained-full-matrix decision is confirmed, not superseded; their time-bounded claims of incomplete CI validation are superseded by the successful runs above.
 
 Those records and the annals index had pre-existing uncommitted changes at recording time. To avoid overwriting concurrent work, this record does not add their required correction backlinks or alter their statuses. Reconcile this record into `annals/README.md` and add dated subsequent-development backlinks to those three records when their current owner can safely incorporate the changes.
 
@@ -56,3 +56,7 @@ Those records and the annals index had pre-existing uncommitted changes at recor
 - Reconsider the release process if a published asset fails installation or runtime validation on its documented target environment, or if workflow artifacts and public downloads no longer checksum-match.
 - Add Developer ID signing and notarization before claiming a frictionless macOS installation experience.
 - The full transcripts, exact earlier failed-run IDs, and Docker registry logs were not available in the supplied checkpoint. Their transient classification is limited to the reported pre-build failures and the later successful rerun; this record does not independently reconstruct those failed attempts.
+
+## Correction (2026-10-19)
+
+The three 2026-10-08 records named above are absent from this branch's `annals/` directory, so their original local Markdown links could not resolve. Their titles and the historical relationship claim are retained as plain text; no conclusion about their missing history is drawn.
