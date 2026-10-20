@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 // This class is currently a shim for the Rust codes interface. We're doing it this way
@@ -14,8 +15,8 @@ class SlippiDirectCodes
   public:
     // We can't currently expose `SlippiRustExtensions.h` in header files, so
 	  // we export these two types for code clarity and map them in the implementation.
-    static const uint8_t DIRECT = 0;
-	  static const uint8_t TEAMS = 1;
+    static constexpr uint8_t DIRECT = 0;
+	  static constexpr uint8_t TEAMS = 1;
 
 	  SlippiDirectCodes(uintptr_t rs_exi_device_ptr, uint8_t kind);
 	  ~SlippiDirectCodes();

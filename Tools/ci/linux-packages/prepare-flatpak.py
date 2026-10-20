@@ -24,7 +24,7 @@ manifest["modules"][0]["sources"] = [{
 }]
 module = manifest["modules"][-1]
 module["config-opts"] = [
-    "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_QT=ON", "-DENABLE_NOGUI=ON",
+    "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_QT=ON", "-DENABLE_NOGUI=ON", "-DENABLE_CLI_TOOL=ON",
     "-DENABLE_TESTS=ON", "-DENABLE_AUTOUPDATE=OFF", "-DDISTRIBUTOR=LiveMindIO",
     "-DUSE_SYSTEM_LIBS=OFF", "-DENABLE_LLVM=OFF", "-DENABLE_ALSA=OFF",
     "-DENCODE_FRAMEDUMPS=OFF",

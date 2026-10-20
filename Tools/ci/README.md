@@ -32,7 +32,8 @@ Windows/Linux build/test jobs, both macOS jobs and all six Linux packaging jobs 
 SHA-256 checksum, and uploads:
 
 - `dolphin-dap-windows-x64.zip` and its `.sha256` file: Qt and NoGUI executables,
-  Qt plugins, app-local MSVC runtime, Sys resources, translations, and licenses.
+  the Slippi Rust DLL, Qt plugins, app-local MSVC runtime, Sys resources,
+  translations, and licenses. The Qt executable is `Slippi_Dolphin.exe`.
 - The six Linux packages below, each with a `.sha256` file.
 - `dolphin-dap-macos-arm64.dmg` and `dolphin-dap-macos-x86_64.dmg`, each with a
   `.sha256` file. These require macOS 14 or newer. Open the DMG and drag
@@ -93,6 +94,14 @@ assets on an existing release; it does not change that release's draft/prereleas
 status or notes. All build/test and packaging jobs must pass before publication.
 Only the publish job has `contents: write`; PR jobs have read-only
 repository permissions and do not use release secrets.
+
+Legacy Slippi's `main.yml` still builds Netplay and Playback. Its Linux jobs use
+GCC 12 on Ubuntu 22.04; Windows uses Visual Studio 2026. The legacy `release.yml`
+uploader accepts only non-composite tags whose release targets `slippi`, and
+downloads artifacts for the release's exact commit. Composite DAP tags (containing
+`+`) use only `build.yml` publication, never latest legacy branch artifacts.
+Pushing a tag therefore requests an automatic GitHub Release after all of
+`build.yml`'s platform and package gates pass; no manual release is required.
 
 The packages do not contain games, debug ELFs, or a separate user profile. Extract
 them together and follow the [DAP](../dap/README.md) or

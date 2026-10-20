@@ -602,7 +602,8 @@ add_subdirectory(Externals/corrosion)
 # Copy Rust DLLs
 if (WIN32)
   # this custom target will always run during a build and thus copy the rust DLLs to the binary folder if you're making rust only changes
-  string(TOLOWER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_LOWER)
+  # Visual Studio chooses the configuration at build time, not configure time.
+  set(CMAKE_BUILD_TYPE_LOWER "$<LOWER_CASE:$<CONFIG>>")
 	add_custom_target(copy_rust_dll ALL
     COMMENT "dummy target for copying rust dlls on windows after every build"
     # my understanding is that `common` depends on rust so depending on common will ensure that the rust libs fully build before the copy dll target is triggered

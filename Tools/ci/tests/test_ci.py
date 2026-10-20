@@ -105,6 +105,38 @@ class WorkflowTests(unittest.TestCase):
         publish = self.workflow["jobs"]["publish"]["steps"][-1]["run"]
         self.assertIn("dolphin-dap-macos-arm64.dmg", publish)
         self.assertIn("dolphin-dap-macos-x86_64.dmg", publish)
+        configure = next(step["run"] for step in job["steps"]
+                         if step.get("name") == "Configure macOS")
+        self.assertIn("-DENABLE_CLI_TOOL=ON", configure)
+        native = (ROOT / "Tools/ci/linux-packages/build-native.sh").read_text()
+        self.assertIn("-DENABLE_CLI_TOOL=ON", native)
+        flatpak = (ROOT / "Tools/ci/linux-packages/prepare-flatpak.py").read_text()
+        self.assertIn('"-DENABLE_CLI_TOOL=ON"', flatpak)
+
+    def test_legacy_builds_use_supported_compilers(self):
+        legacy = yaml.load((ROOT / ".github/workflows/main.yml").read_text(),
+                           Loader=yaml.BaseLoader)
+        windows = legacy["jobs"]["windows"]
+        self.assertEqual(windows["runs-on"], "windows-2025-vs2026")
+        self.assertEqual(windows["strategy"]["matrix"]["build_type"], ["Netplay", "Playback"])
+        linux = legacy["jobs"]["linux"]
+        self.assertEqual(linux["env"], {"CC": "gcc-12", "CXX": "g++-12"})
+        install = next(step["run"] for step in linux["steps"]
+                       if step.get("name") == "Install prerequisites")
+        self.assertIn("gcc-12", install)
+        self.assertIn("g++-12", install)
+
+    def test_legacy_release_cannot_upload_to_composite_dap_tags(self):
+        release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(),
+                            Loader=yaml.BaseLoader)
+        job = release["jobs"]["package"]
+        self.assertEqual(job["if"], "github.event.release.target_commitish == 'slippi' && "
+                         "!contains(github.event.release.tag_name, '+')")
+        download = next(step["with"] for step in job["steps"]
+                        if step.get("name") == "Download latest artifacts")
+        self.assertEqual(download["workflow"], "main.yml")
+        self.assertEqual(download["branch"], "slippi")
+        self.assertEqual(download["commit"], "${{ github.sha }}")
 
 
 @unittest.skipUnless(yaml and os.name == "posix" and shutil.which("pwsh"),
@@ -130,6 +162,22 @@ class WindowsConfigureTests(unittest.TestCase):
 
 
 class WindowsProjectTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("c++"), "requires a C++ compiler")
+    def test_slippi_code_kinds_have_linkable_storage_in_debug_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "code-kinds.cpp"
+            source.write_text(
+                '#include <cstdint>\n#include "Core/Slippi/SlippiDirectCodes.h"\n'
+                'int main() { const auto* direct = &SlippiDirectCodes::DIRECT; '
+                'const auto* teams = &SlippiDirectCodes::TEAMS; '
+                'return *direct == 0 && *teams == 1 ? 0 : 1; }\n')
+            executable = root / "code-kinds"
+            subprocess.run(["c++", "-std=c++23", "-O0", "-I", str(ROOT / "Source/Core"),
+                            str(source), "-o", str(executable)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_debugger_sources_match_cmake(self):
         cmake = (ROOT / "Source/Core/Core/CMakeLists.txt").read_text()
         sources = re.findall(r"^  (Debugger/\S+\.cpp)$", cmake, re.MULTILINE)
@@ -154,6 +202,34 @@ class WindowsProjectTests(unittest.TestCase):
         self.assertIn('-C "$<CONFIG>"',
                       (ROOT / "Source/UnitTests/CMakeLists.txt").read_text())
 
+    def test_rust_dll_copy_uses_build_configuration(self):
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        self.assertIn('set(CMAKE_BUILD_TYPE_LOWER "$<LOWER_CASE:$<CONFIG>>")', cmake)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.15)\nproject(Config NONE)\n'
+                'set(CMAKE_BUILD_TYPE_LOWER "$<LOWER_CASE:$<CONFIG>>")\n'
+                'file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/config.txt" '
+                'CONTENT "cargo/build/x86_64-pc-windows-msvc/${CMAKE_BUILD_TYPE_LOWER}/slippi_rust_extensions.dll")\n')
+            for configuration in ("Release", "Debug"):
+                build = root / configuration
+                subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                                "-DCMAKE_BUILD_TYPE=" + configuration],
+                               check=True, capture_output=True, text=True)
+                self.assertEqual((build / "config.txt").read_text(),
+                                 "cargo/build/x86_64-pc-windows-msvc/" +
+                                 configuration.lower() + "/slippi_rust_extensions.dll")
+
+    def test_packaging_matches_slippi_cmake_names(self):
+        qt = (ROOT / "Source/Core/DolphinQt/CMakeLists.txt").read_text()
+        self.assertRegex(qt, r"OUTPUT_NAME\s+Slippi_Dolphin")
+        self.assertIn('set(OUTPUT_NAME "Slippi_Dolphin")', qt)
+        mac = (ROOT / "Tools/ci/package-macos.sh").read_text()
+        self.assertIn('"$build/Binaries/Slippi_Dolphin.app"', mac)
+        self.assertIn("for binary in Slippi_Dolphin dolphin-emu-nogui", mac)
+        self.assertNotIn("DolphinQt.app", mac)
+
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("pwsh"), "requires PowerShell on POSIX")
 class WindowsPackageTests(unittest.TestCase):
@@ -168,7 +244,7 @@ class WindowsPackageTests(unittest.TestCase):
         self.script = tools / "package-windows.ps1"
         shutil.copy(ROOT / "Tools/ci/package-windows.ps1", self.script)
         self.output = self.root / "build/Binaries"
-        for filename in ("Dolphin.exe", "DolphinNoGUI.exe", "qt.conf", "COPYING",
+        for filename in ("Slippi_Dolphin.exe", "DolphinNoGUI.exe", "slippi_rust_extensions.dll", "qt.conf", "COPYING",
                          "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Svg.dll",
                          "Sys/resource.txt", "Languages/de/dolphin-emu.mo", "LICENSES/test.txt",
                          "QtPlugins/platforms/qwindows.dll"):
@@ -179,7 +255,7 @@ class WindowsPackageTests(unittest.TestCase):
         exe.write_text("#!/bin/sh\necho test-version\n")
         exe.chmod(0o755)
         # A stray local Debug executable must not get into the Release ZIP.
-        (self.output / "DolphinD.exe").write_text("debug binary")
+        (self.output / "Slippi_DolphinD.exe").write_text("debug binary")
         self.vs = self.root / "VS"
         crt = self.vs / "VC/Redist/MSVC/14.44.35211/x64/Microsoft.VC143.CRT"
         crt.mkdir(parents=True)
@@ -204,12 +280,12 @@ class WindowsPackageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         archive = self.root / "release/dolphin-dap-windows-x64.zip"
         with zipfile.ZipFile(archive) as bundle:
-            for filename in ("Dolphin.exe", "DolphinNoGUI.exe", "qt.conf", "COPYING",
+            for filename in ("Slippi_Dolphin.exe", "DolphinNoGUI.exe", "slippi_rust_extensions.dll", "qt.conf", "COPYING",
                              "Qt6Widgets.dll", "QtPlugins/platforms/qwindows.dll",
                              "Sys/resource.txt", "Languages/de/dolphin-emu.mo", "LICENSES/test.txt",
                              "vcruntime140.dll", "msvcp140.dll"):
                 self.assertIn(filename, bundle.namelist())
-            self.assertNotIn("DolphinD.exe", bundle.namelist())
+            self.assertNotIn("Slippi_DolphinD.exe", bundle.namelist())
         checksum = Path(str(archive) + ".sha256").read_text().split()
         self.assertEqual(checksum, [hashlib.sha256(archive.read_bytes()).hexdigest(), archive.name])
 
@@ -218,6 +294,13 @@ class WindowsPackageTests(unittest.TestCase):
         result = self.package()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing release file", result.stderr)
+        self.assertFalse((self.root / "release/dolphin-dap-windows-x64.zip").exists())
+
+    def test_missing_slippi_rust_dll_fails_without_archive(self):
+        (self.output / "slippi_rust_extensions.dll").unlink()
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing release file: slippi_rust_extensions.dll", result.stderr)
         self.assertFalse((self.root / "release/dolphin-dap-windows-x64.zip").exists())
 
     def test_failed_startup_fails_without_archive(self):

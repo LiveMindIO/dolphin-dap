@@ -52,6 +52,7 @@ git config --global --add safe.directory /source
 cmake -S /source -B /work/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
   -DENABLE_QT=ON -DENABLE_NOGUI=ON -DENABLE_TESTS=ON -DENABLE_AUTOUPDATE=OFF \
+  -DENABLE_CLI_TOOL=ON \
   -DDISTRIBUTOR=LiveMindIO -DUSE_SYSTEM_LIBS=OFF -DENABLE_LLVM=OFF \
   -DENCODE_FRAMEDUMPS=OFF
 cmake --build /work/build --parallel "$jobs"

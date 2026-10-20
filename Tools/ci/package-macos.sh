@@ -17,7 +17,7 @@ trap cleanup EXIT
 stage="$work/image"
 app="$stage/Dolphin DAP.app"
 mkdir -p "$stage"
-ditto "$build/Binaries/DolphinQt.app" "$app"
+ditto "$build/Binaries/Slippi_Dolphin.app" "$app"
 for binary in dolphin-emu-nogui dolphin-tool; do
   cp "$build/Binaries/$binary" "$app/Contents/MacOS/"
 done
@@ -45,7 +45,7 @@ mkdir -p "$mountpoint"
 hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$archive"
 mounted="$mountpoint/Dolphin DAP.app"
 codesign --verify --deep --strict "$mounted"
-for binary in DolphinQt dolphin-emu-nogui; do
+for binary in Slippi_Dolphin dolphin-emu-nogui; do
   "$mounted/Contents/MacOS/$binary" --version
 done
 "$mounted/Contents/MacOS/dolphin-tool" convert --help

@@ -10,6 +10,16 @@
 #include "Common/StringUtil.h"
 #include "Common/Swap.h"
 
+TEST(StringUtil, UTF32RoundTrip)
+{
+  const std::string utf8 = "A\xc3\xa9\xe6\x97\xa5\xf0\x9f\x8e\xae";
+  const std::u32string utf32 = U"A\u00e9\u65e5\U0001f3ae";
+  EXPECT_EQ(UTF8ToUTF32(utf8), utf32);
+  EXPECT_EQ(UTF32toUTF8(utf32), utf8);
+  EXPECT_TRUE(UTF8ToUTF32("").empty());
+  EXPECT_TRUE(UTF32toUTF8(U"").empty());
+}
+
 TEST(StringUtil, ParseFiniteDecimal)
 {
   EXPECT_EQ(Common::ParseFiniteDecimal<double>("-1.5e2"), -150.0);
