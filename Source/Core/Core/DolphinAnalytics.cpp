@@ -45,11 +45,6 @@
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 
-namespace
-{
-constexpr char ANALYTICS_ENDPOINT[] = "https://analytics.dolphin-emu.org/report";
-}  // namespace
-
 #if defined(ANDROID)
 static std::function<std::string(std::string)> s_get_val_func;
 void DolphinAnalytics::AndroidSetGetValFunc(std::function<std::string(std::string)> func)
@@ -90,20 +85,8 @@ void DolphinAnalytics::ReloadConfig()
 {
   std::lock_guard lk{m_reporter_mutex};
 
-  // Install the HTTP backend if analytics support is enabled.
-  std::unique_ptr<Common::AnalyticsReportingBackend> new_backend;
-  if (m_last_analytics_enabled)
-  {
-    new_backend = std::make_unique<Common::HttpAnalyticsBackend>(ANALYTICS_ENDPOINT);
-  }
-  m_reporter.SetBackend(std::move(new_backend));
-
-  // Load the unique ID or generate it if needed.
-  m_unique_id = Config::Get(Config::MAIN_ANALYTICS_ID);
-  if (m_unique_id.empty())
-  {
-    GenerateNewIdentity();
-  }
+  // Never report unsupported fork data, even with an upstream profile's saved opt-in.
+  m_reporter.SetBackend(nullptr);
 }
 
 void DolphinAnalytics::GenerateNewIdentity()

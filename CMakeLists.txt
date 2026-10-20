@@ -130,13 +130,9 @@ option(USE_RETRO_ACHIEVEMENTS "Enables integration with retroachievements.org" O
 # slippi change: end
 option(ENABLE_CCACHE "Enables CCache compiler cache" OFF)
 
-# Maintainers: if you consider blanket disabling this for your users, please
-# consider the following points:
-#  * No data is being sent without explicit user approval (pop up box at first
-#    launch).
-#  * The Dolphin team relies on the data in order to understand the behavior
-#    of our software in the wild.
-option(ENABLE_ANALYTICS "Enables opt-in Analytics collection" OFF)
+# Unsupported fork builds must not submit telemetry to upstream Dolphin.
+# FORCE also disables analytics in existing build directories and packaging overrides.
+set(ENABLE_ANALYTICS OFF CACHE BOOL "Analytics disabled in this fork" FORCE)
 
 # Enable Playback build for Slippi for watching replays
 option(SLIPPI_PLAYBACK "Enable Playback changes" OFF)
