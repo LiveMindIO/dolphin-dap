@@ -37,12 +37,11 @@ endif()
 target_link_libraries(dolphin-nogui
 PUBLIC
   slippi_rust_extensions
-  z
 PRIVATE
   core
   uicommon
   cpp-optparse
-	ZLIB::ZLIB
+  ZLIB::ZLIB
 )
 
 if(APPLE)

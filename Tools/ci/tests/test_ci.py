@@ -227,6 +227,32 @@ class RustPackageTests(unittest.TestCase):
 
 
 class WindowsProjectTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "requires a C compiler")
+    def test_nogui_links_zlib_through_its_portable_imported_target(self):
+        cmake = (ROOT / "Source/Core/DolphinNoGUI/CMakeLists.txt").read_text()
+        links = re.search(r"target_link_libraries\(dolphin-nogui\n.*?\n\)",
+                          cmake, re.DOTALL).group()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.c").write_text(
+                '#include <zlib.h>\nint main(void) { return compressBound(16) < 16; }\n')
+            (root / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(NoGUI C)\n'
+                'find_package(ZLIB REQUIRED)\nadd_executable(dolphin-nogui main.c)\n'
+                'foreach(name slippi_rust_extensions core uicommon cpp-optparse)\n'
+                '  add_library(${name} INTERFACE)\nendforeach()\n' + links + '\n'
+                'get_target_property(libraries dolphin-nogui LINK_LIBRARIES)\n'
+                'foreach(library IN LISTS libraries)\n'
+                '  if(NOT TARGET "${library}")\n'
+                '    message(FATAL_ERROR "Nonportable raw library: ${library}")\n'
+                '  endif()\nendforeach()\n')
+            build = root / "build"
+            subprocess.run(["cmake", "-S", str(root), "-B", str(build)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run(["cmake", "--build", str(build)],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([str(build / "dolphin-nogui")], check=True)
+
     def test_pipe_backend_sources_follow_the_enabled_unix_backend(self):
         cmake = (ROOT / "Source/Core/InputCommon/CMakeLists.txt").read_text()
         block = re.search(r"if\([^\n]+\)\n  target_sources\(inputcommon PRIVATE\n"
