@@ -439,7 +439,7 @@ TEST_F(SerialInterfaceTest, ConsolePollingBehaviorIsUnchanged)
   EXPECT_EQ(m_devices[0]->GetDataCount(), 1u);
 }
 
-TEST_F(SerialInterfaceTest, OnSIReadRequiresBlockingPipes)
+TEST_F(SerialInterfaceTest, OnSIReadDoesNotRequireBlockingPipes)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
   Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
@@ -447,9 +447,94 @@ TEST_F(SerialInterfaceTest, OnSIReadRequiresBlockingPipes)
 
   si.UpdateDevices();
 
-  EXPECT_EQ(m_devices[0]->GetDataCount(), 1u);
+  EXPECT_EQ(m_devices[0]->GetDataCount(), 0u);
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x12340000u);
   EXPECT_EQ(m_devices[0]->GetDataCount(), 1u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO), 0x56780000u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x12340001u);
+  EXPECT_EQ(m_devices[0]->GetDataCount(), 2u);
+  EXPECT_EQ(si.GetPollXLines(), 123u);
+}
+
+TEST_F(SerialInterfaceTest, DefaultPollingMatchesLegacySlippi)
+{
+  EXPECT_EQ(Config::MAIN_POLLING_METHOD.GetDefaultValue(), "OnSIRead");
+}
+
+TEST_F(SerialInterfaceTest, NonblockingGameplayConsumesEachBatchOnlyAtGuestRead)
+{
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+  Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
+  auto& si = m_system->GetSerialInterface();
+
+  int fds[2]{-1, -1};
+  ASSERT_EQ(pipe(fds), 0);
+  Common::ScopeGuard close_fds([&] {
+    if (fds[0] >= 0)
+      close(fds[0]);
+    if (fds[1] >= 0)
+      close(fds[1]);
+  });
+  ASSERT_NE(fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK), -1);
+  const int read_fd = fds[0];
+  auto pipe_device = std::make_shared<ciface::Pipes::PipeDevice>(read_fd, "LegacyPollingTestPipe");
+  fds[0] = -1;
+  ASSERT_TRUE(g_controller_interface.AddDevice(pipe_device));
+  Common::ScopeGuard remove_pipe([pipe_device] {
+    g_controller_interface.RemoveDevice(
+        [pipe_device](const ciface::Core::Device* device) { return device == pipe_device.get(); });
+  });
+  auto si_device = std::make_unique<PipeBackedSIDevice>(*m_system, 0, pipe_device);
+  auto* const si_device_ptr = si_device.get();
+  si.AddDevice(std::move(si_device));
+  ciface::Pipes::PublishInputState(true, false);
+
+  // No writer response or bookend is required to advance nonblocking polling.
+  si.UpdateDevices();
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 0u);
+  constexpr std::string_view press = "PRESS A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], press.data(), press.size()), static_cast<ssize_t>(press.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 0u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 1u);
+
+  constexpr std::string_view release = "RELEASE A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], release.data(), release.size()), static_cast<ssize_t>(release.size()));
+  for (const auto channel : {ciface::InputChannel::Host, ciface::InputChannel::FreeLook})
+  {
+    g_controller_interface.SetCurrentInputChannel(channel);
+    g_controller_interface.UpdateInput();
+    EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+  }
+  // Updating the device must not overwrite the already latched HI/LO pair.
+  si.UpdateDevices();
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO), 0x04560000u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO), 0u);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 2u);
+
+  // Neither separate scheduled updates nor coalesced writes may erase a pulse.
+  ASSERT_EQ(write(fds[1], press.data(), press.size()), static_cast<ssize_t>(press.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
+  ASSERT_EQ(write(fds[1], release.data(), release.size()), static_cast<ssize_t>(release.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 3u);
+  // Other channels must observe this generation without draining another batch.
+  m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI);
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+  si.UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+
+  constexpr std::string_view pulse = "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], pulse.data(), pulse.size()), static_cast<ssize_t>(pulse.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  si.UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
 }
 
 TEST_F(SerialInterfaceTest, LeavingOnSIReadClearsDeferredPoll)

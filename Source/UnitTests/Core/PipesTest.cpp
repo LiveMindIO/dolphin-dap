@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "Common/Config/Config.h"
+#include "Common/ScopeGuard.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/EXI/SlippiInputState.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
@@ -258,6 +259,18 @@ TEST_F(PipesTest, ConsumesUnsynchronizedCoalescedRequestsInSeparateUpdates)
   EXPECT_EQ(ButtonA(), 0.0);
 }
 
+TEST_F(PipesTest, UnsynchronizedMenusDrainWithoutRequiringOneBatchPerTelemetryEvent)
+{
+  ciface::Pipes::PublishInputState(false, true);
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+
+  m_device->UpdateInput();
+
+  EXPECT_EQ(ButtonA(), 0.0);
+  EXPECT_EQ(PendingBytes(), 0);
+}
+
 TEST_F(PipesTest, PendingUnsynchronizedRequestKeepsItsModeAcrossTelemetry)
 {
   ciface::Pipes::PublishInputState(false, true);
@@ -293,6 +306,25 @@ TEST_F(PipesTest, MixedRequestModesAreCapturedInOrder)
   EXPECT_EQ(gameplay_state.request_frame, 42);
   EXPECT_EQ(gameplay_state.request_source, ciface::Pipes::InputRequestSource::FrameBookend);
   EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+}
+
+TEST_F(PipesTest, GameHeaderRetiresMenuRequestsWithoutRequiringAnUnproducibleFrameResponse)
+{
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  ciface::Pipes::BeginGameplayInput();
+
+  const auto header_state = ciface::Pipes::CaptureInputState();
+  EXPECT_TRUE(header_state.synchronize_gameplay);
+  EXPECT_EQ(header_state.input_requests, 0u);
+  EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
+                                   -123);
+  const auto frame_state = ciface::Pipes::CaptureInputState();
+  EXPECT_TRUE(frame_state.synchronize_gameplay);
+  EXPECT_EQ(frame_state.input_requests, 1u);
+  EXPECT_EQ(frame_state.request_frame, -123);
+  EXPECT_EQ(frame_state.request_source, ciface::Pipes::InputRequestSource::FrameBookend);
 }
 
 TEST_F(PipesTest, DefersRequestRaisedDuringCurrentUpdate)
@@ -343,5 +375,60 @@ TEST_F(PipesTest, NonblockingModeRetainsDrainBehavior)
   m_device->UpdateInput();
 
   EXPECT_EQ(ButtonA(), 1.0);
+}
+
+TEST_F(PipesTest, NonblockingReadPollingPreservesGameplayInputForSI)
+{
+  Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+  ciface::Pipes::PublishInputState(true, false);
+  Write("PRESS A\nFLUSH\n");
+  const int pending = PendingBytes();
+  for (const auto channel : {ciface::InputChannel::Host, ciface::InputChannel::FreeLook,
+                             ciface::InputChannel::SerialInterface})
+  {
+    g_controller_interface.SetCurrentInputChannel(channel);
+    m_device->UpdateInput();
+    EXPECT_EQ(ButtonA(), 0.0);
+    EXPECT_EQ(PendingBytes(), pending);
+  }
+  g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
+  ciface::Pipes::g_guest_input_sampling = true;
+  Common::ScopeGuard reset([] { ciface::Pipes::g_guest_input_sampling = false; });
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
+  EXPECT_EQ(PendingBytes(), 0);
+}
+
+TEST_F(PipesTest, NonblockingGuestSamplingPreservesQueuedOneFramePulse)
+{
+  Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+  ciface::Pipes::PublishInputState(true, false);
+  g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
+  Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+
+  ciface::Pipes::g_guest_input_sampling = true;
+  Common::ScopeGuard reset([] { ciface::Pipes::g_guest_input_sampling = false; });
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 0.0);
+  EXPECT_EQ(PendingBytes(), 0);
+}
+
+TEST_F(PipesTest, BlockingRequestsSeparateQueuedOneFramePulse)
+{
+  Write("PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  ciface::Pipes::PublishInputState(true, true);
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 1.0);
+
+  ciface::Pipes::PublishInputState(true, true);
+  ciface::Pipes::g_current_input_update = ciface::Pipes::CaptureInputState();
+  m_device->UpdateInput();
+  EXPECT_EQ(ButtonA(), 0.0);
+  EXPECT_EQ(PendingBytes(), 0);
 }
 }  // namespace

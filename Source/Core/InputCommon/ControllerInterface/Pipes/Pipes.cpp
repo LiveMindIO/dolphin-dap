@@ -109,13 +109,26 @@ PipeDevice::~PipeDevice()
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
   const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
-  if (blocking_pipes &&
+  const bool guest_sampled_gameplay =
+      !blocking_pipes && Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
+      (g_input_state.load(std::memory_order_acquire) & SYNCHRONIZE_GAMEPLAY) != 0;
+  if (guest_sampled_gameplay && !g_guest_input_sampling)
+    return Core::DeviceRemoval::Keep;
+  const bool preserve_gameplay_input =
+      blocking_pipes ||
+      (Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
+       (g_input_state.load(std::memory_order_acquire) & SYNCHRONIZE_GAMEPLAY) != 0);
+  if (preserve_gameplay_input &&
       ControllerInterface::GetCurrentInputChannel() != ciface::InputChannel::SerialInterface)
   {
     return Core::DeviceRemoval::Keep;
   }
 
-  u64 remaining_batches = blocking_pipes ? g_current_input_update.input_requests : 0;
+  // Menu telemetry can be coalesced by the spectator transport. It cannot own
+  // a one-batch-per-event handshake; synchronize only real gameplay requests.
+  u64 remaining_batches = 0;
+  if (blocking_pipes && g_current_input_update.synchronize_gameplay)
+    remaining_batches = g_current_input_update.input_requests;
   const bool wait_for_input = remaining_batches != 0;
   if (blocking_pipes && g_current_input_update.synchronize_gameplay && !wait_for_input)
     return Core::DeviceRemoval::Keep;
@@ -138,6 +151,8 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
                       InputRequestSourceName(g_current_input_update.request_source),
                       remaining_batches);
         if (wait_for_input && --remaining_batches == 0)
+          return Core::DeviceRemoval::Keep;
+        if (guest_sampled_gameplay)
           return Core::DeviceRemoval::Keep;
       }
       newline = m_buf.find('\n');
@@ -166,7 +181,10 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
     if (poll_result == 0)
     {
       const ::Core::State state = ::Core::GetState(::Core::System::GetInstance());
-      if (state == ::Core::State::Stopping || state == ::Core::State::Uninitialized)
+      // Debugger guards request a CPU pause before reading memory. Do not keep
+      // that CPU thread waiting for a writer which is awaiting the debugger.
+      if (state == ::Core::State::Paused || state == ::Core::State::Stopping ||
+          state == ::Core::State::Uninitialized)
         return Core::DeviceRemoval::Keep;
     }
     else if (descriptor.revents & (POLLERR | POLLNVAL))
