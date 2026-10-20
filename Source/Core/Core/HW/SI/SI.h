@@ -56,6 +56,7 @@ public:
   void RemoveEvent(int device_number);
 
   void UpdateDevices();
+  bool IsPollingOnSIRead() const;
   u32 GetInLength() const { return m_com_csr.INLNGTH; }
 
   void RemoveDevice(int device_number);
@@ -77,7 +78,6 @@ private:
   };
 
   void SetNoResponse(u32 channel);
-  bool IsPollingOnSIRead() const;
   bool IsPipeResponsePartiallyLatched() const;
   void PollDevice(u32 channel);
   void UpdateInterrupts();

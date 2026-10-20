@@ -24,6 +24,7 @@
 #include "Common/StringUtil.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/HW/SI/SI.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
@@ -110,14 +111,11 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
 {
   const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
   const bool guest_sampled_gameplay =
-      !blocking_pipes && Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
+      !blocking_pipes && ::Core::System::GetInstance().GetSerialInterface().IsPollingOnSIRead() &&
       (g_input_state.load(std::memory_order_acquire) & SYNCHRONIZE_GAMEPLAY) != 0;
   if (guest_sampled_gameplay && !g_guest_input_sampling)
     return Core::DeviceRemoval::Keep;
-  const bool preserve_gameplay_input =
-      blocking_pipes ||
-      (Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
-       (g_input_state.load(std::memory_order_acquire) & SYNCHRONIZE_GAMEPLAY) != 0);
+  const bool preserve_gameplay_input = blocking_pipes || guest_sampled_gameplay;
   if (preserve_gameplay_input &&
       ControllerInterface::GetCurrentInputChannel() != ciface::InputChannel::SerialInterface)
   {

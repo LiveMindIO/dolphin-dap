@@ -21,10 +21,14 @@
 #include "Core/HW/MMIO.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
+#include "Core/HW/Wiimote.h"
+#include "Core/HW/WiimoteEmu/WiimoteEmu.h"
+#include "Core/Movie.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
 #include "InputCommon/ControllerInterface/Pipes/Pipes.h"
+#include "InputCommon/InputConfig.h"
 
 namespace
 {
@@ -536,6 +540,79 @@ TEST_F(SerialInterfaceTest, NonblockingGameplayConsumesEachBatchOnlyAtGuestRead)
   si.UpdateDevices();
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
 }
+
+class FallbackPipePollingTest : public SerialInterfaceTest, public testing::WithParamInterface<bool>
+{
+};
+
+TEST_P(FallbackPipePollingTest, ScheduledAndHostUpdatesConsumeWhenGuestSamplingIsIneffective)
+{
+  const bool recording = GetParam();
+  Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{recording ? "OnSIRead" : "Console"});
+  Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
+  auto& movie = m_system->GetMovie();
+  if (recording)
+  {
+    for (unsigned i = 0; i < MAX_BBMOTES; ++i)
+      Wiimote::GetConfig()->CreateController<WiimoteEmu::Wiimote>(i);
+  }
+  Common::ScopeGuard stop_recording([&] {
+    if (recording)
+    {
+      movie.EndPlayInput(false);
+      Wiimote::GetConfig()->ClearControllers();
+    }
+  });
+  if (recording)
+  {
+    ASSERT_TRUE(
+        movie.BeginRecordingInput({Movie::ControllerType::GC, Movie::ControllerType::None,
+                                   Movie::ControllerType::None, Movie::ControllerType::None},
+                                  {}));
+  }
+
+  auto& si = m_system->GetSerialInterface();
+  ASSERT_FALSE(si.IsPollingOnSIRead());
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  Common::ScopeGuard close_writer([&] { close(fds[1]); });
+  ASSERT_NE(fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK), -1);
+  auto pipe_device = std::make_shared<ciface::Pipes::PipeDevice>(fds[0], "FallbackPollingTestPipe");
+  ASSERT_TRUE(g_controller_interface.AddDevice(pipe_device));
+  Common::ScopeGuard remove_pipe([pipe_device] {
+    g_controller_interface.RemoveDevice(
+        [pipe_device](const ciface::Core::Device* device) { return device == pipe_device.get(); });
+  });
+  auto si_device = std::make_unique<PipeBackedSIDevice>(*m_system, 0, pipe_device);
+  auto* const si_device_ptr = si_device.get();
+  si.AddDevice(std::move(si_device));
+  ciface::Pipes::BeginGameplayInput();
+
+  constexpr std::string_view press = "PRESS A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], press.data(), press.size()), static_cast<ssize_t>(press.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 1u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 1.0);
+
+  constexpr std::string_view release = "RELEASE A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], release.data(), release.size()), static_cast<ssize_t>(release.size()));
+  g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::Host);
+  g_controller_interface.UpdateInput();
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO), 0x04560000u);
+  EXPECT_EQ(si_device_ptr->GetDataCount(), 1u);
+  si.UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+
+  constexpr std::string_view pulse = "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n";
+  ASSERT_EQ(write(fds[1], pulse.data(), pulse.size()), static_cast<ssize_t>(pulse.size()));
+  si.UpdateDevices();
+  EXPECT_EQ(pipe_device->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(ConsoleAndMovieRecording, FallbackPipePollingTest, testing::Bool());
 
 TEST_F(SerialInterfaceTest, LeavingOnSIReadClearsDeferredPoll)
 {
