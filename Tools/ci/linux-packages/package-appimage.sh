@@ -7,11 +7,12 @@ curl -fL --retry 3 -o tools/linuxdeploy \
   https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
 curl -fL --retry 3 -o tools/linuxdeploy-plugin-qt \
   https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+# Use the versioned release: continuous replaces its runtime during unrelated builds.
 curl -fL --retry 3 -o tools/runtime-x86_64 \
-  https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+  https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
 echo '8aea8da0f7f7039d2a2cecb14657d752a222a5e1d3825caeef186c82f751cdd1  tools/linuxdeploy' | sha256sum -c
 echo 'cfc1055b2b9dbc08412b579f20990b7b41a17b61beaa5847dc9477c96c9e9617  tools/linuxdeploy-plugin-qt' | sha256sum -c
-echo '156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074  tools/runtime-x86_64' | sha256sum -c
+echo '2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  tools/runtime-x86_64' | sha256sum -c
 chmod +x tools/linuxdeploy tools/linuxdeploy-plugin-qt
 cp -a stage/usr AppDir/
 cp -a build/Binaries/Languages AppDir/usr/bin/

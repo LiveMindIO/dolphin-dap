@@ -16,6 +16,14 @@ SCRIPTS = ROOT / "Tools/ci/linux-packages"
 
 
 class NativeFormatTests(unittest.TestCase):
+    def test_appimage_runtime_uses_a_versioned_release_and_checked_hash(self):
+        script = (SCRIPTS / "package-appimage.sh").read_text()
+        self.assertIn("AppImage/type2-runtime/releases/download/20251108/runtime-x86_64",
+                      script)
+        self.assertNotIn("type2-runtime/releases/download/continuous", script)
+        self.assertIn("2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+                      "  tools/runtime-x86_64' | sha256sum -c", script)
+
     def test_macos_bundle_fixup_searches_homebrew_and_bundled_libraries(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
