@@ -81,8 +81,9 @@ Architecture: amd64
 Description: Dolphin emulator with source debugging and DAP
 EOF
     cd /work
-    dependencies=$(dpkg-shlibdeps -O -e/work/stage/usr/bin/dolphin-emu \
-      -e/work/stage/usr/bin/dolphin-emu-nogui -e/work/stage/usr/bin/dolphin-tool)
+    dependencies=$(dpkg-shlibdeps -O -l/work/stage/usr/lib -e/work/stage/usr/bin/dolphin-emu \
+      -e/work/stage/usr/bin/dolphin-emu-nogui -e/work/stage/usr/bin/dolphin-tool \
+      -e/work/stage/usr/lib/libslippi_rust_extensions.so)
     dependencies=${dependencies#shlibs:Depends=}
     cat > /work/stage/DEBIAN/control <<EOF
 Package: dolphin-dap
@@ -117,6 +118,7 @@ Includes the Qt debugger and NoGUI DAP frontend.
 cp -a /work/stage/. %{buildroot}/
 %files
 /usr/bin/*
+/usr/lib/*.so
 /usr/share/*
 EOF
     rpmbuild -bb --define '_topdir /work/rpmbuild' --define 'debug_package %{nil}' \

@@ -164,6 +164,126 @@ class WindowsConfigureTests(unittest.TestCase):
 
 @unittest.skipUnless(yaml, "requires PyYAML")
 class RustPackageTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("c++"), "requires a C++ compiler")
+    def test_vendored_vcdiff_builds_without_installing_development_files(self):
+        source = (ROOT / "CMakeLists.txt").read_text()
+        subdirectory = re.search(r"^add_subdirectory\(Externals/open-vcdiff[^\n]*$",
+                                 source, re.MULTILINE).group()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Externals").mkdir()
+            (root / "Externals/open-vcdiff").symlink_to(ROOT / "Externals/open-vcdiff")
+            (root / "main.cpp").write_text("int main() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(VendorInstall C CXX)\n' + subdirectory + '\n'
+                'add_executable(consumer main.cpp)\n'
+                'target_link_libraries(consumer PRIVATE vcdcom vcddec vcdenc)\n'
+                'install(TARGETS consumer RUNTIME DESTINATION bin)\n')
+            build = root / "build"
+            stage = root / "stage"
+            subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                            f"-DCMAKE_INSTALL_PREFIX={stage}"], check=True, capture_output=True)
+            subprocess.run(["cmake", "--build", str(build), "--parallel", "2"],
+                           check=True, capture_output=True)
+            subprocess.run(["cmake", "--install", str(build)], check=True, capture_output=True)
+            subprocess.run([str(stage / "bin/consumer")], check=True)
+            for library in ("vcdcom", "vcddec", "vcdenc"):
+                self.assertTrue((build / f"Externals/open-vcdiff/lib{library}.a").is_file())
+            self.assertFalse((stage / "include").exists())
+            self.assertFalse((stage / "lib").exists())
+
+    @unittest.skipUnless(shutil.which("rpmbuild") and shutil.which("rpm") and shutil.which("cc"),
+                         "requires RPM tools and a C compiler")
+    def test_rpm_spec_packages_the_installed_rust_library(self):
+        source = (ROOT / "Tools/ci/linux-packages/build-native.sh").read_text()
+        spec = source.split('cat > /work/rpmbuild/SPECS/dolphin-dap.spec <<EOF\n', 1)[1]
+        spec = spec.split('\nEOF', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            for filename in ("usr/bin/dolphin-emu", "usr/lib/libslippi_rust_extensions.so",
+                             "usr/share/dolphin-emu/resource"):
+                path = stage / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("package fixture\n")
+            (root / "rust.c").write_text("int rust_value(void) { return 42; }\n")
+            (root / "main.c").write_text(
+                "int rust_value(void); int main(void) { return rust_value() != 42; }\n")
+            subprocess.run(["cc", "-shared", "-fPIC", str(root / "rust.c"), "-o",
+                            str(stage / "usr/lib/libslippi_rust_extensions.so")],
+                           check=True, capture_output=True)
+            subprocess.run(["cc", str(root / "main.c"), f"-L{stage / 'usr/lib'}",
+                            "-lslippi_rust_extensions", "-Wl,-rpath,$ORIGIN/../lib",
+                            "-o", str(stage / "usr/bin/dolphin-emu")],
+                           check=True, capture_output=True)
+            spec_path = root / "dolphin-dap.spec"
+            spec_path.write_text(spec.replace("$version", "1.0.0")
+                                 .replace("/work/stage", str(stage)))
+            subprocess.run(["rpmbuild", "-bb", "--define", f"_topdir {root}",
+                            "--define", "debug_package %{nil}", str(spec_path)],
+                           check=True, capture_output=True, text=True)
+            package, = (root / "RPMS/x86_64").glob("*.rpm")
+            files = subprocess.check_output(["rpm", "--dbpath", str(root / "rpmdb"),
+                                             "-qpl", str(package)], text=True)
+            self.assertIn("/usr/lib/libslippi_rust_extensions.so", files.splitlines())
+            requires = subprocess.check_output(["rpm", "--dbpath", str(root / "rpmdb"),
+                                                "-qp", "--requires", str(package)], text=True)
+            provides = subprocess.check_output(["rpm", "--dbpath", str(root / "rpmdb"),
+                                                "-qp", "--provides", str(package)], text=True)
+            for dependency in requires.splitlines():
+                if "libslippi_rust_extensions" in dependency:
+                    self.assertIn(dependency, provides.splitlines())
+
+    @unittest.skipUnless(shutil.which("cc"), "requires a C compiler")
+    def test_linux_install_includes_rust_library_and_relocatable_frontends(self):
+        cmake = (ROOT / "Source/Core/CMakeLists.txt").read_text()
+        install = cmake.split("corrosion_import_crate(", 1)[1].split("\n", 1)[1]
+        install = install.split("# slippi change: end", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "rust.c").write_text("int rust_value(void) { return 42; }\n")
+            library = root / "libslippi_rust_extensions.so"
+            subprocess.run(["cc", "-shared", "-fPIC", str(root / "rust.c"), "-o", str(library)],
+                           check=True, capture_output=True)
+            (root / "main.c").write_text(
+                "int rust_value(void); int main(void) { return rust_value() != 42; }\n")
+            for libdir, frontends in (("lib", ["dolphin-emu", "dolphin-nogui", "dolphin-tool"]),
+                                      ("lib64", ["dolphin-nogui"]),
+                                      ("lib/x86_64-linux-gnu", ["dolphin-tool"])):
+                with self.subTest(libdir=libdir):
+                    (root / "CMakeLists.txt").write_text(
+                        'cmake_minimum_required(VERSION 3.20)\nproject(InstallRust C)\n'
+                        'include(GNUInstallDirs)\n'
+                        'add_library(slippi_rust_extensions-shared SHARED IMPORTED GLOBAL)\n'
+                        'set_target_properties(slippi_rust_extensions-shared PROPERTIES\n'
+                        '  IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/libslippi_rust_extensions.so"\n'
+                        '  IMPORTED_NO_SONAME TRUE)\n'
+                        f'foreach(frontend {" ".join(frontends)})\n'
+                        '  add_executable(${frontend} main.c)\n'
+                        '  target_link_libraries(${frontend} PRIVATE slippi_rust_extensions-shared)\n'
+                        '  install(TARGETS ${frontend} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})\n'
+                        'endforeach()\n' + install)
+                    build = root / libdir.replace("/", "-")
+                    stage = build / "stage"
+                    subprocess.run(["cmake", "-S", str(root), "-B", str(build),
+                                    f"-DCMAKE_INSTALL_LIBDIR={libdir}", "-DCMAKE_INSTALL_PREFIX=/usr"],
+                                   check=True, capture_output=True)
+                    subprocess.run(["cmake", "--build", str(build)], check=True, capture_output=True)
+                    subprocess.run(["cmake", "--install", str(build)],
+                                   env=dict(os.environ, DESTDIR=str(stage)), check=True, capture_output=True)
+                    self.assertEqual((stage / "usr" / libdir / library.name).read_bytes(),
+                                     library.read_bytes())
+                    env = dict(os.environ)
+                    env.pop("LD_LIBRARY_PATH", None)
+                    hidden = library.with_suffix(".hidden")
+                    library.rename(hidden)
+                    try:
+                        for frontend in frontends:
+                            subprocess.run([str(stage / "usr/bin" / frontend)], env=env,
+                                           check=True, capture_output=True)
+                    finally:
+                        hidden.rename(library)
+
     def test_flatpak_vendors_locked_crates_for_offline_sdk_build(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

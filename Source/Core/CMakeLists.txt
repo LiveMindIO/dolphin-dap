@@ -39,6 +39,16 @@ endif()
 #endif()
 
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/Externals/SlippiRustExtensions/Cargo.toml ${RUST_FEATURES})
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  install(FILES "$<TARGET_FILE:slippi_rust_extensions-shared>"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  foreach(frontend dolphin-emu dolphin-nogui dolphin-tool)
+    if(TARGET ${frontend})
+      set_property(TARGET ${frontend} APPEND PROPERTY INSTALL_RPATH
+        "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+  endforeach()
+endif()
 # slippi change: end
 
 if (APPLE AND ENABLE_QT)

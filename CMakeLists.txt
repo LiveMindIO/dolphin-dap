@@ -672,7 +672,8 @@ endif()
 include_directories(Externals/nlohmann)
 add_subdirectory(Externals/semver)
 include_directories(Externals/semver/include)
-add_subdirectory(Externals/open-vcdiff)
+# Link the vendored libraries without installing their development files.
+add_subdirectory(Externals/open-vcdiff EXCLUDE_FROM_ALL)
 include_directories(Externals)
 # slippi change: end
 add_subdirectory(Externals/tinygltf)
