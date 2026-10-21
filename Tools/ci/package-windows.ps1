@@ -19,7 +19,8 @@ if (!$crt) { throw 'MSVC x64 CRT directory not found' }
 Copy-Item "$crt/*.dll" $output
 
 foreach ($path in @(
-  'Dolphin.exe', 'DolphinNoGUI.exe', 'Sys', 'Languages', 'COPYING', 'LICENSES',
+  'Slippi_Dolphin.exe', 'DolphinNoGUI.exe', 'slippi_rust_extensions.dll',
+  'Sys', 'Languages', 'COPYING', 'LICENSES',
   'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Svg.dll', 'qt.conf',
   'QtPlugins/platforms/qwindows.dll', 'vcruntime140.dll', 'msvcp140.dll'
 )) {
@@ -33,7 +34,8 @@ if ($LASTEXITCODE -ne 0) { throw 'DolphinNoGUI startup check failed' }
 $stage = Join-Path $root 'release/windows'
 if (Test-Path $stage) { throw "Release staging directory already exists: $stage" }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
-Copy-Item "$output/Dolphin.exe", "$output/DolphinNoGUI.exe", "$output/qt.conf", `
+Copy-Item "$output/Slippi_Dolphin.exe", "$output/DolphinNoGUI.exe", `
+  "$output/slippi_rust_extensions.dll", "$output/qt.conf", `
   "$output/COPYING" $stage
 foreach ($directory in @('Sys', 'Languages', 'LICENSES', 'QtPlugins')) {
   Copy-Item "$output/$directory" $stage -Recurse

@@ -3369,7 +3369,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     configureCommands(&mem_ptr[1], receive_commands_len);
     writeToFileAsync(&mem_ptr[0], receive_commands_len + 1, "create");
     buf_loc += receive_commands_len + 1;
-    ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::GameStart);
+    ciface::Pipes::BeginGameplayInput();
     SlippiSpectateServer::getInstance().startGame();
     SlippiSpectateServer::getInstance().write(&mem_ptr[0], receive_commands_len + 1);
     if (slippi_netplay)

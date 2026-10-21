@@ -27,6 +27,9 @@
 #include "Common/Logging/Log.h"
 
 #ifdef _WIN32
+#include <codecvt>
+#include <locale>
+
 #include <windows.h>
 #include <shellapi.h>
 constexpr u32 CODEPAGE_SHIFT_JIS = 932;

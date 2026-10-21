@@ -17,6 +17,7 @@
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
+#include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
@@ -450,6 +451,43 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
         base | (SI_CHANNEL_0_IN_HI + 0xC * i),
         MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
           auto& si = system.GetSerialInterface();
+          if (si.IsPollingOnSIRead() && !Config::Get(Config::SLIPPI_BLOCKING_PIPES) &&
+              si.m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
+          {
+            if ((ciface::Pipes::g_input_state.load(std::memory_order_acquire) &
+                 ciface::Pipes::SYNCHRONIZE_GAMEPLAY) != 0)
+            {
+              // Sample all ports once per guest-read generation. Scheduled and
+              // host polls must not replace a batch before the guest observes it.
+              if (si.m_channel[i].poll_phase != PendingPollPhase::None)
+              {
+                g_controller_interface.SetCurrentInputChannel(
+                    ciface::InputChannel::SerialInterface);
+                ciface::Pipes::g_guest_input_sampling = true;
+                Common::ScopeGuard clear_sampling(
+                    [] { ciface::Pipes::g_guest_input_sampling = false; });
+                g_controller_interface.UpdatePipeInput();
+                for (u32 channel = 0; channel != MAX_SI_CHANNELS; ++channel)
+                {
+                  if (si.m_channel[channel].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
+                  {
+                    si.PollDevice(channel);
+                    si.m_channel[channel].poll_phase = PendingPollPhase::None;
+                  }
+                }
+              }
+              si.m_status_reg.hex &= clear_rdst;
+              si.UpdateInterrupts();
+              return si.m_channel[i].in_hi.hex;
+            }
+            // Legacy Slippi samples the latest device state at each guest HI read.
+            // Keep LO paired with this response until the next HI read.
+            si.PollDevice(i);
+            si.m_channel[i].poll_phase = PendingPollPhase::None;
+            si.m_status_reg.hex &= clear_rdst;
+            si.UpdateInterrupts();
+            return si.m_channel[i].in_hi.hex;
+          }
           const bool request_pending =
               si.m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER &&
               ciface::Pipes::IsInputRequested();
@@ -777,8 +815,7 @@ void SerialInterfaceManager::UpdateDevices()
 
 bool SerialInterfaceManager::IsPollingOnSIRead() const
 {
-  return Config::Get(Config::SLIPPI_BLOCKING_PIPES) &&
-         Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
+  return Config::Get(Config::MAIN_POLLING_METHOD) == "OnSIRead" &&
          !m_system.GetMovie().IsMovieActive() && !NetPlay::IsNetPlayRunning();
 }
 
@@ -837,6 +874,10 @@ SIDevices SerialInterfaceManager::GetDeviceType(int channel) const
 
 u32 SerialInterfaceManager::GetPollXLines()
 {
+  // Legacy Slippi refreshes host input at 240 Hz for NTSC read-time polling.
+  // Blocking pipes retain their existing scheduled request cadence.
+  if (IsPollingOnSIRead() && !Config::Get(Config::SLIPPI_BLOCKING_PIPES))
+    return 492 / 4;
   return m_poll.X;
 }
 

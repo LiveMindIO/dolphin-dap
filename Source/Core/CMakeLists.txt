@@ -39,6 +39,16 @@ endif()
 #endif()
 
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/Externals/SlippiRustExtensions/Cargo.toml ${RUST_FEATURES})
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  install(FILES "$<TARGET_FILE:slippi_rust_extensions-shared>"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  foreach(frontend dolphin-emu dolphin-nogui dolphin-tool)
+    if(TARGET ${frontend})
+      set_property(TARGET ${frontend} APPEND PROPERTY INSTALL_RPATH
+        "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+  endforeach()
+endif()
 # slippi change: end
 
 if (APPLE AND ENABLE_QT)
@@ -46,23 +56,24 @@ if (APPLE AND ENABLE_QT)
 
   add_custom_target(build_final_bundle ALL
     COMMAND ${CMAKE_COMMAND} -E remove_directory
-    ${DOLPHIN_MAC_BUNDLE}
+    "${DOLPHIN_MAC_BUNDLE}"
     
     COMMAND cp -R
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/DolphinQt.app
-    ${DOLPHIN_MAC_BUNDLE}
+    "$<TARGET_BUNDLE_DIR:dolphin-emu>"
+    "${DOLPHIN_MAC_BUNDLE}"
 
     # HACK: The Updater does not support setting the executable bit on new files,
     # so don't use the new executable name, and instead continue to use "Dolphin".
     COMMAND ${CMAKE_COMMAND} -E rename
-    ${DOLPHIN_MAC_BUNDLE}/Contents/MacOS/DolphinQt
-    ${DOLPHIN_MAC_BUNDLE}/Contents/MacOS/Dolphin
+    "${DOLPHIN_MAC_BUNDLE}/Contents/MacOS/$<TARGET_FILE_NAME:dolphin-emu>"
+    "${DOLPHIN_MAC_BUNDLE}/Contents/MacOS/Dolphin"
 
     COMMAND plutil
     -replace CFBundleExecutable -string Dolphin
-    ${DOLPHIN_MAC_BUNDLE}/Contents/Info.plist
+    "${DOLPHIN_MAC_BUNDLE}/Contents/Info.plist"
     
-    DEPENDS dolphin-emu)
+    DEPENDS dolphin-emu
+    VERBATIM)
   
   if (ENABLE_AUTOUPDATE)
     add_dependencies(build_final_bundle MacUpdater)

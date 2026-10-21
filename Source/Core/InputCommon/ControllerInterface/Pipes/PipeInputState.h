@@ -14,6 +14,7 @@
 
 namespace ciface::Pipes
 {
+inline thread_local bool g_guest_input_sampling = false;
 enum class InputRequestSource : u8
 {
   Unknown,
@@ -166,6 +167,14 @@ inline void ClearInputRequests()
   std::lock_guard lock(g_input_request_mutex);
   g_pending_input_request_queue.clear();
   g_pending_input_requests.store(0, std::memory_order_release);
+}
+
+inline void BeginGameplayInput()
+{
+  // A game header is not a completed frame to which the writer can respond.
+  // Retire menu requests and wait only after the first real frame bookend.
+  ClearInputRequests();
+  PublishInputState(true, false, InputRequestSource::GameStart);
 }
 
 inline void RecordSIUpdate(u64 now_us)
