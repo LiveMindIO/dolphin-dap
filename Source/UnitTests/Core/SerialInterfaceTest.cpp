@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <gtest/gtest.h>
-#include "../StubHost.h"
 
 #include <array>
 #include <chrono>
@@ -11,6 +10,8 @@
 #include <thread>
 
 #ifndef _WIN32
+#include "../StubHost.h"
+
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -1062,8 +1063,10 @@ TEST_P(CompleteAcquisitionCpuTest, ShutdownCancelsButPauseFinishesRealPendingCoh
   });
   const auto start = std::chrono::steady_clock::now();
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), GetParam() ? 0u : 0x01230000u);
+  // Distinguish cancellation/completion from the one-second fault watchdog,
+  // not host thread-join latency (the loaded ARM CI host exceeded 200 ms).
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(900));
   pause.join();
-  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
   EXPECT_EQ(m_pipe_si[0]->GetDataCount(), GetParam() ? 0u : 1u);
   EXPECT_EQ(m_pipe_si[1]->GetDataCount(), GetParam() ? 0u : 1u);
   EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), GetParam() ? 0.0 : 1.0);
