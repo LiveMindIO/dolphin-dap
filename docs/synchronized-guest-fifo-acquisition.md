@@ -29,6 +29,29 @@ before publishing the cohort and packing a new guest SI response.
   pending instruction completes. That alone is not cancellation. Shutdown and
   gameplay retirement still cancel; pause does not auto-resume the CPU.
 
+## Savestates and reset
+
+Saving is read-only for pipe staging and writer ownership. **Loading with any
+attached Pipe backend device is unsupported**, including menu/bootstrap states,
+unused pipes, and mixed physical/pipe configurations. The kernel FIFO, writer
+process, parsed partial command, completed private stage, and guest memory do
+not share a rewind boundary. Serializing just bookend counters would falsely
+associate old requests with newer external bytes.
+
+After decoding the existing SI state layout, load invalidates every attached
+pipe, discards private stages/partial parsing, clears restored pending requests
+and both bookend identities, marks SI no-response, and queues the existing
+asynchronous emulation stop. It never publishes a restored or newly buffered
+cohort. Loading again cannot clear an existing fault or restore ready registers;
+the stop request remains idempotent. Host polling cannot consume faulted pipes.
+
+Recovery requires explicit session teardown and fresh pipe device/FIFO writer
+connections, not another load, header, or SI-only reset. Physical-only/no-pipes
+savestates retain normal behavior. No serialized fields or global savestate
+version change: older SI states use the same fail-closed rule when pipes are
+attached. This is an intentional capability restriction of this workaround,
+not deterministic FIFO rewind support.
+
 ## Runner dependency
 
 Inputs still use libmelee FIFOs, **not DAP input**. No protocol, socket, or SDK

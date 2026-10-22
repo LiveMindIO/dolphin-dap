@@ -343,6 +343,34 @@ void SerialInterfaceManager::DoState(PointerWrap& p)
   p.Do(m_status_reg);
   p.Do(m_exi_clock_count);
   p.Do(m_si_buffer);
+
+  if (p.IsReadMode())
+  {
+    // FIFOs and the external writer cannot rewind with emulator memory. Even
+    // a menu/bootstrap load can replay requests against newer buffered bytes.
+    bool has_live_pipe = false;
+#ifdef CIFACE_USE_PIPES
+    {
+      std::lock_guard devices_lock(g_controller_interface.GetDevicesMutex());
+      for (const auto& device : g_controller_interface.GetAllDevices())
+      {
+        if (auto pipe = std::dynamic_pointer_cast<ciface::Pipes::PipeDevice>(device))
+        {
+          pipe->InvalidateAcquisition();
+          has_live_pipe = true;
+        }
+      }
+    }
+#endif
+    m_guest_bookend_sequence = 0;
+    ciface::Pipes::g_gameplay_bookend_sequence.store(0, std::memory_order_release);
+    if (has_live_pipe || m_guest_acquisition_faulted)
+    {
+      ciface::Pipes::ClearInputRequests();
+      // Keep pipe consumption suppressed until explicit session teardown.
+      FailGuestAcquisition("savestate_load_with_external_pipes");
+    }
+  }
 }
 
 void SerialInterfaceManager::RegisterEvents()
@@ -828,17 +856,19 @@ void SerialInterfaceManager::UpdateDevices()
 
 bool SerialInterfaceManager::FailGuestAcquisition(const char* reason)
 {
+  // A load can overwrite registers after an earlier fault. Never expose those
+  // restored responses, even when the stop request was already queued.
+  for (u32 channel = 0; channel < MAX_SI_CHANNELS; ++channel)
+  {
+    SetNoResponse(channel);
+    m_status_reg.hex &= ~GetRDSTBit(channel);
+  }
+  UpdateInterrupts();
   if (!m_guest_acquisition_faulted)
   {
     m_guest_acquisition_faulted = true;
     ERROR_LOG_FMT(SLIPPI_INPUT, "event=guest_pipe_acquisition_fault reason={} stopping_emulation",
                   reason);
-    for (u32 channel = 0; channel < MAX_SI_CHANNELS; ++channel)
-    {
-      SetNoResponse(channel);
-      m_status_reg.hex &= ~GetRDSTBit(channel);
-    }
-    UpdateInterrupts();
     // Same CPU-safe asynchronous stop as HLE_Misc::HBReload. Core::Stop waits
     // for the CPU and must never be called here on that CPU thread.
     m_system.GetCPU().BreakWithoutDebugStop();

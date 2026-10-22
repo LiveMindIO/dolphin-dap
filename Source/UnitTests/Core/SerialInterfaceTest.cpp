@@ -586,6 +586,115 @@ TEST_F(CompleteAcquisitionTest, DelayedFullFlushCannotCreatePermanentOneFrameDeb
   EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0u);
 }
 
+TEST_F(CompleteAcquisitionTest, SaveStateLoadInvalidatesStagedAndPartialExternalBatches)
+{
+  Write(0, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  Write(1, "PRESS A\nSET MAIN .9");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+  EXPECT_EQ(m_pipes[0]->PrepareBatch(deadline, [] { return false; }),
+            ciface::Pipes::PipeDevice::Acquisition::Complete);
+  EXPECT_EQ(m_pipes[1]->PrepareBatch(deadline, [] { return false; }),
+            ciface::Pipes::PipeDevice::Acquisition::TimedOut);
+  Bookend(1);
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend, 2);
+  auto& si = m_system->GetSerialInterface();
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  // Saving does not commit staging, stop emulation, or consume the writer turn.
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+  for (int load = 0; load < 2; ++load)
+  {
+    ptr = state.data();
+    PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+    si.DoState(reader);
+    EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+    EXPECT_EQ(ciface::Pipes::g_gameplay_bookend_sequence.load(), 0u);
+    EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+    EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & (SI_RDST0 | SI_RDST1), 0u);
+    for (int port = 0; port < 2; ++port)
+    {
+      // Neither an old completed stage nor newly supplied suffix can commit.
+      Write(port, " .1\nFLUSH\n");
+      m_pipes[port]->CommitBatch();
+      EXPECT_EQ(m_pipes[port]->FindInput("Button A")->GetState(), 0.0);
+      EXPECT_EQ(m_pipes[port]->PrepareBatch(std::chrono::steady_clock::now() +
+                                                std::chrono::milliseconds(10),
+                                            [] { return false; }),
+                ciface::Pipes::PipeDevice::Acquisition::Disconnected);
+    }
+    Bookend(2);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+    EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  }
+}
+
+TEST_F(CompleteAcquisitionTest, MenuStateCannotResumeNewerExternalWriter)
+{
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  auto& si = m_system->GetSerialInterface();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  Write(0, "PRESS A\nFLUSH\n");
+  Write(1, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  ptr = state.data();
+  PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+  si.DoState(reader);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 1u);
+}
+
+TEST_F(CompleteAcquisitionTest, LoadCannotClearFaultAndFreshSessionNeedsFreshPipeDevices)
+{
+  auto& si = m_system->GetSerialInterface();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  close(m_writers[1]);
+  m_writers[1] = -1;
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  ptr = state.data();
+  PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+  si.DoState(reader);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+  si.Shutdown();
+  ciface::Pipes::BeginGameplayInput();
+  EXPECT_EQ(
+      m_pipes[0]->PrepareBatch(std::chrono::steady_clock::now() + std::chrono::milliseconds(10),
+                               [] { return false; }),
+      ciface::Pipes::PipeDevice::Acquisition::Disconnected);
+  for (int port = 0; port < 2; ++port)
+  {
+    g_controller_interface.RemoveDevice(
+        [&](const ciface::Core::Device* device) { return device == m_pipes[port].get(); });
+    if (m_writers[port] >= 0)
+      close(m_writers[port]);
+    BindPipe(port);
+    Write(port, "PRESS A\nFLUSH\n");
+  }
+  ciface::Pipes::BeginGameplayInput();
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 1u);
+}
+
 TEST_F(CompleteAcquisitionTest, RealBookendBeforeNextScheduledPollStillRequiresCompleteBatch)
 {
   Write(0, "RELEASE A\nFLUSH\n");

@@ -221,6 +221,8 @@ void PipeDevice::PublishControls()
 
 void PipeDevice::CommitBatch()
 {
+  if (m_acquisition_faulted)
+    return;
   PublishControls();
   ++m_batch_sequence;
   DEBUG_LOG_FMT(SLIPPI_INPUT, "event=pipe_batch_consumed device={} batch_sequence={}", m_name,

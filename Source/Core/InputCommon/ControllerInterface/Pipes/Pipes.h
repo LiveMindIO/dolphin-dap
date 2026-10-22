@@ -49,7 +49,12 @@ public:
   Acquisition PrepareBatch(std::chrono::steady_clock::time_point deadline,
                            const std::function<bool()>& cancelled);
   void CommitBatch();
-  void InvalidateAcquisition() { m_acquisition_faulted = true; }
+  void InvalidateAcquisition()
+  {
+    m_acquisition_faulted = true;
+    m_pending_controls.clear();
+    m_buf.clear();
+  }
 
 private:
   class PipeInput : public Input
