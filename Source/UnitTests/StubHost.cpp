@@ -4,10 +4,22 @@
 // Stub implementation of the Host_* callbacks for tests. These implementations
 // do nothing except return default values when required.
 
+#include <atomic>
 #include <string>
 #include <vector>
 
 #include "Core/Host.h"
+#include "StubHost.h"
+
+namespace
+{
+std::atomic<u64> s_stop_requests{0};
+}
+
+u64 UnitTests::GetHostStopRequestCount()
+{
+  return s_stop_requests.load();
+}
 
 std::vector<std::string> Host_GetPreferredLocales()
 {
@@ -19,8 +31,10 @@ void Host_PPCSymbolsChanged()
 void Host_PPCBreakpointsChanged()
 {
 }
-void Host_Message(HostMessageID)
+void Host_Message(HostMessageID id)
 {
+  if (id == HostMessageID::WMUserStop)
+    ++s_stop_requests;
 }
 void Host_UpdateTitle(const std::string&)
 {

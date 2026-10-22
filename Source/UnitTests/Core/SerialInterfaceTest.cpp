@@ -4,10 +4,14 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <string_view>
+#include <thread>
 
 #ifndef _WIN32
+#include "../StubHost.h"
+
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -20,12 +24,20 @@
 #include "Common/WindowSystemInfo.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/AddressSpace.h"
+#include "Core/HW/CPU.h"
+#include "Core/HW/GCPad.h"
+#include "Core/HW/GCPadEmu.h"
 #include "Core/HW/MMIO.h"
+#include "Core/HW/Memmap.h"
 #include "Core/HW/SI/SI.h"
 #include "Core/HW/SI/SI_Device.h"
+#include "Core/HW/SI/SI_DeviceGCController.h"
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
 #include "Core/Movie.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
@@ -478,6 +490,594 @@ TEST_F(SerialInterfaceTest, DefaultPollingMatchesLegacySlippi)
 }
 
 #ifndef _WIN32
+class CompleteAcquisitionTest : public SerialInterfaceTest
+{
+protected:
+  void SetUp() override
+  {
+    SerialInterfaceTest::SetUp();
+    ASSERT_TRUE(Pad::GetConfig()->ControllersNeedToBeCreated());
+    for (int i = 0; i < 4; ++i)
+      Pad::GetConfig()->CreateController<GCPad>(i);
+    Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});
+    Config::SetCurrent(Config::SLIPPI_BLOCKING_PIPES, false);
+    for (int i = 0; i < 2; ++i)
+      BindPipe(i);
+    ciface::Pipes::BeginGameplayInput();
+  }
+
+  void BindPipe(int i)
+  {
+    int fds[2];
+    ASSERT_EQ(pipe(fds), 0);
+    ASSERT_NE(fcntl(fds[0], F_SETFL, O_NONBLOCK), -1);
+    m_writers[i] = fds[1];
+    m_pipes[i] =
+        std::make_shared<ciface::Pipes::PipeDevice>(fds[0], "Complete" + std::to_string(i));
+    ASSERT_TRUE(g_controller_interface.AddDevice(m_pipes[i]));
+    ciface::Core::DeviceQualifier qualifier;
+    qualifier.FromDevice(m_pipes[i].get());
+    Pad::GetConfig()->GetController(i)->SetDefaultDevice(qualifier);
+    auto device = std::make_unique<PipeBackedSIDevice>(*m_system, i, m_pipes[i]);
+    m_pipe_si[i] = device.get();
+    m_system->GetSerialInterface().AddDevice(std::move(device));
+  }
+
+  void TearDown() override
+  {
+    m_system->GetSerialInterface().Shutdown();
+    Pad::GetConfig()->ClearControllers();
+    for (int i = 0; i < 4; ++i)
+    {
+      if (m_writers[i] >= 0)
+        close(m_writers[i]);
+      g_controller_interface.RemoveDevice(
+          [&](const ciface::Core::Device* device) { return device == m_pipes[i].get(); });
+    }
+    SerialInterfaceTest::TearDown();
+  }
+
+  void Write(int port, std::string_view text)
+  {
+    EXPECT_EQ(write(m_writers[port], text.data(), text.size()), static_cast<ssize_t>(text.size()));
+  }
+
+  void Bookend(int frame)
+  {
+    ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend,
+                                     frame);
+    m_system->GetSerialInterface().UpdateDevices();
+  }
+
+  std::array<int, 4> m_writers{{-1, -1, -1, -1}};
+  std::array<std::shared_ptr<ciface::Pipes::PipeDevice>, 4> m_pipes{};
+  std::array<PipeBackedSIDevice*, 4> m_pipe_si{};
+};
+
+TEST_F(CompleteAcquisitionTest, DelayedFullFlushCannotCreatePermanentOneFrameDebt)
+{
+  // An aligned cohort, followed by the recorded underflow ordering.
+  Write(0, "RELEASE A\nFLUSH\n");
+  Write(1, "RELEASE A\nFLUSH\n");
+  Bookend(100);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  Bookend(101);
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    Write(0, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    Write(1, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  });
+  const u32 first = m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI);
+  writer.join();
+  EXPECT_EQ(first, 0x01230000u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0x01230000u);
+  for (u32 port = 0; port < 2; ++port)
+  {
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12 * port), 0x04560000u);
+    EXPECT_EQ(m_pipe_si[port]->GetDataCount(), 2u);
+  }
+  for (u32 port = 2; port < 4; ++port)
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12 * port), 0x56780001u);
+  // A scheduled poll without another real bookend must not consume release.
+  m_system->GetSerialInterface().UpdateDevices();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  Bookend(102);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, SaveStateLoadInvalidatesStagedAndPartialExternalBatches)
+{
+  Write(0, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  Write(1, "PRESS A\nSET MAIN .9");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+  EXPECT_EQ(m_pipes[0]->PrepareBatch(deadline, [] { return false; }),
+            ciface::Pipes::PipeDevice::Acquisition::Complete);
+  EXPECT_EQ(m_pipes[1]->PrepareBatch(deadline, [] { return false; }),
+            ciface::Pipes::PipeDevice::Acquisition::TimedOut);
+  Bookend(1);
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend, 2);
+  auto& si = m_system->GetSerialInterface();
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  // Saving does not commit staging, stop emulation, or consume the writer turn.
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_TRUE(ciface::Pipes::IsInputRequested());
+  for (int load = 0; load < 2; ++load)
+  {
+    ptr = state.data();
+    PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+    si.DoState(reader);
+    EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+    EXPECT_EQ(ciface::Pipes::g_gameplay_bookend_sequence.load(), 0u);
+    EXPECT_FALSE(ciface::Pipes::IsInputRequested());
+    EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & (SI_RDST0 | SI_RDST1), 0u);
+    for (int port = 0; port < 2; ++port)
+    {
+      // Neither an old completed stage nor newly supplied suffix can commit.
+      Write(port, " .1\nFLUSH\n");
+      m_pipes[port]->CommitBatch();
+      EXPECT_EQ(m_pipes[port]->FindInput("Button A")->GetState(), 0.0);
+      EXPECT_EQ(m_pipes[port]->PrepareBatch(std::chrono::steady_clock::now() +
+                                                std::chrono::milliseconds(10),
+                                            [] { return false; }),
+                ciface::Pipes::PipeDevice::Acquisition::Disconnected);
+    }
+    Bookend(2);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+    EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  }
+}
+
+TEST_F(CompleteAcquisitionTest, MenuStateCannotResumeNewerExternalWriter)
+{
+  ciface::Pipes::PublishInputState(false, true, ciface::Pipes::InputRequestSource::MenuFrame);
+  auto& si = m_system->GetSerialInterface();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  Write(0, "PRESS A\nFLUSH\n");
+  Write(1, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  ptr = state.data();
+  PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+  si.DoState(reader);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 1u);
+}
+
+TEST_F(CompleteAcquisitionTest, LoadCannotClearFaultAndFreshSessionNeedsFreshPipeDevices)
+{
+  auto& si = m_system->GetSerialInterface();
+  std::array<u8, 4096> state{};
+  u8* ptr = state.data();
+  PointerWrap writer(&ptr, state.size(), PointerWrap::Mode::Write);
+  si.DoState(writer);
+  close(m_writers[1]);
+  m_writers[1] = -1;
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  ptr = state.data();
+  PointerWrap reader(&ptr, state.size(), PointerWrap::Mode::Read);
+  si.DoState(reader);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+  si.Shutdown();
+  ciface::Pipes::BeginGameplayInput();
+  EXPECT_EQ(
+      m_pipes[0]->PrepareBatch(std::chrono::steady_clock::now() + std::chrono::milliseconds(10),
+                               [] { return false; }),
+      ciface::Pipes::PipeDevice::Acquisition::Disconnected);
+  for (int port = 0; port < 2; ++port)
+  {
+    g_controller_interface.RemoveDevice(
+        [&](const ciface::Core::Device* device) { return device == m_pipes[port].get(); });
+    if (m_writers[port] >= 0)
+      close(m_writers[port]);
+    BindPipe(port);
+    Write(port, "PRESS A\nFLUSH\n");
+  }
+  ciface::Pipes::BeginGameplayInput();
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 1u);
+}
+
+TEST_F(CompleteAcquisitionTest, RealBookendBeforeNextScheduledPollStillRequiresCompleteBatch)
+{
+  Write(0, "RELEASE A\nFLUSH\n");
+  Write(1, "RELEASE A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  ciface::Pipes::PublishInputState(true, true, ciface::Pipes::InputRequestSource::FrameBookend, 2);
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    Write(0, "PRESS A\nFLUSH\n");
+    Write(1, "PRESS A\nFLUSH\n");
+  });
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  writer.join();
+}
+
+TEST_F(CompleteAcquisitionTest, PartialCommandsAndCompletedPortRemainPrivateUntilWholeFlushCohort)
+{
+  Write(0, "PRESS A\nSET MAIN .9 .1\nSET C .2 .8\nSET L .7\n");
+  Bookend(1);
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+    EXPECT_EQ(m_pipes[0]->FindInput("Axis MAIN X +")->GetState(), 0.5);
+    Write(0, "FLUSH\nRELEASE A\nFLUSH\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+    Write(1, "PRESS A\nFLUSH\n");
+  });
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  writer.join();
+  EXPECT_EQ(m_pipes[0]->FindInput("Axis MAIN X +")->GetState(), 0.8);
+  EXPECT_DOUBLE_EQ(m_pipes[0]->FindInput("Axis C X -")->GetState(), 0.6);
+  EXPECT_DOUBLE_EQ(m_pipes[0]->FindInput("Axis C Y +")->GetState(), 0.6);
+  EXPECT_DOUBLE_EQ(m_pipes[0]->FindInput("Axis L +")->GetState(), 0.7);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0x01230000u);
+}
+
+TEST_F(CompleteAcquisitionTest, WatchdogFaultNeverPacksOrCommitsPartialGeneration)
+{
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    Write(0, "PRESS A\nFLUSH\n");
+  });
+  Bookend(1);
+  const auto start = std::chrono::steady_clock::now();
+  const auto stops = UnitTests::GetHostStopRequestCount();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  writer.join();
+  EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+  EXPECT_LT(elapsed, std::chrono::milliseconds(1400));
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_EQ(m_pipe_si[1]->GetDataCount(), 0u);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+  const auto status = m_mapping->Read<u32>(*m_system, SI_STATUS_REG);
+  EXPECT_NE(status & SI_NOREP0, 0u);
+  EXPECT_EQ(status & (SI_RDST0 | SI_RDST1), 0u);
+  Write(1, "PRESS A\nFLUSH\n");
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO), 0u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_EQ(UnitTests::GetHostStopRequestCount(), stops + 1);
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x80, 0x40000000);
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x34, 0x00000701);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_MMIO_BASE + 0x34) & (1u << 29), 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, EstablishedWriterEofIsImmediateFaultNotStaleSuccess)
+{
+  Write(0, "PRESS A\nFLUSH\n");
+  close(m_writers[1]);
+  m_writers[1] = -1;
+  Bookend(1);
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, HeaderHasNoWriterResponseWait)
+{
+  m_system->GetSerialInterface().UpdateDevices();
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 1u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, LifecycleCancellationDoesNotCommitOrPack)
+{
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  std::thread stop([] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ciface::Pipes::PublishInputState(false, false);
+  });
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  stop.join();
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+}
+
+TEST_F(CompleteAcquisitionTest, PhysicalAndUnboundPipesAreNotWaitedOn)
+{
+  Pad::GetConfig()->GetController(1)->SetDefaultDevice(
+      ciface::Core::DeviceQualifier{"SDL", 0, "physical"});
+  m_system->GetSerialInterface().AddDevice(std::make_unique<CountingSIDevice>(*m_system, 1));
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0x12340000u);
+}
+
+TEST_F(CompleteAcquisitionTest, ExplicitPipeReferenceUnderPhysicalDefaultIsAcquired)
+{
+  for (int port = 0; port < 2; ++port)
+    Pad::GetConfig()->GetController(port)->SetDefaultDevice(
+        ciface::Core::DeviceQualifier{"SDL", 0, "physical"});
+  ciface::Core::DeviceQualifier binding;
+  binding.FromDevice(m_pipes[0].get());
+  Pad::GetGroup(0, PadGroup::Buttons)
+      ->controls[0]
+      ->control_ref->SetExpression(
+          std::string{"`"}.append(binding.ToString()).append(":Button A`"));
+  Bookend(1);
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    Write(0, "PRESS A\nFLUSH\n");
+  });
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  writer.join();
+}
+
+TEST_F(CompleteAcquisitionTest, ReplacementIsResolvedFromCurrentBindingNotOldPipeObject)
+{
+  g_controller_interface.RemoveDevice(
+      [&](const ciface::Core::Device* device) { return device == m_pipes[0].get(); });
+  auto old = m_pipes[0];
+  Write(0, "RELEASE A\nFLUSH\n");
+  close(m_writers[0]);
+  BindPipe(0);
+  Write(0, "PRESS A\nFLUSH\n");
+  Write(1, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(old->FindInput("Button A")->GetState(), 0.0);
+}
+
+TEST_F(CompleteAcquisitionTest, AllFourActualBindingsAcquiredIncludingUnpluggedSiPorts)
+{
+  BindPipe(2);
+  BindPipe(3);
+  Config::SetCurrent(Config::GetInfoForSIDevice(3), SerialInterface::SIDEVICE_NONE);
+  m_system->GetSerialInterface().AddDevice(SerialInterface::SIDEVICE_NONE, 3);
+  for (int port = 0; port < 4; ++port)
+    Write(port, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  for (int port = 0; port < 4; ++port)
+    EXPECT_EQ(m_pipes[port]->FindInput("Button A")->GetState(), 1.0);
+  for (int port = 0; port < 3; ++port)
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12 * port), 0x04560000u);
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  for (int port = 0; port < 4; ++port)
+    EXPECT_EQ(m_pipes[port]->FindInput("Button A")->GetState(), 0.0);
+}
+
+TEST_F(CompleteAcquisitionTest, FourActivePortsKeepAllLoWordsInOneGeneration)
+{
+  BindPipe(2);
+  BindPipe(3);
+  for (int port = 0; port < 4; ++port)
+    Write(port, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  for (int port : {3, 1, 2, 0})
+  {
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 12 * port), 0x01230000u);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12 * port), 0x04560000u);
+    EXPECT_EQ(m_pipe_si[port]->GetDataCount(), 1u);
+  }
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI + 36), 0u);
+  for (int port = 0; port < 4; ++port)
+  {
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12 * port), 0u);
+    EXPECT_EQ(m_pipe_si[port]->GetDataCount(), 2u);
+  }
+}
+
+TEST_F(CompleteAcquisitionTest, TwoPadsBoundToSamePipeConsumeOnlyOneBatch)
+{
+  ciface::Core::DeviceQualifier binding;
+  binding.FromDevice(m_pipes[0].get());
+  Pad::GetConfig()->GetController(1)->SetDefaultDevice(binding);
+  m_system->GetSerialInterface().AddDevice(
+      std::make_unique<PipeBackedSIDevice>(*m_system, 1, m_pipes[0]));
+  Write(0, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), 0x01230000u);
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, BareFlushIsOneHeldInputTurnNotDeduplicatedOrDropped)
+{
+  for (int port = 0; port < 2; ++port)
+    Write(port, "PRESS A\nFLUSH\nFLUSH\nRELEASE A\nFLUSH\n");
+  for (int frame = 1; frame <= 3; ++frame)
+  {
+    Bookend(frame);
+    const auto expected = frame < 3 ? 0x01230000u : 0u;
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), expected);
+    EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI), expected);
+    EXPECT_EQ(m_pipe_si[0]->GetDataCount(), static_cast<u32>(frame));
+  }
+}
+
+TEST_F(CompleteAcquisitionTest, NewHeaderRetiresEligibilityWithoutWaitingForAResponse)
+{
+  Write(0, "PRESS A\nFLUSH\n");
+  Write(1, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  ciface::Pipes::BeginGameplayInput();
+  m_system->GetSerialInterface().UpdateDevices();
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0x01230000u);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(200));
+  Write(0, "RELEASE A\nFLUSH\n");
+  Write(1, "RELEASE A\nFLUSH\n");
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, NativeSessionResetCannotPublishPreviouslyFaultedPipeCohort)
+{
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  std::thread cancel([] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ciface::Pipes::PublishInputState(false, false);
+  });
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  cancel.join();
+  auto& si = m_system->GetSerialInterface();
+  si.Shutdown();
+  m_system->GetCoreTiming().Init();
+  Common::ScopeGuard shutdown_timing([&] { m_system->GetCoreTiming().Shutdown(); });
+  si.Init();
+  EXPECT_EQ(ciface::Pipes::g_input_state.load(), 0u);
+  for (int port = 0; port < 2; ++port)
+  {
+    auto device = std::make_unique<PipeBackedSIDevice>(*m_system, port, m_pipes[port]);
+    m_pipe_si[port] = device.get();
+    si.AddDevice(std::move(device));
+    Write(port, "PRESS A\nFLUSH\n");
+  }
+  ciface::Pipes::BeginGameplayInput();
+  Bookend(2);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), 0.0);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, MissingActualBindingFaultsWithoutUsingRetainedDevice)
+{
+  g_controller_interface.RemoveDevice(
+      [&](const ciface::Core::Device* device) { return device == m_pipes[1].get(); });
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), 0u);
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), 0u);
+  EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+}
+
+TEST_F(CompleteAcquisitionTest, DirectTransferUsesSameCompleteCohortAsAllHiLoReads)
+{
+  auto& si = m_system->GetSerialInterface();
+  for (int port = 0; port < 2; ++port)
+  {
+    Pad::GetGroup(port, PadGroup::Buttons)->controls[0]->control_ref->SetExpression("`Button A`");
+    Pad::GetConfig()->GetController(port)->UpdateReferences(g_controller_interface);
+    si.AddDevice(std::make_unique<SerialInterface::CSIDevice_GCController>(
+        *m_system, SerialInterface::SIDEVICE_GC_CONTROLLER, port));
+  }
+  Bookend(1);
+  std::thread writer([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    Write(0, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    Write(1, "PRESS A\nFLUSH\nRELEASE A\nFLUSH\n");
+  });
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x80, 0x40000000);
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x34, 0x00000701);
+  writer.join();
+  const auto high = m_mapping->Read<u32>(*m_system, SI_MMIO_BASE + 0x80);
+  const auto low = m_mapping->Read<u32>(*m_system, SI_MMIO_BASE + 0x84);
+  EXPECT_NE(high & 0x01000000, 0u);
+  EXPECT_EQ(high, m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI));
+  EXPECT_EQ(low, m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO));
+  EXPECT_EQ(high, m_mapping->Read<u32>(*m_system, SI_CHANNEL_1_IN_HI));
+  EXPECT_EQ(low, m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_LO + 12));
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_MMIO_BASE + 0x34) & (1u << 29), 0u);
+  Bookend(2);
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x80, 0x40000000);
+  m_mapping->Write<u32>(*m_system, SI_MMIO_BASE + 0x34, 0x00000701);
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_MMIO_BASE + 0x80) & 0x01000000, 0u);
+}
+
+class CompleteAcquisitionCpuTest : public CompleteAcquisitionTest,
+                                   public testing::WithParamInterface<bool>
+{
+protected:
+  void SetUp() override
+  {
+    CompleteAcquisitionTest::SetUp();
+    m_system->GetMemory().Init();
+    AddressSpace::Init();
+    m_system->GetCoreTiming().Init();
+    m_system->GetCPU().Init(PowerPC::CPUCore::Interpreter);
+    m_system->GetCPU().SetStepping(false);
+  }
+
+  void TearDown() override
+  {
+    m_system->GetCPU().Shutdown();
+    m_system->GetMemory().Shutdown();
+    AddressSpace::Shutdown();
+    m_system->GetCoreTiming().Shutdown();
+    // Discard the stop job in this unbooted test core, before the next fixture.
+    Core::HostDispatchJobs(*m_system);
+    CompleteAcquisitionTest::TearDown();
+  }
+};
+
+TEST_P(CompleteAcquisitionCpuTest, ShutdownCancelsButPauseFinishesRealPendingCohort)
+{
+  ASSERT_EQ(m_system->GetCPU().GetState(), CPU::State::Running);
+  Write(0, "PRESS A\nFLUSH\n");
+  Bookend(1);
+  std::thread pause([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (GetParam())
+      m_system->GetCPU().Stop();
+    else
+    {
+      m_system->GetCPU().BreakWithoutDebugStop();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      Write(1, "PRESS A\nFLUSH\n");
+    }
+  });
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(m_mapping->Read<u32>(*m_system, SI_CHANNEL_0_IN_HI), GetParam() ? 0u : 0x01230000u);
+  // Distinguish cancellation/completion from the one-second fault watchdog,
+  // not host thread-join latency (the loaded ARM CI host exceeded 200 ms).
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(900));
+  pause.join();
+  EXPECT_EQ(m_pipe_si[0]->GetDataCount(), GetParam() ? 0u : 1u);
+  EXPECT_EQ(m_pipe_si[1]->GetDataCount(), GetParam() ? 0u : 1u);
+  EXPECT_EQ(m_pipes[0]->FindInput("Button A")->GetState(), GetParam() ? 0.0 : 1.0);
+  if (GetParam())
+    EXPECT_NE(m_mapping->Read<u32>(*m_system, SI_STATUS_REG) & SI_NOREP0, 0u);
+  else
+    EXPECT_EQ(m_system->GetCPU().GetState(), CPU::State::Stepping);
+}
+
+INSTANTIATE_TEST_SUITE_P(PauseAndStop, CompleteAcquisitionCpuTest, testing::Bool());
+
 TEST_F(SerialInterfaceTest, NonblockingGameplayConsumesEachBatchOnlyAtGuestRead)
 {
   Config::SetCurrent(Config::MAIN_POLLING_METHOD, std::string{"OnSIRead"});

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,12 +28,33 @@ std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* co
 class PipeDevice : public Core::Device
 {
 public:
+  enum class Acquisition
+  {
+    Complete,
+    Unavailable,
+    Disconnected,
+    Cancelled,
+    TimedOut,
+  };
+
   PipeDevice(int fd, std::string name);
   ~PipeDevice();
 
   Core::DeviceRemoval UpdateInput() override;
   std::string GetName() const override { return m_name; }
   std::string GetSource() const override { return "Pipe"; }
+
+  // The caller owns the controller-interface device lock. Prepare exactly one
+  // FLUSH without publishing any controls; commit only after the whole cohort.
+  Acquisition PrepareBatch(std::chrono::steady_clock::time_point deadline,
+                           const std::function<bool()>& cancelled);
+  void CommitBatch();
+  void InvalidateAcquisition()
+  {
+    m_acquisition_faulted = true;
+    m_pending_controls.clear();
+    m_buf.clear();
+  }
 
 private:
   class PipeInput : public Input
@@ -50,6 +73,8 @@ private:
   void AddAxis(const std::string& name, double value);
   bool ParseCommand(const std::string& command);
   void SetAxis(const std::string& entry, double value);
+  Acquisition ReadBatch();
+  void PublishControls();
 
   const int m_fd;
   const std::string m_name;
@@ -57,5 +82,7 @@ private:
   u64 m_batch_sequence = 0;
   std::map<std::string, PipeInput*> m_buttons;
   std::map<std::string, PipeInput*> m_axes;
+  std::map<PipeInput*, ControlState> m_pending_controls;
+  bool m_acquisition_faulted = false;
 };
 }  // namespace ciface::Pipes

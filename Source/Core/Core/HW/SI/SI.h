@@ -80,6 +80,9 @@ private:
   void SetNoResponse(u32 channel);
   bool IsPipeResponsePartiallyLatched() const;
   void PollDevice(u32 channel);
+  bool SampleGuestGeneration();
+  bool AcquireGuestPipes();
+  bool FailGuestAcquisition(const char* reason);
   void UpdateInterrupts();
   void GenerateSIInterrupt(SIInterruptType type);
 
@@ -251,6 +254,8 @@ private:
   USIStatusReg m_status_reg;
   USIEXIClockCount m_exi_clock_count;
   std::array<u8, BUFFER_SIZE> m_si_buffer{};
+  bool m_guest_acquisition_faulted = false;
+  u64 m_guest_bookend_sequence = 0;
 
   Core::System& m_system;
 };

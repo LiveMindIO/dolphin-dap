@@ -5,9 +5,15 @@ It does not require `[Slippi] BlockingPipes = true`.
 
 With blocking pipes disabled:
 
+- Synchronized, frame-bookended pipe gameplay now uses the
+  [synchronized guest FIFO acquisition workaround](synchronized-guest-fifo-acquisition.md).
+  It deliberately waits despite `BlockingPipes=false`; see its Runner dependency,
+  watchdog behavior and limitations. The nonwaiting description below applies
+  before that managed acquisition is established.
 - Scheduled SI updates arm guest reads at the legacy 123-scanline interval.
-- During gameplay, the first guest input-HI read consumes at most one complete
-  pipe batch per device, without waiting for a writer. It snapshots every GC
+- Without an established synchronized bookend, the first guest input-HI read
+  consumes at most one complete pipe batch per device, without waiting for a
+  writer. It snapshots every GC
   channel together; later channel reads use that generation. Input-LO remains
   paired with the captured response.
 - Scheduled, GUI, and hotkey updates cannot consume gameplay pipe batches.

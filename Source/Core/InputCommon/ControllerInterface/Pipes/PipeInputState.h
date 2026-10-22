@@ -61,6 +61,7 @@ struct PendingInputRequest
 constexpr u8 SYNCHRONIZE_GAMEPLAY = 1 << 0;
 
 extern std::atomic<u8> g_input_state;
+inline std::atomic<u64> g_gameplay_bookend_sequence{0};
 extern std::atomic<u64> g_pending_input_requests;
 extern std::mutex g_input_request_mutex;
 extern std::deque<PendingInputRequest> g_pending_input_request_queue;
@@ -95,6 +96,8 @@ inline void PublishInputState(bool synchronize_gameplay, bool request_input,
                               s32 frame = INPUT_FRAME_UNKNOWN)
 {
   g_input_state.store(synchronize_gameplay ? SYNCHRONIZE_GAMEPLAY : 0, std::memory_order_release);
+  if (!synchronize_gameplay)
+    g_gameplay_bookend_sequence.store(0, std::memory_order_release);
 
   if (request_input)
   {
@@ -105,6 +108,8 @@ inline void PublishInputState(bool synchronize_gameplay, bool request_input,
     g_last_input_request_frame.store(frame, std::memory_order_relaxed);
     g_last_input_request_source.store(static_cast<u8>(source), std::memory_order_relaxed);
     g_input_request_sequence.store(sequence, std::memory_order_release);
+    if (synchronize_gameplay && source == InputRequestSource::FrameBookend)
+      g_gameplay_bookend_sequence.store(sequence, std::memory_order_release);
     g_pending_input_request_queue.push_back(
         {synchronize_gameplay, sequence, request_us, frame, source});
     g_pending_input_requests.store(g_pending_input_request_queue.size(), std::memory_order_release);
@@ -174,6 +179,7 @@ inline void BeginGameplayInput()
   // A game header is not a completed frame to which the writer can respond.
   // Retire menu requests and wait only after the first real frame bookend.
   ClearInputRequests();
+  g_gameplay_bookend_sequence.store(0, std::memory_order_release);
   PublishInputState(true, false, InputRequestSource::GameStart);
 }
 
