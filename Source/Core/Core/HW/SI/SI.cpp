@@ -3,13 +3,14 @@
 
 #include "Core/HW/SI/SI.h"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
-
-#if defined(_DEBUG)
 #include <vector>
 
+#if defined(_DEBUG)
 #include "Common/StringUtil.h"
 #endif
 
@@ -22,17 +23,27 @@
 #include "Common/Timer.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
+#include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/HW/CPU.h"
+#include "Core/HW/GCPad.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/SI/SI_DeviceGBA.h"
 #include "Core/HW/SystemTimers.h"
+#include "Core/Host.h"
 #include "Core/Movie.h"
 #include "Core/NetPlayProto.h"
 #include "Core/System.h"
 
+#include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
+#include "InputCommon/ControllerEmu/ControllerEmu.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/Pipes/PipeInputState.h"
+#include "InputCommon/InputConfig.h"
+#ifdef CIFACE_USE_PIPES
+#include "InputCommon/ControllerInterface/Pipes/Pipes.h"
+#endif
 
 namespace SerialInterface
 {
@@ -160,7 +171,10 @@ void SerialInterfaceManager::RunSIBuffer(u64 user_data, s64 cycles_late)
 #endif
 
     auto* const device = m_channel[m_com_csr.CHANNEL].device.get();
-    const s32 actual_response_length = device->RunBuffer(m_si_buffer.data(), request_length);
+    const bool direct = m_si_buffer[0] == static_cast<u8>(EBufferCommands::CMD_DIRECT);
+    s32 actual_response_length = -1;
+    if (!direct || SampleGuestGeneration())
+      actual_response_length = device->RunBuffer(m_si_buffer.data(), request_length);
 
     DEBUG_LOG_FMT(SERIALINTERFACE,
                   "RunSIBuffer  chan: {}  request_length: {}  expected_response_length: {}  "
@@ -363,6 +377,10 @@ void SerialInterfaceManager::RemoveEvent(int device_number)
 
 void SerialInterfaceManager::Init()
 {
+  m_guest_acquisition_faulted = false;
+  m_guest_bookend_sequence = 0;
+  ciface::Pipes::PublishInputState(false, false);
+  ciface::Pipes::ClearInputRequests();
   RegisterEvents();
 
   for (int i = 0; i < MAX_SI_CHANNELS; i++)
@@ -396,6 +414,10 @@ void SerialInterfaceManager::Init()
 
 void SerialInterfaceManager::Shutdown()
 {
+  m_guest_acquisition_faulted = false;
+  m_guest_bookend_sequence = 0;
+  ciface::Pipes::PublishInputState(false, false);
+  ciface::Pipes::ClearInputRequests();
   for (int i = 0; i < MAX_SI_CHANNELS; i++)
     RemoveDevice(i);
   GBAConnectionWaiter_Shutdown();
@@ -451,6 +473,8 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
         base | (SI_CHANNEL_0_IN_HI + 0xC * i),
         MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
           auto& si = system.GetSerialInterface();
+          if (si.m_guest_acquisition_faulted)
+            return 0u;
           if (si.IsPollingOnSIRead() && !Config::Get(Config::SLIPPI_BLOCKING_PIPES) &&
               si.m_channel[i].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
           {
@@ -459,23 +483,8 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
             {
               // Sample all ports once per guest-read generation. Scheduled and
               // host polls must not replace a batch before the guest observes it.
-              if (si.m_channel[i].poll_phase != PendingPollPhase::None)
-              {
-                g_controller_interface.SetCurrentInputChannel(
-                    ciface::InputChannel::SerialInterface);
-                ciface::Pipes::g_guest_input_sampling = true;
-                Common::ScopeGuard clear_sampling(
-                    [] { ciface::Pipes::g_guest_input_sampling = false; });
-                g_controller_interface.UpdatePipeInput();
-                for (u32 channel = 0; channel != MAX_SI_CHANNELS; ++channel)
-                {
-                  if (si.m_channel[channel].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
-                  {
-                    si.PollDevice(channel);
-                    si.m_channel[channel].poll_phase = PendingPollPhase::None;
-                  }
-                }
-              }
+              if (!si.SampleGuestGeneration())
+                return 0u;
               si.m_status_reg.hex &= clear_rdst;
               si.UpdateInterrupts();
               return si.m_channel[i].in_hi.hex;
@@ -570,6 +579,8 @@ void SerialInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
     mmio->Register(base | (SI_CHANNEL_0_IN_LO + 0xC * i),
                    MMIO::ComplexRead<u32>([i, clear_rdst](Core::System& system, u32) {
                      auto& si = system.GetSerialInterface();
+                     if (si.m_guest_acquisition_faulted)
+                       return 0u;
                      si.m_status_reg.hex &= clear_rdst;
                      si.UpdateInterrupts();
                      return si.m_channel[i].in_lo.hex;
@@ -727,6 +738,8 @@ void SerialInterfaceManager::ChangeDeviceDeterministic(SIDevices device, int cha
 
 void SerialInterfaceManager::UpdateDevices()
 {
+  if (m_guest_acquisition_faulted)
+    return;
   // Check for device change requests:
   for (int i = 0; i != MAX_SI_CHANNELS; ++i)
   {
@@ -811,6 +824,173 @@ void SerialInterfaceManager::UpdateDevices()
   }
 
   UpdateInterrupts();
+}
+
+bool SerialInterfaceManager::FailGuestAcquisition(const char* reason)
+{
+  if (!m_guest_acquisition_faulted)
+  {
+    m_guest_acquisition_faulted = true;
+    ERROR_LOG_FMT(SLIPPI_INPUT, "event=guest_pipe_acquisition_fault reason={} stopping_emulation",
+                  reason);
+    for (u32 channel = 0; channel < MAX_SI_CHANNELS; ++channel)
+    {
+      SetNoResponse(channel);
+      m_status_reg.hex &= ~GetRDSTBit(channel);
+    }
+    UpdateInterrupts();
+    // Same CPU-safe asynchronous stop as HLE_Misc::HBReload. Core::Stop waits
+    // for the CPU and must never be called here on that CPU thread.
+    m_system.GetCPU().BreakWithoutDebugStop();
+    Core::QueueHostJob(&Core::Stop);
+    Host_Message(HostMessageID::WMUserStop);
+  }
+  return false;
+}
+
+bool SerialInterfaceManager::AcquireGuestPipes()
+{
+#ifdef CIFACE_USE_PIPES
+  if (!Pad::IsInitialized())
+    return true;
+
+  const auto state_lock = ControllerEmu::EmulatedController::GetStateLock();
+  std::vector<ciface::Core::DeviceQualifier> bindings;
+  {
+    for (int port = 0; port < Pad::GetConfig()->GetControllerCount(); ++port)
+    {
+      const auto* controller = Pad::GetConfig()->GetController(port);
+      const auto& binding = controller->GetDefaultDevice();
+      if (binding.source == "Pipe")
+        bindings.push_back(binding);
+      // Explicit device-qualified inputs may use a pipe even when the pad's
+      // default device is physical. Reuse the mapping lexer's qualifiers.
+      for (const auto& group : controller->groups)
+      {
+        for (const auto& control : group->controls)
+        {
+          if (!control->control_ref->IsInput())
+            continue;
+          std::vector<ciface::ExpressionParser::Token> tokens;
+          ciface::ExpressionParser::Lexer(control->control_ref->GetExpression()).Tokenize(tokens);
+          for (const auto& token : tokens)
+          {
+            if (token.type != ciface::ExpressionParser::TOK_CONTROL)
+              continue;
+            ciface::ExpressionParser::ControlQualifier qualifier;
+            qualifier.FromString(token.data);
+            if (qualifier.has_device && qualifier.device_qualifier.source == "Pipe")
+              bindings.push_back(qualifier.device_qualifier);
+          }
+        }
+      }
+    }
+  }
+  // Bound pads include unplugged SI ports: Runner writes those pipes too. Do
+  // not infer management from a port number or wait for physical controllers.
+  std::lock_guard devices_lock(g_controller_interface.GetDevicesMutex());
+  std::vector<std::shared_ptr<ciface::Pipes::PipeDevice>> pipes;
+  for (const auto& binding : bindings)
+  {
+    auto pipe = std::dynamic_pointer_cast<ciface::Pipes::PipeDevice>(
+        g_controller_interface.FindDevice(binding));
+    if (!pipe)
+      return FailGuestAcquisition("bound_pipe_missing");
+    if (std::find(pipes.begin(), pipes.end(), pipe) == pipes.end())
+      pipes.push_back(std::move(pipe));
+  }
+
+  // This is a fault watchdog, not a grace followed by stale success. One
+  // second tolerates scheduler jitter; expiry stops this emulation session.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  bool committed = false;
+  Common::ScopeGuard invalidate_failed_cohort([&] {
+    if (!committed)
+      for (const auto& pipe : pipes)
+        pipe->InvalidateAcquisition();
+  });
+  const bool core_initialized = Core::GetState(m_system) != Core::State::Uninitialized;
+  const bool cpu_active = m_system.GetCPU().GetState() != CPU::State::PowerDown;
+  const auto cancelled = [&] {
+    // A guard or user pause requests Stepping before waiting for this real
+    // instruction to finish. Complete the pending cohort under the same
+    // deadline; the CPU run loop acknowledges idle after the instruction.
+    const auto core_state = Core::GetState(m_system);
+    return core_state == Core::State::Stopping ||
+           (core_initialized && core_state == Core::State::Uninitialized) ||
+           (cpu_active && m_system.GetCPU().GetState() == CPU::State::PowerDown) ||
+           (ciface::Pipes::g_input_state.load(std::memory_order_acquire) &
+            ciface::Pipes::SYNCHRONIZE_GAMEPLAY) == 0;
+  };
+  for (const auto& pipe : pipes)
+  {
+    switch (pipe->PrepareBatch(deadline, cancelled))
+    {
+    case ciface::Pipes::PipeDevice::Acquisition::Complete:
+      break;
+    case ciface::Pipes::PipeDevice::Acquisition::TimedOut:
+      return FailGuestAcquisition("watchdog_expired");
+    case ciface::Pipes::PipeDevice::Acquisition::Cancelled:
+      return FailGuestAcquisition("cancelled");
+    default:
+      return FailGuestAcquisition("writer_disconnected");
+    }
+  }
+  if (cancelled())
+    return FailGuestAcquisition("cancelled");
+  if (std::chrono::steady_clock::now() >= deadline)
+    return FailGuestAcquisition("watchdog_expired");
+  // No controls from any port become visible before all complete FLUSHes.
+  for (const auto& pipe : pipes)
+    pipe->CommitBatch();
+  committed = true;
+#endif
+  return true;
+}
+
+bool SerialInterfaceManager::SampleGuestGeneration()
+{
+  if (m_guest_acquisition_faulted)
+    return false;
+  if (!IsPollingOnSIRead() || Config::Get(Config::SLIPPI_BLOCKING_PIPES) ||
+      (ciface::Pipes::g_input_state.load(std::memory_order_acquire) &
+       ciface::Pipes::SYNCHRONIZE_GAMEPLAY) == 0)
+    return true;
+  const bool pending = std::any_of(m_channel.begin(), m_channel.end(), [](const auto& channel) {
+    return channel.poll_phase != PendingPollPhase::None;
+  });
+  // A real bookend, not another scheduled SI poll, supplies a new writer turn.
+  // Do not consume a second batch when the guest rereads the same generation.
+  const u64 sequence = ciface::Pipes::g_gameplay_bookend_sequence.load(std::memory_order_acquire);
+  const bool established = Pad::IsInitialized() && sequence != 0;
+  if (established)
+  {
+    if (sequence == m_guest_bookend_sequence)
+      return true;
+    if (!AcquireGuestPipes())
+      return false;
+    m_guest_bookend_sequence = sequence;
+  }
+  else
+  {
+    m_guest_bookend_sequence = 0;
+    if (!pending)
+      return true;
+    // Header/bootstrap cannot wait for an as-yet nonexistent frame response.
+    g_controller_interface.SetCurrentInputChannel(ciface::InputChannel::SerialInterface);
+    ciface::Pipes::g_guest_input_sampling = true;
+    Common::ScopeGuard clear_sampling([] { ciface::Pipes::g_guest_input_sampling = false; });
+    g_controller_interface.UpdatePipeInput();
+  }
+  for (u32 channel = 0; channel < MAX_SI_CHANNELS; ++channel)
+  {
+    if (m_channel[channel].device->GetDeviceType() == SIDEVICE_GC_CONTROLLER)
+    {
+      PollDevice(channel);
+      m_channel[channel].poll_phase = PendingPollPhase::None;
+    }
+  }
+  return true;
 }
 
 bool SerialInterfaceManager::IsPollingOnSIRead() const

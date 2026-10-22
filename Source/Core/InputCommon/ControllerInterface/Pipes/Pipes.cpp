@@ -109,6 +109,8 @@ PipeDevice::~PipeDevice()
 
 Core::DeviceRemoval PipeDevice::UpdateInput()
 {
+  if (m_acquisition_faulted)
+    return Core::DeviceRemoval::Keep;
   const bool blocking_pipes = Config::Get(Config::SLIPPI_BLOCKING_PIPES);
   const bool guest_sampled_gameplay =
       !blocking_pipes && ::Core::System::GetInstance().GetSerialInterface().IsPollingOnSIRead() &&
@@ -131,65 +133,98 @@ Core::DeviceRemoval PipeDevice::UpdateInput()
   if (blocking_pipes && g_current_input_update.synchronize_gameplay && !wait_for_input)
     return Core::DeviceRemoval::Keep;
 
+  do
+  {
+    auto result = ReadBatch();
+    if (result == Acquisition::Unavailable && wait_for_input)
+    {
+      result = PrepareBatch(std::chrono::steady_clock::time_point::max(), [] {
+        const auto state = ::Core::GetState(::Core::System::GetInstance());
+        return state == ::Core::State::Paused || state == ::Core::State::Stopping ||
+               state == ::Core::State::Uninitialized;
+      });
+    }
+    if (result != Acquisition::Complete)
+    {
+      // Legacy unsynchronized/menu input does not require FLUSH. Only an
+      // owned gameplay acquisition must keep incomplete commands private.
+      if (!guest_sampled_gameplay && !wait_for_input)
+        PublishControls();
+      return Core::DeviceRemoval::Keep;
+    }
+    CommitBatch();
+    if (guest_sampled_gameplay || (wait_for_input && --remaining_batches == 0))
+      return Core::DeviceRemoval::Keep;
+  } while (true);
+}
+
+PipeDevice::Acquisition PipeDevice::ReadBatch()
+{
+  size_t read_bytes = 0;
   while (true)
   {
-    std::size_t newline = m_buf.find('\n');
-    while (newline != std::string::npos)
+    for (auto newline = m_buf.find('\n'); newline != std::string::npos; newline = m_buf.find('\n'))
     {
-      std::string command = m_buf.substr(0, newline);
+      const auto command = m_buf.substr(0, newline);
       m_buf.erase(0, newline + 1);
       if (ParseCommand(command))
-      {
-        ++m_batch_sequence;
-        DEBUG_LOG_FMT(SLIPPI_INPUT,
-                      "event=pipe_batch_consumed device={} batch_sequence={} requested={} "
-                      "request_sequence={} request_frame={} request_source={} remaining={}",
-                      m_name, m_batch_sequence, wait_for_input,
-                      g_current_input_update.request_sequence, g_current_input_update.request_frame,
-                      InputRequestSourceName(g_current_input_update.request_source),
-                      remaining_batches);
-        if (wait_for_input && --remaining_batches == 0)
-          return Core::DeviceRemoval::Keep;
-        if (guest_sampled_gameplay)
-          return Core::DeviceRemoval::Keep;
-      }
-      newline = m_buf.find('\n');
+        return Acquisition::Complete;
     }
-
     char buf[32];
-    const ssize_t bytes_read = read(m_fd, buf, sizeof buf);
+    // Bound work even for a broken writer streaming commands without FLUSH.
+    if (m_buf.size() > 4096)
+      return Acquisition::Disconnected;
+    if (read_bytes >= 4096)
+      return Acquisition::Unavailable;
+    const ssize_t bytes_read = read(m_fd, buf, sizeof(buf));
     if (bytes_read > 0)
     {
       m_buf.append(buf, bytes_read);
-      continue;
+      read_bytes += bytes_read;
     }
-    if (bytes_read == 0)
-      return Core::DeviceRemoval::Keep;
-    if (errno == EINTR)
-      continue;
-    if (errno != EAGAIN)
-      return Core::DeviceRemoval::Keep;
-    if (!wait_for_input)
-      return Core::DeviceRemoval::Keep;
-
-    pollfd descriptor{m_fd, POLLIN, 0};
-    const int poll_result = poll(&descriptor, 1, 100);
-    if (poll_result < 0 && errno != EINTR)
-      return Core::DeviceRemoval::Keep;
-    if (poll_result == 0)
-    {
-      const ::Core::State state = ::Core::GetState(::Core::System::GetInstance());
-      // Debugger guards request a CPU pause before reading memory. Do not keep
-      // that CPU thread waiting for a writer which is awaiting the debugger.
-      if (state == ::Core::State::Paused || state == ::Core::State::Stopping ||
-          state == ::Core::State::Uninitialized)
-        return Core::DeviceRemoval::Keep;
-    }
-    else if (descriptor.revents & (POLLERR | POLLNVAL))
-    {
-      return Core::DeviceRemoval::Keep;
-    }
+    else if (bytes_read == 0)
+      return Acquisition::Disconnected;
+    else if (errno != EINTR)
+      return errno == EAGAIN ? Acquisition::Unavailable : Acquisition::Disconnected;
   }
+}
+
+PipeDevice::Acquisition PipeDevice::PrepareBatch(std::chrono::steady_clock::time_point deadline,
+                                                 const std::function<bool()>& cancelled)
+{
+  while (true)
+  {
+    if (m_acquisition_faulted)
+      return Acquisition::Disconnected;
+    if (cancelled())
+      return Acquisition::Cancelled;
+    if (std::chrono::steady_clock::now() >= deadline)
+      return Acquisition::TimedOut;
+    const auto result = ReadBatch();
+    if (result != Acquisition::Unavailable)
+      return result;
+    // Short sleeps bound debugger/shutdown cancellation independently of the
+    // shared acquisition watchdog. Completed ports are never polled again.
+    pollfd descriptor{m_fd, POLLIN, 0};
+    const int polled = poll(&descriptor, 1, 2);
+    if ((polled < 0 && errno != EINTR) || descriptor.revents & (POLLERR | POLLNVAL))
+      return Acquisition::Disconnected;
+  }
+}
+
+void PipeDevice::PublishControls()
+{
+  for (const auto& [input, value] : m_pending_controls)
+    input->SetState(value);
+  m_pending_controls.clear();
+}
+
+void PipeDevice::CommitBatch()
+{
+  PublishControls();
+  ++m_batch_sequence;
+  DEBUG_LOG_FMT(SLIPPI_INPUT, "event=pipe_batch_consumed device={} batch_sequence={}", m_name,
+                m_batch_sequence);
 }
 
 void PipeDevice::AddAxis(const std::string& name, double value)
@@ -211,10 +246,10 @@ void PipeDevice::SetAxis(const std::string& entry, double value)
   double lo = (0.5 - std::min(0.5, value)) * 2.0;
   auto search_hi = m_axes.find(entry + " +");
   if (search_hi != m_axes.end())
-    search_hi->second->SetState(hi);
+    m_pending_controls[search_hi->second] = hi;
   auto search_lo = m_axes.find(entry + " -");
   if (search_lo != m_axes.end())
-    search_lo->second->SetState(lo);
+    m_pending_controls[search_lo->second] = lo;
 }
 
 bool PipeDevice::ParseCommand(const std::string& command)
@@ -229,7 +264,7 @@ bool PipeDevice::ParseCommand(const std::string& command)
   {
     auto search = m_buttons.find(tokens[1]);
     if (search != m_buttons.end())
-      search->second->SetState(tokens[0] == "PRESS" ? 1.0 : 0.0);
+      m_pending_controls[search->second] = tokens[0] == "PRESS" ? 1.0 : 0.0;
   }
   else if (tokens[0] == "SET")
   {
